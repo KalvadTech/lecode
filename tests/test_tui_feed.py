@@ -7,14 +7,13 @@ from io import StringIO
 import pytest
 from rich.console import Console
 
-from lecode.config.models import Config
 from lecode.tui.feed import TOOL_CALL_MAX_LEN, Feed
-from lecode.tui.themes import load_theme
+from lecode.tui.themes import THEME
 
 
 @pytest.fixture
 def theme():
-    return load_theme("default", Config())
+    return THEME
 
 
 def make_feed(theme, collapse_thinking=True, force_terminal=False):
@@ -194,3 +193,47 @@ def test_error_emits_ansi_when_terminal(theme, monkeypatch):
     rendered = out.getvalue()
     assert "kaput" in rendered
     assert "\x1b[" in rendered
+
+
+# -- transient activity indicator ------------------------------------------------
+
+
+def test_activity_line_shown(theme):
+    feed, out = make_feed(theme)
+    feed.activity_start("thinking")
+    assert "thinking…" in out.getvalue()
+
+
+def test_activity_erased_by_next_output(theme):
+    feed, out = make_feed(theme)
+    feed.activity_start("thinking")
+    feed.stream_start()
+    feed.stream_token("hello")
+    text = out.getvalue()
+    assert "\x1b[K" in text  # erase-line emitted
+    assert text.rstrip().endswith("hello")
+
+
+def test_activity_tick_cycles_frames(theme):
+    feed, out = make_feed(theme)
+    feed.activity_start("thinking")
+    feed.activity_tick()
+    feed.activity_tick()
+    text = out.getvalue()
+    assert text.count("thinking…") == 3  # initial draw + two ticks
+
+
+def test_activity_stop_idempotent(theme):
+    feed, out = make_feed(theme)
+    feed.activity_stop()  # nothing shown: no-op, no crash
+    feed.activity_start("running bash")
+    feed.activity_stop()
+    feed.activity_stop()
+    assert out.getvalue().count("running bash…") == 1
+
+
+def test_tool_call_erases_activity(theme):
+    feed, out = make_feed(theme)
+    feed.activity_start("thinking")
+    feed.tool_call("bash", "ls")
+    assert "⚙ bash(ls)" in out.getvalue()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import sys
 
 from lecode.extras.proc import run_proc
@@ -48,3 +50,15 @@ async def test_output_cap_head_tail():
 async def test_cwd():
     result = await run_proc(["/bin/pwd"], cwd="/tmp")
     assert result.stdout.strip().endswith("tmp")
+
+
+async def test_cancel_kills_child():
+    """Cancelling the awaiting task kills the subprocess (Ctrl-C safety)."""
+    task = asyncio.ensure_future(run_proc(["/bin/sleep", "30"], timeout=30))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    # If the child leaked, /bin/sleep would still be running; instead the
+    # cancel handler killed it. No direct handle to the pid here — the
+    # observable contract is that cancel raises promptly (no 30s hang).

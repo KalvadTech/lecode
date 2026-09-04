@@ -3,7 +3,7 @@
 Printed to the normal scrollback right before the chat opens: one line per
 subsystem explaining exactly what was loaded (config files, provider,
 prompt, AGENTS.md context, skills, agents, memory, tools, permissions,
-hooks, LSP, MCP, theme). Headless mode never shows it.
+hooks, LSP, MCP). Headless mode never shows it.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from lecode.agent.builder import Runtime
     from lecode.config.loader import LoadedConfig
     from lecode.config.models import Config
+    from lecode.extras.mcp_client import ServerStatus
     from lecode.providers import ProviderSpec
     from lecode.session.storage import Session, SessionStore
     from lecode.tui.themes import Theme
@@ -72,6 +73,7 @@ def build_load_report(
     read_only: bool = False,
     models_origin: str | None = None,
     models_count: int = 0,
+    mcp_servers: list[ServerStatus] | None = None,
 ) -> list[LoadStep]:
     """Collect the per-subsystem lines describing what this session loaded."""
     from lecode.memory import memory_root  # deferred: pulls in the store layer
@@ -193,7 +195,31 @@ def build_load_report(
         )
     )
 
-    # mcp
+    # mcp — with live statuses when the caller connected the servers first
+    if mcp_servers is not None:
+        lines: list[str] = []
+        for s in mcp_servers:
+            if s.state == "connected":
+                lines.append(f"{s.name}: connected · {s.tools} tools")
+            elif s.state == "failed":
+                lines.append(f"{s.name}: failed — {s.error or 'connect error'}")
+            else:
+                lines.append(f"{s.name}: disabled")
+        exa_missing = (
+            config.mcp.enable_exa
+            and not os.environ.get("EXA_API_KEY")
+            and not any(s.name == "exa" for s in mcp_servers)
+        )
+        if exa_missing:
+            lines.append("exa: no EXA_API_KEY")
+        if not lines:
+            steps.append(LoadStep("mcp", "no servers", SKIP))
+        else:
+            degraded = exa_missing or any(s.state == "failed" for s in mcp_servers)
+            steps.append(LoadStep("mcp", "\n".join(lines), WARN if degraded else OK))
+        return steps
+
+    # no live statuses (tests, headless): report the configuration only
     mcp_bits: list[str] = []
     mcp_status = OK
     if config.mcp.enable_exa:
@@ -211,9 +237,6 @@ def build_load_report(
         steps.append(LoadStep("mcp", " · ".join(mcp_bits), mcp_status))
     else:
         steps.append(LoadStep("mcp", "no servers", SKIP))
-
-    # theme
-    steps.append(LoadStep("theme", config.ui.theme))
 
     return steps
 
@@ -270,9 +293,10 @@ def show_loading_screen(
     read_only: bool = False,
     models_origin: str | None = None,
     models_count: int = 0,
+    mcp_servers: list[ServerStatus] | None = None,
 ) -> None:
     """Build the report and print it. Never raises into startup."""
-    from lecode.tui.themes import load_theme
+    from lecode.tui.themes import THEME
 
     try:
         steps = build_load_report(
@@ -288,9 +312,9 @@ def show_loading_screen(
             read_only=read_only,
             models_origin=models_origin,
             models_count=models_count,
+            mcp_servers=mcp_servers,
         )
-        theme = load_theme(config.ui.theme, config, cwd)
-        render_loading_screen(console, theme, session_name=session.meta.name, steps=steps, cwd=cwd)
+        render_loading_screen(console, THEME, session_name=session.meta.name, steps=steps, cwd=cwd)
     except Exception:
         # The loading screen is informational; it must never break startup.
         import logging

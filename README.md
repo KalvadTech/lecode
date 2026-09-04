@@ -20,7 +20,6 @@ just your terminal, an OpenAI-compatible model, and a sharp set of tools.
 │  – hooks        none configured                                        │
 │  ✓ lsp          enabled                                                │
 │  ! mcp          exa (no EXA_API_KEY)                                   │
-│  ✓ theme        default                                                │
 ╰─────────────────── ~/github.com/you/your-project ─────────────────────╯
 ```
 
@@ -75,7 +74,7 @@ as `lecode-agent` — the command stays `lecode`.)
 ## Quickstart
 
 ```sh
-lecode --setup                       # provider, API key, model, theme — 30 s
+lecode --setup                       # import from pi/opencode or answer 4 questions
 export OPENROUTER_API_KEY=sk-or-...  # or keep the key in config.toml
 cd your-project
 lecode                               # name the session, then ask for something

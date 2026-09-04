@@ -7,12 +7,24 @@ later, lifecycle hooks. Kills on timeout and caps captured output head/tail.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_MAX_OUTPUT = 1_000_000  # bytes
 
 TRUNCATION_MARKER = "\n… [output truncated: {skipped} bytes elided] …\n"
+
+
+def _kill(proc: asyncio.subprocess.Process) -> None:
+    """Kill the whole process group — ``sh -c`` children must not survive."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
 
 
 @dataclass(frozen=True)
@@ -56,6 +68,7 @@ async def run_proc(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         limit=max_output_bytes * 2,
+        start_new_session=True,  # own process group so _kill works on trees
     )
     timed_out = False
     try:
@@ -65,11 +78,17 @@ async def run_proc(
         )
     except TimeoutError:
         timed_out = True
-        proc.kill()
+        _kill(proc)
         try:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=5.0)
         except TimeoutError:
             stdout_b, stderr_b = b"", b""
+    except asyncio.CancelledError:
+        # Caller aborted (Ctrl-C): never leave the child running.
+        _kill(proc)
+        with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        raise
     stdout, out_truncated = _cap(stdout_b or b"", max_output_bytes)
     stderr, err_truncated = _cap(stderr_b or b"", max_output_bytes)
     exit_code = proc.returncode if proc.returncode is not None else -1

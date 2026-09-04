@@ -418,8 +418,85 @@ def test_cli_resume_unknown_ref_fails(cli_env, monkeypatch):
     assert "nope" in result.output
 
 
+def test_cli_bare_resume_picks_from_folder_sessions(cli_env, monkeypatch):
+    SessionStore().create("old-session", cli_env)
+    SessionStore().create("other-folder", cli_env / "other")
+
+    async def _pick(store, cwd, **kwargs):
+        assert [m.name for m in store.list_sessions() if m.cwd == str(cwd)] == ["old-session"]
+        return store.resolve("old-session")
+
+    monkeypatch.setattr("lecode.tui.name_prompt.pick_session", _pick)
+    result = runner.invoke(cli_app, ["-r"])
+    assert result.exit_code == 0
+    assert FakeTui.instances[0].session.name == "old-session"
+
+
+def test_cli_bare_resume_abort_exits_zero(cli_env, monkeypatch):
+    async def _pick(store, cwd, **kwargs):
+        return None
+
+    monkeypatch.setattr("lecode.tui.name_prompt.pick_session", _pick)
+    result = runner.invoke(cli_app, ["-r"])
+    assert result.exit_code == 0
+    assert FakeTui.instances == []
+    assert SessionStore().list_sessions() == []
+
+
 def test_cli_no_color_lands_in_config(cli_env, monkeypatch):
     monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("x"))
     result = runner.invoke(cli_app, ["--no-color"])
     assert result.exit_code == 0
     assert FakeTui.instances[0].config.ui.no_color is True
+
+
+async def test_ctrl_c_cancels_shell_out(tmp_path, monkeypatch):
+    """Ctrl-C during a !cmd stops the command instead of quitting."""
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    task = asyncio.ensure_future(app._submit("!sleep 30"))
+    await wait_for(lambda: app._shell_task is not None)
+    assert app.cancel_action() is True
+    await task
+    assert "shell command cancelled" in out.getvalue()
+    assert app.cancel_action() is False  # nothing running now
+
+
+async def test_ctrl_c_cancels_plan_loop(tmp_path, monkeypatch):
+    """Ctrl-C during /loop stops the loop instead of quitting."""
+    app, provider, out = make_blocking_app(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.md"
+    plan.write_text("- [ ] task one\n- [ ] task two\n")
+    app.start_loop(plan, max_iterations=5)
+    await wait_for(lambda: len(provider.requests) == 1)
+    assert app.cancel_turn() is False  # the loop is not the turn task
+    assert app.cancel_action() is True
+    await app._loop_task
+    assert "loop stopped" in out.getvalue()
+    assert app._status.state is StatusLineState.IDLE
+
+
+async def test_context_meter_grows_during_turn(tmp_path, monkeypatch):
+    """Streamed tokens and tool results grow ctx before real usage lands."""
+    script = [
+        {
+            "text": ["word " * 200],  # ~1k chars ≈ 250 estimated tokens
+            "tool_calls": [{"name": "list_dir", "arguments": '{"path": "."}'}],
+        },
+        {"text": "done", "usage": {"input_tokens": 5000, "output_tokens": 300}},
+    ]
+    app, _, _ = make_app(tmp_path, monkeypatch, script)
+    start_ctx = app._status.context_used
+    await app._submit("hi")
+    await app._turn_task
+    # during the turn the meter grew from streaming; at turn end the real
+    # usage (context_tokens = 5000) replaced the estimate
+    assert app._status.context_used == 5000
+    assert app._status.context_used != start_ctx
+
+
+async def test_estimate_tokens():
+    from lecode.tui.statusline import estimate_tokens
+
+    assert estimate_tokens("") == 1
+    assert estimate_tokens("abcd") == 1
+    assert estimate_tokens("x" * 400) == 100

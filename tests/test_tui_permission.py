@@ -283,7 +283,14 @@ async def test_pipe_approval_escape_denies(tmp_path, monkeypatch):
         await wait_for(lambda: "denied by user" in out.getvalue())
         inp.send_text("/quit\n")
         assert await task == 0
-    # the command string only ever appears in the tool-call echo and the ask
-    tool_lines = [line for line in out.getvalue().splitlines() if "should-not-run" in line]
+    # the command string only ever appears in the tool-call echo and the ask;
+    # strip the transient activity indicator's fragments (erase-line + spinner)
+    import re
+
+    tool_lines = [
+        re.sub(r"\x1b\[K|[\r⠋⠙⠹⠸⠼ⴚ⦧⦇⦏⦉]|thinking…", "", line).lstrip()
+        for line in out.getvalue().splitlines()
+        if "should-not-run" in line
+    ]
     assert tool_lines
     assert all(line.startswith(("⚙", "allow bash")) for line in tool_lines)

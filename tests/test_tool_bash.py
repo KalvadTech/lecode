@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import stat
+import subprocess
 
 from lecode.agent.tools import bash
 from lecode.agent.tools.bash import MAX_OUTPUT_BYTES
@@ -74,3 +77,15 @@ async def test_rtk_failure_fails_open(tool_ctx, tmp_path, monkeypatch):
 async def test_runs_in_cwd(tool_ctx, tmp_path):
     result = await bash.make_tool().run({"command": "pwd"}, tool_ctx)
     assert os.path.realpath(result.content.splitlines()[0]) == os.path.realpath(tmp_path)
+
+
+async def test_cancel_kills_child(tool_ctx):
+    """Ctrl-C mid-bash-tool kills the subprocess instead of leaking it."""
+    tool = bash.make_tool()
+    task = asyncio.ensure_future(tool.run({"command": "sleep 30"}, tool_ctx))
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    out = subprocess.run(["pgrep", "-f", "sleep 30"], capture_output=True).stdout
+    assert out == b""

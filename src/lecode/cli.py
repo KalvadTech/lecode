@@ -64,14 +64,20 @@ EXIT_MAX_TURNS = 3
 #: Value produced when ``-p/--prompt`` is given without an argument: read stdin.
 _STDIN_MARKER = ""
 
+#: Value produced when ``-r/--resume`` is given without an argument: pick from
+#: the current folder's sessions.
+_PICK_MARKER = ""
 
-class _PromptOption(TyperOption):
-    """``-p/--prompt`` whose value is optional: a bare flag reads stdin.
+
+class _OptionalValueOption(TyperOption):
+    """Option whose value is optional: a bare flag yields ``self.marker``.
 
     The vendored click parser has no optional-value options, so the value
     lookup is made tolerant: when no argument (or another flag) follows, the
-    option yields the stdin marker instead of raising.
+    option yields the marker instead of raising.
     """
+
+    marker: str = ""
 
     def add_to_parser(self, parser: Any, ctx: Any) -> None:
         super().add_to_parser(parser, ctx)
@@ -79,20 +85,34 @@ class _PromptOption(TyperOption):
 
         def tolerant_get_value(option_name: str, option: Any, state: Any) -> Any:
             if option.obj is self and (not state.rargs or state.rargs[0].startswith(("-",))):
-                return _STDIN_MARKER
+                return self.marker
             return original(option_name, option, state)
 
         parser._get_value_from_state = tolerant_get_value
 
 
+class _PromptOption(_OptionalValueOption):
+    """``-p/--prompt``: a bare flag reads stdin."""
+
+    marker = _STDIN_MARKER
+
+
+class _ResumeOption(_OptionalValueOption):
+    """``-r/--resume``: a bare flag opens the folder's session picker."""
+
+    marker = _PICK_MARKER
+
+
 class _LeCodeGroup(TyperGroup):
-    """Swaps the ``--prompt`` parameter for the optional-value variant."""
+    """Swaps ``--prompt``/``--resume`` for the optional-value variants."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         for param in self.params:
             if param.name == "prompt":
                 param.__class__ = _PromptOption
+            elif param.name == "resume":
+                param.__class__ = _ResumeOption
 
 
 app = typer.Typer(
@@ -556,10 +576,20 @@ def run_interactive(
         except WorktreeError as e:
             typer.echo(f"error: {e}", err=True)
             return EXIT_STARTUP
+        except KeyboardInterrupt:
+            return EXIT_OK
         cwd = wt_info.path
         typer.echo(f"worktree: {wt_info.path} (branch {wt_info.branch})")
     store = SessionStore()
-    if resume is not None or continue_last:
+    if resume == _PICK_MARKER:
+        # Bare -r: list this folder's sessions and let the user pick one.
+        from lecode.tui.name_prompt import pick_session
+
+        meta = asyncio.run(pick_session(store, cwd))
+        if meta is None:
+            return EXIT_OK
+        session = store.open(meta.id)
+    elif resume is not None or continue_last:
         try:
             meta = store.resolve(resume)
         except (SessionNotFoundError, AmbiguousSessionError) as e:
@@ -580,7 +610,10 @@ def run_interactive(
     except (AuthError, ValueError) as e:
         typer.echo(f"error: {e}", err=True)
         return EXIT_STARTUP
-    models = fetch_catalog(client)
+    try:
+        models = fetch_catalog(client)
+    except KeyboardInterrupt:
+        return EXIT_OK
 
     runtime = build_runtime(
         config,
@@ -593,6 +626,15 @@ def run_interactive(
     )
     for warning in runtime.warnings:
         typer.echo(f"warning: {warning}", err=True)
+
+    # Connect MCP servers up front so the loading screen can report live
+    # per-server status; TuiApp.run skips re-attaching when already present.
+    from lecode.extras.mcp_client import attach_mcp
+
+    try:
+        mcp_manager = asyncio.run(attach_mcp(runtime.registry, runtime.ctx))
+    except KeyboardInterrupt:
+        return EXIT_OK
 
     from rich.console import Console
 
@@ -614,6 +656,7 @@ def run_interactive(
         read_only=read_only,
         models_origin=models.origin,
         models_count=models.remote_count,
+        mcp_servers=mcp_manager.status(),
     )
 
     tui = TuiApp(config, runtime, client, session, store, console=console, catalog=models.catalog)
@@ -729,7 +772,12 @@ def callback(
     ] = False,
     resume: Annotated[
         str | None,
-        typer.Option("--resume", "-r", help="Resume a session by id, id prefix, or name."),
+        typer.Option(
+            "--resume",
+            "-r",
+            help="Resume a session by id, id prefix, or name. "
+            "Given without a value, pick from this folder's sessions.",
+        ),
     ] = None,
     continue_last: Annotated[
         bool,

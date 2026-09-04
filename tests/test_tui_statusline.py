@@ -1,4 +1,4 @@
-"""Tests for the fixed statusline rendering and git-branch lookup."""
+"""Tests for the fixed three-line statusline and git-info lookup."""
 
 from __future__ import annotations
 
@@ -6,24 +6,24 @@ import subprocess
 
 import pytest
 
-from lecode.config.models import Config
 from lecode.tui.statusline import (
     SPINNER_FRAMES,
-    CachedBranch,
+    CachedGitInfo,
+    GitInfo,
     StatusLineState,
     StatusState,
     context_meter,
     format_cost,
-    git_branch,
+    git_info,
     human_tokens,
     render_statusline,
 )
-from lecode.tui.themes import load_theme
+from lecode.tui.themes import THEME
 
 
 @pytest.fixture
 def theme():
-    return load_theme("default", Config())
+    return THEME
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ def state(tmp_path):
         agent="default",
         model="openai/gpt-5-mini",
         cwd=tmp_path / "myproj",
-        git_branch="main",
+        git=GitInfo(branch="main", commit="abc1234", diff="±2 +10 -3"),
         context_used=84000,
         context_window=200000,
         input_tokens=1234,
@@ -42,27 +42,32 @@ def state(tmp_path):
     )
 
 
-def test_full_layout_contains_every_segment(state, theme):
-    plain = render_statusline(state, theme, width=200).plain
-    for segment in (
-        "my-session",
-        "default",
-        "openai/gpt-5-mini",
-        "myproj:main",
-        "ctx ▓▓▓░░ 42%",
-        "↑1.2k ↓0.4k",
-        "$0.0123",
-        "ready",
-    ):
-        assert segment in plain
-    assert " · " in plain
+def test_line1_folder_git(state, theme):
+    line1 = render_statusline(state, theme, width=200).plain.splitlines()[0]
+    assert line1 == "myproj · abc1234 · main · ±2 +10 -3"
 
 
-def test_branch_omitted_when_none(state, theme):
-    state.git_branch = None
-    plain = render_statusline(state, theme).plain
-    assert "myproj" in plain
-    assert "myproj:" not in plain
+def test_line1_omits_missing_git_fields(state, theme):
+    state.git = GitInfo(branch="main")
+    line1 = render_statusline(state, theme, width=200).plain.splitlines()[0]
+    assert line1 == "myproj · main"
+    state.git = None
+    line1 = render_statusline(state, theme, width=200).plain.splitlines()[0]
+    assert line1 == "myproj"
+
+
+def test_line2_model_cost_context(state, theme):
+    line2 = render_statusline(state, theme, width=200).plain.splitlines()[1]
+    assert line2 == "openai/gpt-5-mini · $0.0123 · ctx ▓▓▓░░ 84.0k/200.0k 42%"
+
+
+def test_line3_session_agent_tokens_state(state, theme):
+    line3 = render_statusline(state, theme, width=200).plain.splitlines()[2]
+    assert line3 == "my-session · default · ↑1.2k ↓0.4k · ready"
+
+
+def test_renders_exactly_three_lines(state, theme):
+    assert len(render_statusline(state, theme, width=200).plain.splitlines()) == 3
 
 
 def test_meter_percents():
@@ -90,27 +95,28 @@ def test_spinner_frames_cycle(state, theme):
     for frame in (0, 3, 10, 13):
         state.spinner_frame = frame
         state.state = StatusLineState.RUNNING
-        plain = render_statusline(state, theme).plain
-        assert SPINNER_FRAMES[frame % len(SPINNER_FRAMES)] in plain
-        assert "ready" not in plain
+        line3 = render_statusline(state, theme).plain.splitlines()[2]
+        assert SPINNER_FRAMES[frame % len(SPINNER_FRAMES)] in line3
+        assert "ready" not in line3
 
 
 def test_awaiting_approval(state, theme):
     state.state = StatusLineState.AWAITING_APPROVAL
-    assert "awaiting approval" in render_statusline(state, theme, width=200).plain
+    line3 = render_statusline(state, theme, width=200).plain.splitlines()[2]
+    assert "awaiting approval" in line3
 
 
 def test_queued_and_steered_suffixes(state, theme):
     state.queued = 2
     state.steered = 1
-    plain = render_statusline(state, theme).plain
-    assert "+2q" in plain
-    assert "+1s" in plain
+    line3 = render_statusline(state, theme).plain.splitlines()[2]
+    assert "+2q" in line3
+    assert "+1s" in line3
     state.queued = 0
     state.steered = 0
-    plain = render_statusline(state, theme).plain
-    assert "+2q" not in plain
-    assert "+1s" not in plain
+    line3 = render_statusline(state, theme).plain.splitlines()[2]
+    assert "+2q" not in line3
+    assert "+1s" not in line3
 
 
 def test_wide_width_no_truncation(state, theme):
@@ -118,21 +124,14 @@ def test_wide_width_no_truncation(state, theme):
     assert "…" not in text.plain
 
 
-def test_narrow_width_truncates_cwd_first(state, theme):
-    text = render_statusline(state, theme, width=100)
-    assert len(text.plain) <= 100
-    assert "myproj:main" not in text.plain
-    assert "my-session" in text.plain
-    assert "…" in text.plain
+def test_narrow_width_truncates_each_line(state, theme):
+    text = render_statusline(state, theme, width=30)
+    lines = text.plain.splitlines()
+    assert len(lines) == 3
+    assert all(len(line) <= 30 for line in lines)
 
 
-def test_narrower_width_then_truncates_session(state, theme):
-    text = render_statusline(state, theme, width=90)
-    assert len(text.plain) <= 90
-    assert "my-session" not in text.plain
-
-
-async def test_git_branch_in_repo(tmp_path):
+async def test_git_info_in_repo(tmp_path):
     subprocess.run(["git", "init", "-b", "feature"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         [
@@ -150,44 +149,73 @@ async def test_git_branch_in_repo(tmp_path):
         check=True,
         capture_output=True,
     )
-    assert await git_branch(tmp_path) == "feature"
+    info = await git_info(tmp_path)
+    assert info is not None
+    assert info.branch == "feature"
+    assert info.commit is not None and len(info.commit) == 7
+    assert info.diff is None  # clean tree
 
 
-async def test_git_branch_outside_repo(tmp_path):
-    assert await git_branch(tmp_path) is None
+async def test_git_info_dirty_tree(tmp_path):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "a.txt").write_text("hello\n")
+    subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True, capture_output=True)
+    info = await git_info(tmp_path)
+    assert info is not None
+    assert info.diff == "±1 +1"
 
 
-async def test_cached_branch_ttl(monkeypatch, tmp_path):
+async def test_git_info_outside_repo(tmp_path):
+    assert await git_info(tmp_path) is None
+
+
+async def test_cached_git_info_ttl(monkeypatch, tmp_path):
     calls = []
 
     async def fake(cwd):
         calls.append(str(cwd))
-        return "main"
+        return GitInfo(branch="main")
 
-    monkeypatch.setattr("lecode.tui.statusline.git_branch", fake)
+    monkeypatch.setattr("lecode.tui.statusline.git_info", fake)
     now = [100.0]
-    cache = CachedBranch(clock=lambda: now[0])  # default TTL is 5s
-    assert await cache.get(tmp_path) == "main"
-    assert await cache.get(tmp_path) == "main"
+    cache = CachedGitInfo(clock=lambda: now[0])  # default TTL is 5s
+    assert (await cache.get(tmp_path)).branch == "main"
+    assert (await cache.get(tmp_path)).branch == "main"
     assert len(calls) == 1
     now[0] += 4.0
-    assert await cache.get(tmp_path) == "main"
+    await cache.get(tmp_path)
     assert len(calls) == 1
     now[0] += 2.0
-    assert await cache.get(tmp_path) == "main"
+    await cache.get(tmp_path)
     assert len(calls) == 2
 
 
-async def test_cached_branch_caches_none(monkeypatch, tmp_path):
+async def test_cached_git_info_caches_none(monkeypatch, tmp_path):
     calls = []
 
     async def fake(cwd):
         calls.append(str(cwd))
         return None
 
-    monkeypatch.setattr("lecode.tui.statusline.git_branch", fake)
+    monkeypatch.setattr("lecode.tui.statusline.git_info", fake)
     now = [50.0]
-    cache = CachedBranch(ttl_s=5.0, clock=lambda: now[0])
+    cache = CachedGitInfo(ttl_s=5.0, clock=lambda: now[0])
     assert await cache.get(tmp_path) is None
     assert await cache.get(tmp_path) is None
     assert len(calls) == 1

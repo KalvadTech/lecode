@@ -1,17 +1,18 @@
 """The one fixed statusline.
 
-Single-line layout, segments joined with ``·``::
+Three-line layout::
 
-    <session-name> · <agent> · <model> · <cwd-basename>:<git-branch> ·
-    ctx ▓▓▓░░ 42% · ↑1.2k ↓0.4k · $0.0123 · <state>
+    <folder> · <commit> · <branch> · <diff-stat>
+    <model> · <cost> · ctx ▓▓▓░░ 84.0k/200k 42%
+    <session-name> · <agent> · ↑1.2k ↓0.4k · <state>
 
-Not user-configurable beyond theme colors. On narrow terminals the
-cwd/branch segment is truncated first, then the session name.
+Not user-configurable. Lines are truncated to the terminal width.
 """
 
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -29,10 +30,6 @@ SPINNER_FRAMES = "⠋⠙⠹⠸⠼ⴚ⦧⦇⦏⦉"
 #: Width of the context meter in blocks.
 METER_BLOCKS = 5
 
-#: Minimum visible length before a segment stops absorbing truncation.
-_MIN_CWD_LEN = 6
-_MIN_SESSION_LEN = 4
-
 #: Git subprocess timeout in seconds.
 _GIT_TIMEOUT_S = 2.0
 
@@ -46,6 +43,15 @@ class StatusLineState(StrEnum):
 
 
 @dataclass
+class GitInfo:
+    """Snapshot of the repo state shown on the statusline's first line."""
+
+    branch: str | None = None
+    commit: str | None = None  # short hash
+    diff: str | None = None  # compact shortstat, e.g. "±3 +10 -2"
+
+
+@dataclass
 class StatusState:
     """Everything the statusline needs to render one frame."""
 
@@ -53,7 +59,7 @@ class StatusState:
     agent: str
     model: str
     cwd: Path | str
-    git_branch: str | None = None
+    git: GitInfo | None = None
     context_used: int = 0
     context_window: int = 200_000
     input_tokens: int = 0
@@ -74,6 +80,11 @@ def human_tokens(n: int) -> str:
     return str(n)
 
 
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate (~4 chars/token) for live context growth."""
+    return max(1, len(text) // 4)
+
+
 def format_cost(cost_usd: float) -> str:
     """Four decimals under one dollar, two decimals at or above."""
     return f"${cost_usd:.4f}" if cost_usd < 1 else f"${cost_usd:.2f}"
@@ -84,14 +95,6 @@ def context_meter(used: int, window: int) -> tuple[str, int]:
     ratio = min(max(used / window, 0.0), 1.0) if window > 0 else 0.0
     filled = 0 if ratio == 0 else math.ceil(ratio * METER_BLOCKS)
     return "▓" * filled + "░" * (METER_BLOCKS - filled), round(ratio * 100)
-
-
-def _truncate(s: str, max_len: int) -> str:
-    if len(s) <= max_len:
-        return s
-    if max_len <= 1:
-        return s[:max_len]
-    return s[: max_len - 1] + "…"
 
 
 def _state_segment(state: StatusState) -> tuple[str, str]:
@@ -113,78 +116,95 @@ def _state_segment(state: StatusState) -> tuple[str, str]:
 
 
 def render_statusline(state: StatusState, theme: Theme, width: int = 100) -> Text:
-    """Render the fixed statusline, truncating to ``width`` if needed."""
-    cwd_seg = Path(state.cwd).name
-    if state.git_branch:
-        cwd_seg += f":{state.git_branch}"
+    """Render the fixed three-line statusline, truncating each line to ``width``."""
+    sep = Text(" · ", style=theme.muted)
+
+    # Line 1: folder · commit · branch · diff
+    line1 = Text()
+    line1.append(Path(state.cwd).name, style=theme.accent)
+    if state.git is not None:
+        for value, style in (
+            (state.git.commit, theme.muted),
+            (state.git.branch, theme.muted),
+            (state.git.diff, theme.muted),
+        ):
+            if value:
+                line1.append_text(sep.copy())
+                line1.append(value, style=style)
+
+    # Line 2: model · cost · ctx meter x/y pct%
     bar, pct = context_meter(state.context_used, state.context_window)
-    meter_seg = f"ctx {bar} {pct}%"
-    tokens_seg = f"↑{human_tokens(state.input_tokens)} ↓{human_tokens(state.output_tokens)}"
-    cost_seg = format_cost(state.cost_usd)
+    line2 = Text()
+    line2.append(state.model, style=theme.text)
+    line2.append_text(sep.copy())
+    line2.append(format_cost(state.cost_usd), style=theme.muted)
+    line2.append_text(sep.copy())
+    line2.append(
+        f"ctx {bar} {human_tokens(state.context_used)}/{human_tokens(state.context_window)} {pct}%",
+        style=theme.text,
+    )
+
+    # Line 3: session · agent · tokens · state
     state_seg, state_color = _state_segment(state)
-
-    session_seg = state.session_name
-    segments = [
-        session_seg,
-        state.agent,
-        state.model,
-        cwd_seg,
-        meter_seg,
-        tokens_seg,
-        cost_seg,
-        state_seg,
-    ]
-    total = sum(len(s) for s in segments) + len(" · ") * (len(segments) - 1)
-
-    overflow = total - width
-    if overflow > 0:
-        cut = min(overflow, max(0, len(cwd_seg) - _MIN_CWD_LEN))
-        cwd_seg = _truncate(cwd_seg, len(cwd_seg) - cut)
-        overflow -= cut
-    if overflow > 0:
-        cut = min(overflow, max(0, len(session_seg) - _MIN_SESSION_LEN))
-        session_seg = _truncate(session_seg, len(session_seg) - cut)
+    line3 = Text()
+    line3.append(state.session_name, style=theme.accent)
+    line3.append_text(sep.copy())
+    line3.append(state.agent, style=theme.accent)
+    line3.append_text(sep.copy())
+    line3.append(
+        f"↑{human_tokens(state.input_tokens)} ↓{human_tokens(state.output_tokens)}",
+        style=theme.muted,
+    )
+    line3.append_text(sep.copy())
+    line3.append(state_seg, style=getattr(theme, state_color))
 
     text = Text()
-    sep = Text(" · ", style=theme.muted)
-    text.append(session_seg, style=theme.accent)
-    text.append_text(sep)
-    text.append(state.agent, style=theme.accent)
-    text.append_text(sep.copy())
-    text.append(state.model, style=theme.text)
-    text.append_text(sep.copy())
-    text.append(cwd_seg, style=theme.muted)
-    text.append_text(sep.copy())
-    text.append(f"ctx {bar} {pct}%", style=theme.text)
-    text.append_text(sep.copy())
-    text.append(tokens_seg, style=theme.muted)
-    text.append_text(sep.copy())
-    text.append(cost_seg, style=theme.muted)
-    text.append_text(sep.copy())
-    text.append(state_seg, style=getattr(theme, state_color))
-    if len(text.plain) > width:
-        text.truncate(width, overflow="ellipsis")
+    for line in (line1, line2, line3):
+        line.truncate(width, overflow="ellipsis")
+        text.append_text(line)
+        text.append("\n")
+    text.truncate(max(0, len(text.plain) - 1))  # drop trailing newline
     return text
 
 
-async def git_branch(cwd: Path | str) -> str | None:
-    """Return the current git branch for ``cwd``, or ``None`` on any failure."""
+async def _git(args: list[str], cwd: Path | str) -> str | None:
+    """Run one git command, returning stripped stdout or ``None`` on failure."""
     try:
-        result = await run_proc(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=cwd,
-            timeout=_GIT_TIMEOUT_S,
-        )
+        result = await run_proc(["git", *args], cwd=cwd, timeout=_GIT_TIMEOUT_S)
     except OSError:
         return None
     if result.exit_code != 0 or result.timed_out:
         return None
-    branch = result.stdout.strip()
-    return branch or None
+    return result.stdout.strip() or None
 
 
-class CachedBranch:
-    """Small per-directory cache for :func:`git_branch` with a TTL."""
+def _compact_shortstat(text: str | None) -> str | None:
+    """Compact ``git diff --shortstat`` output: ``±3 +10 -2``; ``None`` when clean."""
+    if not text:
+        return None
+    files = re.search(r"(\d+) files? changed", text)
+    ins = re.search(r"(\d+) insertions?", text)
+    dele = re.search(r"(\d+) deletions?", text)
+    parts = [f"±{files.group(1)}" if files else ""]
+    if ins:
+        parts.append(f"+{ins.group(1)}")
+    if dele:
+        parts.append(f"-{dele.group(1)}")
+    return " ".join(p for p in parts if p) or None
+
+
+async def git_info(cwd: Path | str) -> GitInfo | None:
+    """Return branch/commit/diff-stat for ``cwd``, or ``None`` outside a repo."""
+    branch = await _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+    if branch is None:
+        return None
+    commit = await _git(["rev-parse", "--short", "HEAD"], cwd)
+    stat = await _git(["diff", "--shortstat", "HEAD"], cwd)
+    return GitInfo(branch=branch, commit=commit, diff=_compact_shortstat(stat))
+
+
+class CachedGitInfo:
+    """Small per-directory cache for :func:`git_info` with a TTL."""
 
     def __init__(
         self,
@@ -193,15 +213,15 @@ class CachedBranch:
     ) -> None:
         self._ttl_s = ttl_s
         self._clock = clock
-        self._cache: dict[str, tuple[str | None, float]] = {}
+        self._cache: dict[str, tuple[GitInfo | None, float]] = {}
 
-    async def get(self, cwd: Path | str) -> str | None:
-        """Return the branch for ``cwd``, re-querying at most once per TTL."""
+    async def get(self, cwd: Path | str) -> GitInfo | None:
+        """Return the git info for ``cwd``, re-querying at most once per TTL."""
         key = str(cwd)
         now = self._clock()
         cached = self._cache.get(key)
         if cached is not None and now - cached[1] < self._ttl_s:
             return cached[0]
-        branch = await git_branch(cwd)
-        self._cache[key] = (branch, now)
-        return branch
+        info = await git_info(cwd)
+        self._cache[key] = (info, now)
+        return info

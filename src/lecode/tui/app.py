@@ -89,12 +89,13 @@ from lecode.tui.notify import Notifier
 from lecode.tui.permission import ApprovalPrompt, approval_prompt_text
 from lecode.tui.pickers import TriggerCompleter, persona_names
 from lecode.tui.statusline import (
-    CachedBranch,
+    CachedGitInfo,
     StatusLineState,
     StatusState,
+    estimate_tokens,
     render_statusline,
 )
-from lecode.tui.themes import load_theme
+from lecode.tui.themes import THEME
 
 if TYPE_CHECKING:
     from lecode.agent.builder import Runtime
@@ -131,7 +132,7 @@ class TuiApp:
         self._runtime = runtime
         self._store = store
         self._session = session
-        self._theme = load_theme(config.ui.theme, config)
+        self._theme = THEME
         self._console = console or Console(no_color=config.ui.no_color)
         self._feed = Feed(self._console, self._theme, collapse_thinking=config.ui.collapse_thinking)
 
@@ -189,11 +190,13 @@ class TuiApp:
             cwd=self._cwd,
             context_window=config.agent.context_window,
         )
-        self._branch = CachedBranch()
+        self._git = CachedGitInfo()
         self._history: list[dict[str, Any]] = [{"role": "system", "content": runtime.system_prompt}]
         self._history += store.load_for_model(session)
 
         self._turn_task: asyncio.Task[None] | None = None
+        #: In-flight ``!cmd`` shell-out (a submit task); Ctrl-C cancels it.
+        self._shell_task: asyncio.Task[None] | None = None
         self._pending: set[asyncio.Task[None]] = set()  # in-flight submit tasks
         self._quit = False
         self._app: Application[None] | None = None
@@ -286,13 +289,6 @@ class TuiApp:
             self._feed.info(f"copied {len(self._last_response)} chars")
         else:
             self._feed.error("clipboard unavailable")
-
-    def set_theme(self, name: str) -> None:
-        """``/theme``: swap the theme and re-render the statusline colors."""
-        self._theme = load_theme(name, self._config)
-        self._config.ui.theme = name
-        self._feed.set_theme(self._theme)
-        self._invalidate()
 
     def switch_session(self, session: Session) -> None:
         """Point the app (runner, checker, history, statusline) at ``session``."""
@@ -494,6 +490,8 @@ class TuiApp:
                 return
             if self.cancel_turn():
                 return
+            if self.cancel_action():
+                return
             if event.current_buffer.text:
                 event.current_buffer.reset()
                 return
@@ -575,7 +573,7 @@ class TuiApp:
         )
         toolbar = Window(
             content=FormattedTextControl(self._toolbar),
-            height=1,
+            height=3,
             dont_extend_height=True,
         )
         return Application(
@@ -592,11 +590,14 @@ class TuiApp:
 
     async def run(self, *, input: Input | None = None, output: Output | None = None) -> int:
         """Run the interactive loop until quit; returns the exit code."""
-        self._status.git_branch = await self._branch.get(self._cwd)
+        self._status.git = await self._git.get(self._cwd)
         self._app = self._build_app(input=input, output=output)
         self._runtime.ctx.approval_callback = self._request_approval
         self._runtime.ctx.extras["advisor_handoff"] = self._request_advisor_handoff
-        await attach_mcp(self._runtime.registry, self._runtime.ctx)
+        # MCP may already be attached (cli attaches it before the loading
+        # screen to report live server status); attach only if not.
+        if self._runtime.ctx.extras.get(MCP_EXTRA) is None:
+            await attach_mcp(self._runtime.registry, self._runtime.ctx)
         self._file_lister.prefetch()
         self._spinner_task = asyncio.ensure_future(self._spinner_loop())
         try:
@@ -633,7 +634,8 @@ class TuiApp:
             await asyncio.sleep(SPINNER_INTERVAL_S)
             if self._status.state is StatusLineState.RUNNING:
                 self._status.spinner_frame += 1
-            self._status.git_branch = await self._branch.get(self._cwd)
+            self._feed.activity_tick()
+            self._status.git = await self._git.get(self._cwd)
             if self._app is not None:
                 self._app.invalidate()
 
@@ -767,7 +769,15 @@ class TuiApp:
         if not cmd:
             return
         self._feed.user_message(("!!" if share_with_llm else "!") + cmd)
-        result = await run_proc(["bash", "-c", cmd], cwd=self._cwd, timeout=SHELL_TIMEOUT_S)
+        self._feed.activity_start("running shell")
+        self._shell_task = asyncio.current_task()
+        try:
+            result = await run_proc(["bash", "-c", cmd], cwd=self._cwd, timeout=SHELL_TIMEOUT_S)
+        except asyncio.CancelledError:
+            self._feed.info("shell command cancelled")
+            return
+        finally:
+            self._shell_task = None
         output = result.stdout
         if result.stderr:
             output = f"{output}\n{result.stderr}" if output else result.stderr
@@ -852,6 +862,17 @@ class TuiApp:
             return True
         return False
 
+    def cancel_action(self) -> bool:
+        """Cancel a non-turn action (plan loop, ``!cmd`` shell-out); ``True``
+        if one was cancelled. Checked by Ctrl-C after :meth:`cancel_turn`."""
+        if self.loop_running():
+            self._loop_task.cancel()
+            return True
+        if self._shell_task is not None and not self._shell_task.done():
+            self._shell_task.cancel()
+            return True
+        return False
+
     def _next_queued(self) -> MessageContent | None:
         """Pop the next pending message, steer queue (priority) first."""
         for queue in (self._steer_queue, self._input_queue):
@@ -869,6 +890,8 @@ class TuiApp:
         message: dict[str, Any] = {"role": "user", "content": text}
         self._history.append(message)
         self._store.append_message(self._session, message)
+        # Live context growth: the submitted message joins the next prompt.
+        self._status.context_used += estimate_tokens(describe_content(text))
         run_history = self._history
         if overlay is not None:
             # Persona overlay: an extra system message for this turn only —
@@ -877,6 +900,7 @@ class TuiApp:
             run_history += self._history[1:]
         self._status.state = StatusLineState.RUNNING
         self._feed.stream_start()
+        self._feed.activity_start("thinking")
         self._signals.emit(START)
         result = None
         cancelled = False
@@ -925,6 +949,7 @@ class TuiApp:
         """A direct ``@agent`` submission: the subagent answers as a side
         query — the exchange is not persisted to the session."""
         self._status.state = StatusLineState.RUNNING
+        self._feed.activity_start(f"@{name} working")
         outcome: SubagentOutcome | None = None
         try:
             outcome = await run_subagent(
@@ -958,6 +983,7 @@ class TuiApp:
             self._history.append(message)
             self._store.append_message(self._session, message)
             self._feed.stream_start()
+            self._feed.activity_start("thinking")
             result = await self._runner.run(list(self._history), on_event=self._on_event)
             # The runner persisted everything; rebuild from disk like _run_turn.
             self._history = [{"role": "system", "content": self._runtime.system_prompt}]
@@ -1016,6 +1042,7 @@ class TuiApp:
             self._feed.assistant_text(f"## {phase}\n\n{output}")
 
         self._status.state = StatusLineState.RUNNING
+        self._feed.activity_start("chain running")
         try:
             result = await run_chain(
                 factory,
@@ -1038,13 +1065,20 @@ class TuiApp:
     def _on_event(self, event: Any) -> None:
         """Runner event → feed rendering (+ statusline state)."""
         if isinstance(event, Token):
+            # Live context growth: streamed output becomes next round's input.
+            self._status.context_used += estimate_tokens(event.text)
             self._feed.stream_token(event.text)
         elif isinstance(event, Reasoning):
+            self._status.context_used += estimate_tokens(event.text)
             self._feed.stream_token(event.text, thinking=True)
         elif isinstance(event, ToolCall):
+            self._status.context_used += estimate_tokens(event.arguments)
             self._feed.tool_call(event.name, " ".join(event.arguments.split()))
+            self._feed.activity_start(f"running {event.name}")
         elif isinstance(event, ToolResult):
+            self._status.context_used += estimate_tokens(event.content)
             self._feed.tool_result(event.name, event.content, event.is_error)
+            self._feed.activity_start("thinking")
         elif isinstance(event, Error):
             self._feed.error(event.message)
             self._spawn(self._notifier.error())
@@ -1062,8 +1096,10 @@ class TuiApp:
         """
         if isinstance(event, ToolCall):
             self._feed.tool_call(f"{agent}/{event.name}", " ".join(event.arguments.split()))
+            self._feed.activity_start(f"@{agent} running {event.name}")
         elif isinstance(event, ToolResult):
             self._feed.tool_result(f"{agent}/{event.name}", event.content, event.is_error)
+            self._feed.activity_start(f"@{agent} working")
         elif isinstance(event, Error):
             self._feed.error(f"{agent}: {event.message}")
         elif isinstance(event, Retrying):

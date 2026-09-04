@@ -22,6 +22,18 @@ MAX_TIMEOUT_S = 600.0
 MAX_OUTPUT_BYTES = 60_000
 
 
+def _kill_tree(proc: asyncio.subprocess.Process) -> None:
+    """Kill the process *group* — ``sh -c`` children must not survive."""
+    import os
+    import signal
+
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+
+
 async def _run_shell(
     command: str, cwd: Path, timeout: float, idle_timeout: float, max_bytes: int
 ) -> tuple[bytes, int, bool, bool]:
@@ -34,30 +46,38 @@ async def _run_shell(
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,  # own process group so _kill_tree works
     )
     buffer = bytearray()
     deadline = time.monotonic() + timeout
     idle_deadline = time.monotonic() + idle_timeout
     timed_out = idle_killed = False
 
-    while True:
-        wait = min(deadline, idle_deadline) - time.monotonic()
-        if wait <= 0:
-            timed_out = time.monotonic() >= deadline
-            idle_killed = not timed_out
-            proc.kill()
-            break
-        try:
-            chunk = await asyncio.wait_for(proc.stdout.read(65536), timeout=wait)
-        except TimeoutError:
-            timed_out = time.monotonic() >= deadline
-            idle_killed = not timed_out
-            proc.kill()
-            break
-        if not chunk:  # EOF: process exited and pipes drained
-            break
-        buffer += chunk
-        idle_deadline = time.monotonic() + idle_timeout
+    try:
+        while True:
+            wait = min(deadline, idle_deadline) - time.monotonic()
+            if wait <= 0:
+                timed_out = time.monotonic() >= deadline
+                idle_killed = not timed_out
+                _kill_tree(proc)
+                break
+            try:
+                chunk = await asyncio.wait_for(proc.stdout.read(65536), timeout=wait)
+            except TimeoutError:
+                timed_out = time.monotonic() >= deadline
+                idle_killed = not timed_out
+                _kill_tree(proc)
+                break
+            if not chunk:  # EOF: process exited and pipes drained
+                break
+            buffer += chunk
+            idle_deadline = time.monotonic() + idle_timeout
+    except asyncio.CancelledError:
+        # Turn aborted (Ctrl-C): never leave the child running.
+        _kill_tree(proc)
+        with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        raise
 
     with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(proc.wait(), timeout=5.0)

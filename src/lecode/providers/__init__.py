@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from lecode.auth import ResolvedKey
 from lecode.config.models import Config
 from lecode.providers.catalog import Catalog, ModelInfo
 from lecode.providers.openai_compat import ChatClient, ProviderError
-from lecode.providers.openrouter import APP_HEADERS, OPENROUTER_BASE_URL
+from lecode.providers.openrouter import APP_HEADERS, OPENROUTER_BASE_URL, USAGE_INCLUDE_BODY
 
 __all__ = [
     "Catalog",
@@ -36,6 +36,8 @@ class ProviderSpec:
     headers: dict[str, str] = field(default_factory=dict)
     auth_policy: Literal["auto", "required", "none"] = "auto"
     tls_verify: bool = True
+    #: Provider-level request extensions merged into every payload.
+    extra_body: dict[str, Any] = field(default_factory=dict)
 
 
 def resolve_provider(
@@ -63,11 +65,14 @@ def resolve_provider(
     name = cli_provider or config.llm.provider
     base_url = config.llm.base_url
     headers: dict[str, str] = {}
+    extra_body: dict[str, Any] = {}
     auth_policy = config.llm.auth_policy
 
     if name == "openrouter":
         base_url = base_url or OPENROUTER_BASE_URL
         headers = dict(APP_HEADERS)
+        # usage.include → OpenRouter reports the real billed cost per request.
+        extra_body = dict(USAGE_INCLUDE_BODY)
     elif name in config.custom_providers:
         custom = config.custom_providers[name]
         base_url = base_url or custom.base_url
@@ -86,6 +91,7 @@ def resolve_provider(
         headers=headers,
         auth_policy=auth_policy,
         tls_verify=config.llm.tls_verify,
+        extra_body=extra_body,
     )
 
 
@@ -96,4 +102,5 @@ def build_client(spec: ProviderSpec, resolved_key: ResolvedKey) -> ChatClient:
         api_key=resolved_key.key,
         default_headers=spec.headers,
         tls_verify=spec.tls_verify,
+        default_extra_body=spec.extra_body,
     )

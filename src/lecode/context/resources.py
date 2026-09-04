@@ -1,11 +1,9 @@
 """Loading of embedded static data with user overrides.
 
-Kinds (``prompts``, ``themes``) ship inside the package under
-``lecode/data/`` and are read via ``importlib.resources``. Prompts can be
-overridden or extended in the global config dir
-(``~/.config/lecode/prompts/``) or the project dir (``.lecode/prompts/``);
-themes skip the global layer (embedded < project only). Precedence for
-prompts: embedded < global < project.
+The ``prompts`` kind ships inside the package under ``lecode/data/`` and is
+read via ``importlib.resources``. Prompts can be overridden or extended in
+the global config dir (``~/.config/lecode/prompts/``) or the project dir
+(``.lecode/prompts/``). Precedence: embedded < global < project.
 """
 
 from __future__ import annotations
@@ -14,7 +12,7 @@ from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
 
-KINDS = ("prompts", "themes")
+KINDS = ("prompts",)
 
 #: Directory inside a project that holds lecode-local overrides.
 PROJECT_DIR_NAME = ".lecode"
@@ -54,16 +52,14 @@ def _check_kind(kind: str) -> None:
         raise ValueError(f"unknown resource kind '{kind}'; expected one of {KINDS}")
 
 
-def load_text(kind: str, name: str, cwd: Path | None = None, *, include_global: bool = True) -> str:
+def load_text(kind: str, name: str, cwd: Path | None = None) -> str:
     """Load a resource by relative name, highest-precedence layer first.
 
     ``name`` is a path relative to the kind dir, extension included
-    (e.g. ``load_text("prompts", "personas/reviewer.md")``). With
-    ``include_global=False`` the global config-dir layer is skipped
-    (used by themes: embedded < project only).
+    (e.g. ``load_text("prompts", "personas/reviewer.md")``).
     """
     _check_kind(kind)
-    for root in (_project_root(kind, cwd), _global_root(kind) if include_global else None):
+    for root in (_project_root(kind, cwd), _global_root(kind)):
         if root is not None:
             candidate = root / name
             if candidate.is_file():
@@ -94,12 +90,12 @@ def _walk_fs(root: Path, prefix: str, out: set[str]) -> None:
             out.add(rel)
 
 
-def list_available(kind: str, cwd: Path | None = None, *, include_global: bool = True) -> list[str]:
+def list_available(kind: str, cwd: Path | None = None) -> list[str]:
     """List resource names across all layers (later layers shadow earlier)."""
     _check_kind(kind)
     names: set[str] = set()
     _walk_embedded(_embedded_root(kind), "", names)
-    for root in (_global_root(kind) if include_global else None, _project_root(kind, cwd)):
+    for root in (_global_root(kind), _project_root(kind, cwd)):
         if root is not None and root.is_dir():
             _walk_fs(root, "", names)
     return sorted(names)

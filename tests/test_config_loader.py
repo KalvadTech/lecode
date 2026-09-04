@@ -42,7 +42,6 @@ def test_defaults_validate_from_empty():
     assert config.compaction.buffer_tokens == 20000
     assert config.agent.max_turns == 500
     assert config.tools.enabled == {}
-    assert config.ui.theme == "default"
     assert config.permissions.mode == "yolo"
     assert config.notifications.volume == 0.5
     assert config.mcp.enable_exa is True
@@ -88,9 +87,9 @@ def test_load_yaml_when_no_toml(global_dir, tmp_path):
 
 
 def test_load_json_when_no_toml_or_yaml(global_dir, tmp_path):
-    (global_dir / "config.json").write_text(json.dumps({"ui": {"theme": "nord"}}))
+    (global_dir / "config.json").write_text(json.dumps({"ui": {"no_color": True}}))
     result = load_config(cwd=tmp_path)
-    assert result.config.ui.theme == "nord"
+    assert result.config.ui.no_color is True
 
 
 def test_toml_preferred_over_yaml(global_dir, tmp_path):

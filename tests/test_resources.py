@@ -1,44 +1,10 @@
-"""Tests for prompt/theme resource loading and override precedence."""
+"""Tests for prompt resource loading and override precedence."""
 
 from __future__ import annotations
-
-import json
 
 import pytest
 
 from lecode.context.resources import list_available, load_text
-
-REQUIRED_COLOR_KEYS = {
-    "accent",
-    "text",
-    "muted",
-    "error",
-    "warning",
-    "success",
-    "thinking",
-    "tool",
-    "permission",
-}
-
-EXPECTED_THEMES = {
-    "default",
-    "dark",
-    "light",
-    "monokai",
-    "solarized-dark",
-    "solarized-light",
-    "dracula",
-    "nord",
-    "gruvbox",
-    "catppuccin-mocha",
-    "tokyo-night",
-    "one-dark",
-    "rose-pine",
-    "everforest",
-    "kanagawa",
-    "ayu",
-    "minimal",
-}
 
 EXPECTED_PERSONAS = {
     "default",
@@ -70,8 +36,6 @@ def global_dir(tmp_path, monkeypatch):
 def test_load_embedded_resource(tmp_path):
     text = load_text("prompts", "minimal.md", cwd=tmp_path)
     assert "coding agent" in text
-    theme = json.loads(load_text("themes", "default.json", cwd=tmp_path))
-    assert theme["name"] == "default"
 
 
 def test_global_overrides_embedded(global_dir, tmp_path):
@@ -100,22 +64,11 @@ def test_unknown_kind_raises(tmp_path):
 
 
 def test_list_available_merges_layers(global_dir, tmp_path):
-    (global_dir / "themes").mkdir(parents=True)
-    (global_dir / "themes" / "my-theme.json").write_text("{}")
-    names = list_available("themes", cwd=tmp_path)
-    assert "default.json" in names
-    assert "my-theme.json" in names
-
-
-def test_all_bundled_themes_parse(tmp_path):
-    names = list_available("themes", cwd=tmp_path)
-    assert {n.removesuffix(".json") for n in names} >= EXPECTED_THEMES
-    for name in names:
-        theme = json.loads(load_text("themes", name, cwd=tmp_path))
-        assert isinstance(theme["name"], str)
-        assert set(theme["colors"]) == REQUIRED_COLOR_KEYS
-        for value in theme["colors"].values():
-            assert value.startswith("#") and len(value) == 7
+    (global_dir / "prompts").mkdir(parents=True)
+    (global_dir / "prompts" / "my-prompt.md").write_text("{}")
+    names = list_available("prompts", cwd=tmp_path)
+    assert "minimal.md" in names
+    assert "my-prompt.md" in names
 
 
 def test_all_personas_load(tmp_path):

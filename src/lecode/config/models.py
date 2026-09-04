@@ -87,7 +87,6 @@ class UiConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    theme: str = "default"
     collapse_thinking: bool = True
     show_welcome: bool = True
     hidden_models: list[str] = Field(default_factory=list)
@@ -250,6 +249,5 @@ class Config(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     advisor: AdvisorConfig = Field(default_factory=AdvisorConfig)
     hooks: dict[str, list[str]] = Field(default_factory=dict)
-    colors: dict[str, str] = Field(default_factory=dict)
     model_presets: dict[str, str] = Field(default_factory=dict)
     custom_providers: dict[str, CustomProvider] = Field(default_factory=dict)

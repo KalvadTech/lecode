@@ -1,4 +1,4 @@
-"""Tests for settings slash commands (model/theme/permissions/…) and prefixes."""
+"""Tests for settings slash commands (model/permissions/…) and prefixes."""
 
 from __future__ import annotations
 
@@ -47,6 +47,8 @@ async def test_models_lists_catalog_and_marks_current(tmp_path, monkeypatch):
     rendered = out.getvalue()
     assert "deepseek/deepseek-v4-flash (current)" in rendered
     assert "anthropic/claude-sonnet-4" in rendered
+    # context size humanized and per-million pricing shown next to each model
+    assert "deepseek/deepseek-v4-flash (current) — ctx 1.0M · $0.09/M in · $0.18/M out" in rendered
 
 
 async def test_models_respects_hidden_models(tmp_path, monkeypatch):
@@ -153,36 +155,6 @@ async def test_toggle_cycles_readonly_yolo(tmp_path, monkeypatch):
     await app.handle_command("/toggle")
     assert app.runtime.ctx.permission_checker.mode == "yolo"
     assert out.getvalue().count("permission mode:") >= 2
-
-
-# -- /theme /themes ----------------------------------------------------------------------
-
-
-async def test_theme_show_and_switch(tmp_path, monkeypatch):
-    app, _, out = make_app(tmp_path, monkeypatch, [])
-    await app.handle_command("/theme")
-    assert "theme: default" in out.getvalue()
-    old_theme = app._feed._theme
-    await app.handle_command("/theme dracula")
-    assert app.config.ui.theme == "dracula"
-    assert app._feed._theme is not old_theme
-    assert app._feed._theme.name == "dracula"
-    assert "theme: dracula" in out.getvalue()
-
-
-async def test_theme_unknown_errors(tmp_path, monkeypatch):
-    app, _, out = make_app(tmp_path, monkeypatch, [])
-    await app.handle_command("/theme not-a-theme")
-    assert "unknown theme: not-a-theme" in out.getvalue()
-    assert app.config.ui.theme == "default"
-
-
-async def test_themes_lists_and_marks_current(tmp_path, monkeypatch):
-    app, _, out = make_app(tmp_path, monkeypatch, [])
-    await app.handle_command("/themes")
-    rendered = out.getvalue()
-    assert "default (current)" in rendered
-    assert "dracula" in rendered
 
 
 # -- /memory /hooks /agents /queue /btw /copy ----------------------------------------------

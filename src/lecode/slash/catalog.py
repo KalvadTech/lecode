@@ -33,8 +33,6 @@ BUILTIN_COMMANDS: list[tuple[str, str]] = [
     ("permissions", "Show permission rules"),
     ("mode", "Switch permission mode"),
     ("toggle", "Toggle a tool on/off"),
-    ("theme", "Switch the theme"),
-    ("themes", "List available themes"),
     ("prompt", "Switch prompt style/persona"),
     ("editsys", "Edit the system prompt"),
     ("add", "Add a file to context"),

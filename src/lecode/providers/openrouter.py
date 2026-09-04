@@ -21,6 +21,9 @@ APP_HEADERS: dict[str, str] = {
     "X-Title": "lecode",
 }
 
+#: Ask OpenRouter to return the real billed cost (``usage.cost``) per request.
+USAGE_INCLUDE_BODY: dict[str, Any] = {"usage": {"include": True}}
+
 
 def openrouter_client(
     api_key: str | None = None,
@@ -29,7 +32,11 @@ def openrouter_client(
     timeout: Any = None,
     tls_verify: bool = True,
 ) -> ChatClient:
-    """A :class:`ChatClient` preconfigured for OpenRouter."""
+    """A :class:`ChatClient` preconfigured for OpenRouter.
+
+    ``usage.include`` makes OpenRouter return the real billed cost per
+    request (``usage.cost``), so spend is provider-reported, not estimated.
+    """
     headers = dict(APP_HEADERS)
     if extra_headers:
         headers.update(extra_headers)
@@ -39,6 +46,7 @@ def openrouter_client(
         default_headers=headers,
         timeout=timeout,
         tls_verify=tls_verify,
+        default_extra_body=dict(USAGE_INCLUDE_BODY),
     )
 
 

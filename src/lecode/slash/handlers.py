@@ -44,7 +44,7 @@ from lecode.slash.registry import (
 from lecode.tui import name_prompt
 from lecode.tui.clipboard import osc8_link
 from lecode.tui.input import open_in_editor
-from lecode.tui.themes import list_themes
+from lecode.tui.statusline import human_tokens
 
 if TYPE_CHECKING:
     from lecode.context.skills import SkillRegistry
@@ -86,7 +86,7 @@ lecode — cheat sheet
   @file / @agent   mention a file or agent
 
   /new /resume /session /undo /redo /rewind /retry /compact
-  /model /thinking /permissions /theme /memory /hooks /quit"""
+  /model /thinking /permissions /memory /hooks /quit"""
 
 
 # -- helpers ------------------------------------------------------------------
@@ -381,7 +381,7 @@ async def cmd_model(app: TuiApp, args: list[str]) -> None:
             app.feed.info(f"model: {current} (not in catalog)")
             return
         app.feed.info(
-            f"model: {info.id} ({info.name}) — ctx {info.context_window} · "
+            f"model: {info.id} ({info.name}) — ctx {human_tokens(info.context_window)} · "
             f"${info.pricing.prompt}/M in · ${info.pricing.completion}/M out"
         )
         return
@@ -413,7 +413,7 @@ async def cmd_models(app: TuiApp, args: list[str]) -> None:
             continue
         marker = " (current)" if entry.id == app.config.llm.model else ""
         lines.append(
-            f"{entry.id}{marker} — ctx {entry.context_window} · "
+            f"{entry.id}{marker} — ctx {human_tokens(entry.context_window)} · "
             f"${entry.pricing.prompt}/M in · ${entry.pricing.completion}/M out"
         )
     app.feed.info("\n".join(lines) or "(no models)")
@@ -480,7 +480,7 @@ async def cmd_models_subagent(app: TuiApp, args: list[str]) -> None:
             continue
         marker = " (subagent)" if entry.id == effective else ""
         lines.append(
-            f"{entry.id}{marker} — ctx {entry.context_window} · "
+            f"{entry.id}{marker} — ctx {human_tokens(entry.context_window)} · "
             f"${entry.pricing.prompt}/M in · ${entry.pricing.completion}/M out"
         )
     lines.append("")
@@ -608,26 +608,6 @@ async def cmd_advisor(app: TuiApp, args: list[str]) -> None:
 
 
 # -- interface ------------------------------------------------------------------
-
-
-async def cmd_theme(app: TuiApp, args: list[str]) -> None:
-    """``/theme [name]``: show or switch the theme."""
-    if not args:
-        app.feed.info(f"theme: {app.config.ui.theme}")
-        return
-    name = args[0]
-    if name not in list_themes(cwd=app.runtime.ctx.cwd):
-        app.feed.error(f"unknown theme: {name} (see /themes)")
-        return
-    app.set_theme(name)
-    app.feed.info(f"theme: {name}")
-
-
-async def cmd_themes(app: TuiApp, args: list[str]) -> None:
-    """``/themes``: list themes, current one marked."""
-    current = app.config.ui.theme
-    lines = [f"{n} (current)" if n == current else n for n in list_themes(cwd=app.runtime.ctx.cwd)]
-    app.feed.info("\n".join(lines))
 
 
 async def cmd_memory(app: TuiApp, args: list[str]) -> None:
@@ -1041,10 +1021,6 @@ TUTOR_TOPICS: dict[str, str] = {
         "with model/prompt/permission overlays. Tab cycles build/plan; @mention or "
         "the task tool invokes subagents. /agents lists them."
     ),
-    "themes": (
-        "/theme <name> switches, /themes lists. Themes are JSON files in "
-        ".lecode/themes (project-local; see docs/configuration.md)."
-    ),
 }
 
 
@@ -1222,8 +1198,6 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     (
         "Interface",
         [
-            "theme",
-            "themes",
             "notifications",
             "copy",
             "queue",
@@ -1278,8 +1252,6 @@ _HANDLERS = {
     "permissions": cmd_permissions,
     "mode": cmd_permissions,
     "toggle": cmd_toggle,
-    "theme": cmd_theme,
-    "themes": cmd_themes,
     "memory": cmd_memory,
     "hooks": cmd_hooks,
     "agents": cmd_agents,
@@ -1324,7 +1296,6 @@ ARG_HINTS = {
     "reasoning": "[none|low|medium|high]",
     "permissions": "[mode]",
     "mode": "[mode]",
-    "theme": "[name]",
     "memory": "[show|edit|search|log|notes]",
     "btw": "<text>",
     "help": "[command]",

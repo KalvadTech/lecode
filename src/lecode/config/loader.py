@@ -40,9 +40,6 @@ schema_version = 1
 # api_key = "sk-or-..."            # or use the OPENROUTER_API_KEY env var
 # thinking = "medium"              # none | low | medium | high
 # auth_policy = "auto"             # auto | required | none
-
-# [ui]
-# theme = "default"
 """
 
 

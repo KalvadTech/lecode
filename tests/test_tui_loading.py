@@ -19,7 +19,7 @@ from lecode.tui.loading import (
     render_loading_screen,
     show_loading_screen,
 )
-from lecode.tui.themes import load_theme
+from lecode.tui.themes import THEME
 
 
 @pytest.fixture
@@ -31,7 +31,7 @@ def env(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _make(env, config=None, *, name="demo", resumed=False):
+def _make(env, config=None, *, name="demo", resumed=False, **report_kwargs):
     config = config or Config()
     store = SessionStore()
     session = store.create(name, env, model=config.llm.model)
@@ -50,6 +50,7 @@ def _make(env, config=None, *, name="demo", resumed=False):
         resumed=resumed,
         provider_spec=spec,
         key_source="none",
+        **report_kwargs,
     )
     return steps, session, store, runtime, loaded, spec
 
@@ -74,7 +75,6 @@ def test_report_covers_all_subsystems(env):
         "hooks",
         "lsp",
         "mcp",
-        "theme",
     ]
 
 
@@ -215,6 +215,49 @@ def test_mcp_step_states(env, monkeypatch):
     assert "exa" in mcp.detail and "context7" in mcp.detail and "mine" in mcp.detail
 
 
+def test_mcp_step_live_statuses(env, monkeypatch):
+    from lecode.extras.mcp_client import ServerStatus
+    from lecode.tui.loading import WARN
+
+    monkeypatch.setenv("EXA_API_KEY", "k")
+    servers = [
+        ServerStatus("context7", "connected", tools=2),
+        ServerStatus("exa", "connected", tools=3),
+        ServerStatus("mine", "failed", error="TimeoutError: connect"),
+        ServerStatus("off", "disabled"),
+    ]
+    steps, *_ = _make(env, mcp_servers=servers)
+    mcp = _step(steps, "mcp")
+    assert mcp.status == WARN  # one server failed
+    assert "exa: connected · 3 tools" in mcp.detail
+    assert "context7: connected · 2 tools" in mcp.detail
+    assert "mine: failed — TimeoutError: connect" in mcp.detail
+    assert "off: disabled" in mcp.detail
+
+
+def test_mcp_step_live_statuses_all_connected(env, monkeypatch):
+    from lecode.extras.mcp_client import ServerStatus
+    from lecode.tui.loading import OK
+
+    monkeypatch.setenv("EXA_API_KEY", "k")
+    steps, *_ = _make(env, mcp_servers=[ServerStatus("exa", "connected", tools=3)])
+    mcp = _step(steps, "mcp")
+    assert mcp.status == OK
+    assert mcp.detail == "exa: connected · 3 tools"
+
+
+def test_mcp_step_live_statuses_exa_key_missing(env, monkeypatch):
+    from lecode.extras.mcp_client import ServerStatus
+    from lecode.tui.loading import WARN
+
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    steps, *_ = _make(env, mcp_servers=[ServerStatus("mine", "connected", tools=1)])
+    mcp = _step(steps, "mcp")
+    assert mcp.status == WARN
+    assert "mine: connected · 1 tools" in mcp.detail
+    assert "exa: no EXA_API_KEY" in mcp.detail
+
+
 def test_permissions_step(env):
     steps, *_ = _make(
         env,
@@ -230,11 +273,10 @@ def test_render_outputs_panel_with_all_labels(env):
     steps, _session, *_ = _make(env)
     out = io.StringIO()
     console = Console(file=out, force_terminal=False, no_color=True, width=100)
-    theme = load_theme("default", Config(), env)
-    render_loading_screen(console, theme, session_name="demo", steps=steps, cwd=env)
+    render_loading_screen(console, THEME, session_name="demo", steps=steps, cwd=env)
     text = out.getvalue()
     assert "lecode" in text and "demo" in text
-    for label in ("config", "provider", "prompt", "tools", "theme"):
+    for label in ("config", "provider", "prompt", "tools"):
         assert label in text
     assert "✓" in text and "–" in text  # ok and skip marks  # noqa: RUF001
 
@@ -274,7 +316,7 @@ def test_interactive_startup_prints_loading_screen(env, monkeypatch, capsys):
     code = cli.run_interactive()
     assert code == 0
     out = capsys.readouterr().out
-    assert "lecode" in out and "provider" in out and "theme" in out
+    assert "lecode" in out and "provider" in out
 
 
 async def _fake_name_prompt(store):

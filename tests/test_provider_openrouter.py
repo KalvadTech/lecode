@@ -126,3 +126,27 @@ async def test_routing_extra_body_reaches_request():
 def test_routing_extra_body_minimal():
     assert routing_extra_body() == {"provider": {}}
     assert routing_extra_body(["openai"]) == {"provider": {"order": ["openai"]}}
+
+
+@respx.mock
+async def test_usage_include_requested_and_billed_cost_normalized():
+    """usage.include asks OpenRouter for the real cost; usage.cost → cost_usd."""
+    chunk = {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}
+    usage = {
+        "choices": [],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.000123},
+    }
+    body = f"data: {json.dumps(chunk)}\n\ndata: {json.dumps(usage)}\n\ndata: [DONE]\n\n".encode()
+
+    async def aiter():
+        yield body
+
+    route = respx.post(CHAT_URL).mock(return_value=httpx.Response(200, content=aiter()))
+    async with openrouter_client() as client:
+        completed = await collect(
+            client.stream_chat([{"role": "user", "content": "hi"}], model="m")
+        )
+
+    payload = json.loads(route.calls.last.request.content)
+    assert payload["usage"] == {"include": True}
+    assert completed.usage["cost_usd"] == 0.000123

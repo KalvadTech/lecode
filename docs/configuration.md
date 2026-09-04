@@ -77,11 +77,13 @@ default context window and zeroed pricing.
 
 | field | default | meaning |
 |---|---|---|
-| `theme` | `"default"` | theme name (see `/themes`) |
 | `collapse_thinking` | `true` | collapse reasoning blocks in the feed |
 | `show_welcome` | `true` | show the welcome cheat-sheet on startup |
 | `hidden_models` | `[]` | model ids hidden from `/models` |
 | `no_color` | `false` | disable colored output |
+
+The theme is fixed: one dark, Kalvad-purple palette ("kalvad"). There is no
+theme selection, no theme files, and no color overrides.
 
 ## `[permissions]`
 
@@ -197,9 +199,8 @@ Events: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`,
 `SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentEnd`. Hooks can only
 narrow permission verdicts. See [hooks.md](hooks.md).
 
-## `[colors]`, `[model_presets]`, `[custom_providers]`
+## `[model_presets]`, `[custom_providers]`
 
-- `[colors]` — theme color overrides (`name = "#hex"`).
 - `[model_presets]` — `alias = "model-id"` shortcuts added to `/models`
   (`/models-add` writes here).
 - `[custom_providers.<name>]` — extra OpenRouter-compatible providers:

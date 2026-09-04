@@ -110,6 +110,7 @@ class ChatClient:
         default_headers: dict[str, str] | None = None,
         timeout: httpx.Timeout | float | None = None,
         tls_verify: bool = True,
+        default_extra_body: dict[str, Any] | None = None,
     ) -> None:
         headers = {"Content-Type": "application/json"}
         if default_headers:
@@ -119,6 +120,8 @@ class ChatClient:
         if timeout is None:
             timeout = httpx.Timeout(30.0, connect=10.0, read=300.0)
         self.base_url = base_url.rstrip("/")
+        #: Merged into every request payload (per-call extra_body wins).
+        self._default_extra_body = dict(default_extra_body or {})
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             headers=headers,
@@ -160,6 +163,7 @@ class ChatClient:
             payload["max_tokens"] = max_tokens
         if reasoning_effort is not None:
             payload["reasoning_effort"] = reasoning_effort
+        payload.update(self._default_extra_body)
         if extra_body:
             payload.update(extra_body)
         return payload
@@ -199,6 +203,10 @@ class ChatClient:
                         raise _error_from_stream_chunk(chunk)
                     usage = chunk.get("usage")
                     if usage:
+                        # OpenRouter's usage extension reports the real billed
+                        # amount as ``cost``; normalize to our ``cost_usd``.
+                        if "cost" in usage and "cost_usd" not in usage:
+                            usage["cost_usd"] = usage["cost"]
                         yield Usage(usage=usage)
                     for choice in chunk.get("choices") or []:
                         delta = choice.get("delta") or {}
