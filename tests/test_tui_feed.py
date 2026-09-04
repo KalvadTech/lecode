@@ -34,6 +34,46 @@ def test_user_message(theme):
     assert "> fix the bug" in out.getvalue()
 
 
+# -- logbook stamps ------------------------------------------------------------
+
+
+def test_lines_carry_timestamps(theme):
+    feed, out = make_feed(theme)
+    feed.user_message("hi")
+    feed.tool_call("bash", "ls")
+    feed.tool_result("bash", "ok")
+    feed.info("note")
+    feed.error("boom")
+    feed.turn_stats(
+        context_used=100,
+        context_window=1000,
+        input_tokens=10,
+        output_tokens=5,
+        cost_usd=0.001,
+        session_cost_usd=0.002,
+    )
+    stamped = [ln for ln in out.getvalue().splitlines() if ln.startswith("[")]
+    # user, tool call, tool result, info, error, turn stats
+    assert len(stamped) == 6
+    assert all(len(ln) >= 10 and ln[1:3].isdigit() and ln[3] == ":" for ln in stamped)
+
+
+def test_metrics_suffix_on_action_lines(theme):
+    feed, out = make_feed(theme)
+    feed.metrics = lambda: (12_300, 200_000, 0.0412)
+    feed.user_message("hi")
+    feed.tool_call("bash", "ls")
+    feed.tool_result("bash", "ok")
+    rendered = out.getvalue()
+    assert rendered.count("ctx 12.3k/200.0k · $0.0412") == 3
+
+
+def test_no_metrics_suffix_when_unbound(theme):
+    feed, out = make_feed(theme)
+    feed.user_message("hi")
+    assert "ctx" not in out.getvalue()
+
+
 def test_assistant_text_renders_markdown(theme):
     feed, out = make_feed(theme)
     feed.assistant_text("# Title\n\nsome **bold** text")
@@ -100,7 +140,7 @@ def test_tool_call(theme):
 def test_tool_call_truncates_long_args(theme):
     feed, out = make_feed(theme)
     feed.tool_call("bash", "x" * 300)
-    line = next(line for line in out.getvalue().splitlines() if line.startswith("⚙"))
+    line = next(line for line in out.getvalue().splitlines() if "⚙" in line)
     assert line.endswith("…")
     assert len(line) == TOOL_CALL_MAX_LEN
 

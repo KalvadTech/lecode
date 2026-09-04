@@ -10,7 +10,7 @@ import pytest
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from rich.console import Console
-from tests.fakes import FakeProvider
+from tests.fakes import FakeProvider, sample_catalog
 from typer.testing import CliRunner
 
 from lecode.agent.builder import build_runtime
@@ -33,7 +33,9 @@ def make_app(tmp_path, monkeypatch, script, config=None):
     provider = FakeProvider(script)
     out = StringIO()
     console = Console(record=True, file=out, width=200)
-    app = TuiApp(config, runtime, provider, session, store, console=console)
+    app = TuiApp(
+        config, runtime, provider, session, store, console=console, catalog=sample_catalog()
+    )
     return app, provider, out
 
 
@@ -73,6 +75,60 @@ async def wait_for(cond, timeout=5.0):
 
 
 # -- submissions / runner wiring --------------------------------------------
+
+
+async def test_unknown_model_keeps_configured_window(tmp_path, monkeypatch):
+    """A model outside the catalog falls back to the configured window."""
+    config = Config()
+    config.llm.model = "no/such-model"
+    app, _, _ = make_app(tmp_path, monkeypatch, [], config=config)
+    assert app.status.context_window == config.agent.context_window
+
+
+def test_layout_has_separator_before_statusline(tmp_path, monkeypatch):
+    """A full-width rule splits the input box from the 3-line statusline."""
+    from prompt_toolkit.layout.containers import Window
+
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        pt_app = app._build_app(input=inp, output=DummyOutput())
+    children = pt_app.layout.container.children
+    assert isinstance(children[1], Window) and children[1].char == "─"
+    statusline = children[2]
+    assert isinstance(statusline, Window) and statusline.height == 3
+
+
+async def test_resume_restores_status_usage(tmp_path, monkeypatch):
+    """A session with stored usage opens with the statusline pre-filled."""
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    config = Config()
+    config.notifications.enabled = False
+    store = SessionStore()
+    session = store.create("resumed", tmp_path, model=config.llm.model)
+    store.append_message(session, {"role": "user", "content": "hi"})
+    store.append_message(
+        session,
+        {"role": "assistant", "content": "hello"},
+        usage={"input_tokens": 12_000, "output_tokens": 800, "cost_usd": 0.02},
+    )
+    runtime = build_runtime(config, tmp_path, session=session, store=store)
+    out = StringIO()
+    app = TuiApp(
+        config,
+        runtime,
+        FakeProvider([]),
+        session,
+        store,
+        console=Console(record=True, file=out, width=200),
+    )
+    assert app._status.context_used == 12_000
+    assert app._status.input_tokens == 12_000
+    assert app._status.output_tokens == 800
+    assert app._status.cost_usd == 0.02
+
+    # Undo drops the hidden turn from the live context line.
+    await app.handle_command("/undo")
+    assert app._status.context_used == 0
 
 
 async def test_submit_streams_answer(tmp_path, monkeypatch):
@@ -281,6 +337,19 @@ async def test_pipe_smoke_submit_answer_quit_totals(tmp_path, monkeypatch):
     assert "Session test-session: tokens 3 in / 2 out" in out.getvalue()
 
 
+async def test_pipe_slash_command_echoed(tmp_path, monkeypatch):
+    """A submitted slash command is echoed to the feed, like chat prompts."""
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        inp.send_text("/model\n")
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: "model:" in out.getvalue())
+        inp.send_text("/quit\n")
+        code = await task
+    assert code == 0
+    assert "/model" in out.getvalue()  # the echo, not just the "model:" result
+
+
 async def test_pipe_ctrl_c_exits_cleanly(tmp_path, monkeypatch):
     app, _, _ = make_app(tmp_path, monkeypatch, [])
     with create_pipe_input() as inp:
@@ -314,9 +383,9 @@ async def test_pipe_submission_recorded_in_history(tmp_path, monkeypatch):
         await wait_for(lambda: not app._turn_running() and app._turn_task is not None)
         inp.send_text("/quit\n")
         assert await task == 0
-    from lecode.tui.input import JsonlHistory, history_path
+    from lecode.tui.input import SessionHistory
 
-    assert "remember this" in JsonlHistory(history_path()).load_history_strings()
+    assert "remember this" in SessionHistory(app._store, app.session).load_history_strings()
 
 
 async def test_pipe_draft_persisted_on_eof_exit(tmp_path, monkeypatch):
@@ -326,9 +395,9 @@ async def test_pipe_draft_persisted_on_eof_exit(tmp_path, monkeypatch):
         inp.send_text("unsubmitted draft")
         inp.close()  # EOF with text still in the buffer
         assert await app.run(input=inp, output=DummyOutput()) == 0
-    from lecode.tui.input import JsonlHistory, history_path
+    from lecode.tui.input import SessionHistory
 
-    assert JsonlHistory(history_path()).load_draft() == "unsubmitted draft"
+    assert SessionHistory(app._store, app.session).load_draft() == "unsubmitted draft"
 
 
 # -- CLI wiring ------------------------------------------------------------------
@@ -343,6 +412,7 @@ class FakeTui:
 
     def __init__(self, config, runtime, provider, session, store, **kwargs):
         self.config = config
+        self.runtime = runtime
         self.session = session
         FakeTui.instances.append(self)
 
@@ -387,6 +457,27 @@ def test_cli_interactive_creates_named_session(cli_env, monkeypatch):
     assert len(FakeTui.instances) == 1
     assert FakeTui.instances[0].session.name == "chatty"
     assert [m.name for m in SessionStore().list_sessions()] == ["chatty"]
+
+
+def test_cli_default_mode_is_yolo(cli_env, monkeypatch):
+    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("s"))
+    result = runner.invoke(cli_app, [])
+    assert result.exit_code == 0
+    assert FakeTui.instances[0].runtime.ctx.permission_checker.mode == "yolo"
+
+
+def test_cli_safe_flag_forces_readonly(cli_env, monkeypatch):
+    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("s"))
+    result = runner.invoke(cli_app, ["--safe"])
+    assert result.exit_code == 0
+    assert FakeTui.instances[0].runtime.ctx.permission_checker.mode == "readonly"
+
+
+def test_cli_read_only_alias_still_works(cli_env, monkeypatch):
+    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("s"))
+    result = runner.invoke(cli_app, ["--read-only"])
+    assert result.exit_code == 0
+    assert FakeTui.instances[0].runtime.ctx.permission_checker.mode == "readonly"
 
 
 def test_cli_resume_keeps_name_without_prompt(cli_env, monkeypatch):

@@ -1,15 +1,13 @@
-"""Static model catalog.
+"""Model catalog.
 
-A bundled JSON snapshot of well-known models (OpenRouter ids) with context
-window, pricing, modality, and capability flags. Loaded via
-``importlib.resources``; :meth:`Catalog.merge` is the hook Phase 3 uses to
-fold in the live OpenRouter catalog refresh.
+The catalog is fetched live from the provider's ``/models`` endpoint at
+startup (see :mod:`lecode.providers.live`); there is **no bundled snapshot**.
+:meth:`Catalog.default` returns an empty catalog — every consumer fails open
+on unknown models (no pricing → cost 0, no modality flags → let the provider
+decide, no context window → the configured default).
 """
 
 from __future__ import annotations
-
-import json
-from importlib import resources
 
 from pydantic import BaseModel
 
@@ -58,9 +56,8 @@ class Catalog:
 
     @classmethod
     def default(cls) -> Catalog:
-        """Load the bundled catalog from ``lecode.data/models.json``."""
-        text = resources.files("lecode.data").joinpath("models.json").read_text("utf-8")
-        return cls([ModelInfo.model_validate(e) for e in json.loads(text)])
+        """An empty catalog — model data comes from the live ``/models`` fetch."""
+        return cls([])
 
     def get(self, query: str) -> ModelInfo:
         """Resolve ``query`` by exact id, unique id prefix, or name (any case)."""

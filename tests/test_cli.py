@@ -22,6 +22,14 @@ def test_version_flag_short():
     assert __version__ in result.stdout
 
 
+def test_help_flag_short():
+    """``-h`` is an alias for ``--help``."""
+    for flag in ("-h", "--help"):
+        result = runner.invoke(app, [flag])
+        assert result.exit_code == EXIT_OK
+        assert "Usage: lecode" in result.output
+
+
 def test_startup_fails_when_binaries_missing(monkeypatch):
     monkeypatch.setattr("lecode.cli.find_missing_binaries", lambda: _fake_missing())
     result = runner.invoke(app, [])

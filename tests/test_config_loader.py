@@ -102,24 +102,15 @@ def test_legacy_permission_mode_coerced_to_yolo(global_dir, tmp_path, legacy):
     assert any(f"'{legacy}' is deprecated" in w for w in result.warnings)
 
 
-def test_load_yaml_when_no_toml(global_dir, tmp_path):
+def test_yaml_and_json_configs_are_ignored(global_dir, tmp_path):
+    """Only ``config.toml`` is read; YAML/JSON files are left untouched."""
     (global_dir / "config.yaml").write_text("llm:\n  model: openai/gpt-4o\n")
-    result = load_config(cwd=tmp_path)
-    assert result.config.llm.model == "openai/gpt-4o"
-    assert result.sources == [global_dir / "config.yaml"]
-
-
-def test_load_json_when_no_toml_or_yaml(global_dir, tmp_path):
     (global_dir / "config.json").write_text(json.dumps({"ui": {"no_color": True}}))
     result = load_config(cwd=tmp_path)
-    assert result.config.ui.no_color is True
-
-
-def test_toml_preferred_over_yaml(global_dir, tmp_path):
-    (global_dir / "config.toml").write_text('[llm]\nmodel = "a"\n')
-    (global_dir / "config.yaml").write_text("llm:\n  model: b\n")
-    result = load_config(cwd=tmp_path)
-    assert result.config.llm.model == "a"
+    # Neither file counts as a source: the default TOML was created instead.
+    assert result.sources == [global_dir / "config.toml"]
+    assert result.config.llm.model != "openai/gpt-4o"
+    assert result.config.ui.no_color is False
 
 
 def test_project_config_merges_over_global(global_dir, project):

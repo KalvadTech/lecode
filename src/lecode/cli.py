@@ -121,6 +121,7 @@ app = typer.Typer(
     help="A minimalist terminal AI coding agent.",
     add_completion=False,
     no_args_is_help=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
 )
 
 
@@ -149,8 +150,8 @@ def build_provider(config: Config, api_key: str | None = None) -> ChatClient:
 
 
 def fetch_catalog(client: ChatClient) -> LoadedCatalog:
-    """Fetch the live model catalog (cache/bundled fallback); never raises."""
-    return asyncio.run(load_catalog(client, config_dir()))
+    """Fetch the live model catalog (empty on failure); never raises."""
+    return asyncio.run(load_catalog(client))
 
 
 async def _run_headless(
@@ -277,6 +278,7 @@ def run_headless(
         cwd = wt_info.path
     store = SessionStore()
     session = store.create(auto_name(store), cwd, model=config.llm.model)
+    models = fetch_catalog(client)
     runtime = build_runtime(
         config,
         cwd,
@@ -285,6 +287,7 @@ def run_headless(
         auto_approve=True,
         mode="readonly" if read_only else None,
         allowed_tools=_tool_filter(allowed_tools),
+        catalog=models.catalog,
     )
     runner = AgentRunner(
         client,
@@ -292,7 +295,7 @@ def run_headless(
         runtime.ctx,
         session=session,
         store=store,
-        catalog=fetch_catalog(client).catalog,
+        catalog=models.catalog,
     )
     signals = StatusEmitter(config.signals, session=session.name)
 
@@ -372,6 +375,7 @@ def run_loop_mode(
         plan_path = cwd / plan_path
     store = SessionStore()
     session = store.create(loop_session_name(), cwd, model=config.llm.model)
+    models = fetch_catalog(client)
     runtime = build_runtime(
         config,
         cwd,
@@ -380,6 +384,7 @@ def run_loop_mode(
         auto_approve=True,
         mode="readonly" if read_only else None,
         allowed_tools=_tool_filter(allowed_tools),
+        catalog=models.catalog,
     )
     runner = AgentRunner(
         client,
@@ -387,7 +392,7 @@ def run_loop_mode(
         runtime.ctx,
         session=session,
         store=store,
-        catalog=fetch_catalog(client).catalog,
+        catalog=models.catalog,
     )
     signals = StatusEmitter(config.signals, session=session.name)
 
@@ -474,6 +479,7 @@ def run_chain_mode(
     cwd = Path.cwd()
     store = SessionStore()
     session = store.create(auto_name(store), cwd, model=config.llm.model)
+    chain_catalog = fetch_catalog(client).catalog
     runtime = build_runtime(
         config,
         cwd,
@@ -482,9 +488,9 @@ def run_chain_mode(
         auto_approve=True,
         mode="readonly" if read_only else None,
         allowed_tools=_tool_filter(allowed_tools),
+        catalog=chain_catalog,
     )
     signals = StatusEmitter(config.signals, session=session.name)
-    chain_catalog = fetch_catalog(client).catalog
 
     def factory() -> AgentRunner:
         return AgentRunner(
@@ -637,6 +643,7 @@ def run_interactive(
         mode="readonly" if read_only else None,
         allowed_tools=_tool_filter(allowed_tools),
         agent_name=session.meta.agent,
+        catalog=models.catalog,
     )
     for warning in runtime.warnings:
         typer.echo(f"warning: {warning}", err=True)
@@ -770,7 +777,12 @@ def callback(
         bool, typer.Option("--no-tls-verify", help="Disable TLS verification.")
     ] = False,
     read_only: Annotated[
-        bool, typer.Option("--read-only", help="Read-only permission mode.")
+        bool,
+        typer.Option(
+            "--safe",
+            "--read-only",
+            help="Read-only permission mode (default is yolo: everything allowed).",
+        ),
     ] = False,
     allowed_tools: Annotated[
         str | None, typer.Option("--allowed-tools", help="Comma-separated tool allowlist.")

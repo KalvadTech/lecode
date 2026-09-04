@@ -44,26 +44,26 @@ def state(tmp_path):
 
 def test_line1_folder_git(state, theme):
     line1 = render_statusline(state, theme, width=200).plain.splitlines()[0]
-    assert line1 == "myproj · abc1234 · main · ±2 +10 -3"
+    assert line1 == "dir: myproj · commit: abc1234 · branch: main · diff: ±2 +10 -3"
 
 
 def test_line1_omits_missing_git_fields(state, theme):
     state.git = GitInfo(branch="main")
     line1 = render_statusline(state, theme, width=200).plain.splitlines()[0]
-    assert line1 == "myproj · main"
+    assert line1 == "dir: myproj · branch: main"
     state.git = None
     line1 = render_statusline(state, theme, width=200).plain.splitlines()[0]
-    assert line1 == "myproj"
+    assert line1 == "dir: myproj"
 
 
 def test_line2_model_cost_context(state, theme):
     line2 = render_statusline(state, theme, width=200).plain.splitlines()[1]
-    assert line2 == "openai/gpt-5-mini · $0.0123 · ctx ▓▓▓░░ 84.0k/200.0k 42%"
+    assert line2 == "model: openai/gpt-5-mini · cost: $0.0123 · ctx: ▓▓▓░░ 84.0k/200.0k 42%"
 
 
 def test_line3_session_agent_tokens_state(state, theme):
     line3 = render_statusline(state, theme, width=200).plain.splitlines()[2]
-    assert line3 == "my-session · default · ↑1.2k ↓0.4k · ready"
+    assert line3 == "session: my-session · agent: default · in: 1.2k · out: 0.4k · ready"
 
 
 def test_renders_exactly_three_lines(state, theme):

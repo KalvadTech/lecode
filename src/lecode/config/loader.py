@@ -1,11 +1,10 @@
 """Configuration loading: global + project files, merging, migrations.
 
 Global config lives in ``~/.config/lecode/`` (overridable with the
-``LECODE_CONFIG_DIR`` environment variable). TOML is preferred; YAML and
-JSON are accepted when no TOML file exists. A project-local
-``.lecode/config.toml`` (nearest, found by walking from the cwd up to the
-git root) is deep-merged over the global config: dicts merge recursively,
-scalars and lists replace.
+``LECODE_CONFIG_DIR`` environment variable). The only accepted format is
+TOML (``config.toml``). A project-local ``.lecode/config.toml`` (nearest,
+found by walking from the cwd up to the git root) is deep-merged over the
+global config: dicts merge recursively, scalars and lists replace.
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import BaseModel
 
 from lecode.config.migrations import migrate_config
@@ -26,12 +24,11 @@ from lecode.config.models import LEGACY_PERMISSION_MODES, Config
 #: Environment variable overriding the global config directory.
 CONFIG_ENV_VAR = "LECODE_CONFIG_DIR"
 
-#: Candidate config file names, in preference order.
-CONFIG_BASENAMES = ("config.toml", "config.yaml", "config.yml", "config.json")
+#: The only accepted config file name (TOML only).
+CONFIG_FILENAME = "config.toml"
 
 _DEFAULT_CONFIG = """\
 # lecode configuration — see `lecode --help` and the docs for all options.
-# TOML is preferred; config.yaml / config.json are also accepted.
 schema_version = 1
 
 # [llm]
@@ -65,12 +62,9 @@ def config_dir() -> Path:
 
 
 def find_config_file(directory: Path) -> Path | None:
-    """Return the preferred config file in ``directory``, if any exists."""
-    for name in CONFIG_BASENAMES:
-        candidate = directory / name
-        if candidate.is_file():
-            return candidate
-    return None
+    """Return ``directory/config.toml`` when it exists."""
+    candidate = directory / CONFIG_FILENAME
+    return candidate if candidate.is_file() else None
 
 
 def write_default_config(path: Path) -> None:
@@ -80,19 +74,9 @@ def write_default_config(path: Path) -> None:
 
 
 def _load_raw(path: Path) -> dict[str, Any]:
-    """Parse a config file into a plain dict, by file suffix."""
+    """Parse a TOML config file into a plain dict."""
     text = path.read_text(encoding="utf-8")
-    suffix = path.suffix.lower()
-    if suffix == ".toml":
-        data = tomllib.loads(text) if text.strip() else {}
-    elif suffix in (".yaml", ".yml"):
-        data = yaml.safe_load(text) if text.strip() else {}
-    elif suffix == ".json":
-        data = json.loads(text) if text.strip() else {}
-    else:  # pragma: no cover - unreachable via find_config_file
-        raise ValueError(f"unsupported config file format: {path}")
-    if data is None:
-        return {}
+    data = tomllib.loads(text) if text.strip() else {}
     if not isinstance(data, dict):
         raise ValueError(f"config file must contain a mapping at top level: {path}")
     return data
@@ -111,7 +95,7 @@ def _find_git_root(start: Path) -> Path | None:
 
 
 def find_project_config(start: Path) -> Path | None:
-    """Return the nearest ``.lecode/config.*`` from ``start`` up to the git root."""
+    """Return the nearest ``.lecode/config.toml`` from ``start`` up to the git root."""
     root = _find_git_root(start)
     current = start.resolve()
     stop = root if root is not None else current
@@ -192,15 +176,8 @@ def _dump_toml(data: dict[str, Any]) -> str:
 
 
 def _write_raw(path: Path, raw: dict[str, Any]) -> None:
-    """Rewrite a config file (after migration) in its original format."""
-    suffix = path.suffix.lower()
-    if suffix == ".toml":
-        text = _dump_toml(raw)
-    elif suffix in (".yaml", ".yml"):
-        text = yaml.safe_dump(raw, sort_keys=False)
-    else:
-        text = json.dumps(raw, indent=2) + "\n"
-    path.write_text(text, encoding="utf-8")
+    """Rewrite a config file (after migration) as TOML."""
+    path.write_text(_dump_toml(raw), encoding="utf-8")
 
 
 def load_config(cwd: Path | None = None) -> LoadedConfig:
@@ -215,7 +192,7 @@ def load_config(cwd: Path | None = None) -> LoadedConfig:
 
     global_file = find_config_file(config_dir())
     if global_file is None:
-        global_file = config_dir() / "config.toml"
+        global_file = config_dir() / CONFIG_FILENAME
         write_default_config(global_file)
     sources.append(global_file)
 

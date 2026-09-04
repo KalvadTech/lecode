@@ -13,6 +13,7 @@ directly; everything flows through the runner's event taxonomy.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -76,10 +77,9 @@ from lecode.tui.clipboard import copy_to_clipboard
 from lecode.tui.feed import Feed
 from lecode.tui.input import (
     FileLister,
-    JsonlHistory,
     KillRing,
     PathCompleter,
-    history_path,
+    SessionHistory,
     kill_to_end_of_line,
     kill_to_start_of_line,
     kill_word_back,
@@ -165,7 +165,7 @@ class TuiApp:
         #: Pending attachments for the next user submission (``/add``, ``@path``).
         self._attachments = AttachmentStore()
         #: Model catalog for ``/model``/``/models``; the live-fetched one when
-        #: startup resolved it, else the lazy bundled default.
+        #: startup resolved it, else an empty fail-open default.
         self._catalog: Any | None = catalog
         self._commands = build_registry(runtime.skills)
         self._runner = AgentRunner(
@@ -193,6 +193,21 @@ class TuiApp:
         self._git = CachedGitInfo()
         self._history: list[dict[str, Any]] = [{"role": "system", "content": runtime.system_prompt}]
         self._history += store.load_for_model(session)
+        # Restore context/cost/token lines from the session's history (resume).
+        stats = session_stats(store, session)
+        self._status.input_tokens = stats.input_tokens
+        self._status.output_tokens = stats.output_tokens
+        self._status.cost_usd = stats.cost_usd
+        self._status.context_used = stats.context_tokens
+        # Logbook suffix: the feed reads live context/cost from the statusline.
+        self._feed.metrics = lambda: (
+            self._status.context_used,
+            self._status.context_window,
+            self._status.cost_usd,
+        )
+        # The meter uses the model's real window from the catalog when known.
+        with contextlib.suppress(Exception):  # unknown model — keep configured default
+            self._status.context_window = self.catalog.get(config.llm.model).context_window
 
         self._turn_task: asyncio.Task[None] | None = None
         #: In-flight ``!cmd`` shell-out (a submit task); Ctrl-C cancels it.
@@ -202,8 +217,8 @@ class TuiApp:
         self._app: Application[None] | None = None
         self._spinner_task: asyncio.Task[None] | None = None
 
-        # Input editor extras (history persisted under the config dir).
-        self._input_history = JsonlHistory(history_path())
+        # Input editor extras (history lives in the session file itself).
+        self._input_history = SessionHistory(store, session)
         self._kill_ring = KillRing()
         # One shared fd-backed file list feeds the path completer and pickers.
         self._file_lister = FileLister(self._cwd)
@@ -309,20 +324,24 @@ class TuiApp:
         advisor = self._runtime.registry.get("advisor")
         if advisor is not None and hasattr(advisor, "reset_uses"):
             advisor.reset_uses()
-        self._reload_history()
+        self._reload_history()  # also refreshes the statusline usage lines
+        self._input_history.rebind(session)
+        if self._input_area is not None:
+            self._input_area.history = self._input_history
         self._status.session_name = session.name
         self._status.agent = self._agent_name
-        stats = session_stats(self._store, session)
-        self._status.input_tokens = stats.input_tokens
-        self._status.output_tokens = stats.output_tokens
-        self._status.cost_usd = stats.cost_usd
-        self._status.context_used = 0
         self._invalidate()
 
     def _reload_history(self) -> None:
         """Rebuild the in-memory history from the session file."""
         self._history = [{"role": "system", "content": self._runtime.system_prompt}]
         self._history += self._store.load_for_model(self._session)
+        # Restore the statusline's context/cost/token lines from history.
+        stats = session_stats(self._store, self._session)
+        self._status.input_tokens = stats.input_tokens
+        self._status.output_tokens = stats.output_tokens
+        self._status.cost_usd = stats.cost_usd
+        self._status.context_used = stats.context_tokens
 
     def reload_history(self) -> None:
         """Public wrapper used by undo/redo/rewind/clear/compact handlers."""
@@ -576,8 +595,10 @@ class TuiApp:
             height=3,
             dont_extend_height=True,
         )
+        # A full-width rule splitting the input box from the statusline.
+        separator = Window(height=1, char="─", dont_extend_height=True)
         return Application(
-            layout=Layout(HSplit([self._input_area, toolbar])),
+            layout=Layout(HSplit([self._input_area, separator, toolbar])),
             key_bindings=self._build_keybindings(),
             full_screen=False,
             mouse_support=False,
@@ -790,6 +811,7 @@ class TuiApp:
 
     async def handle_command(self, text: str) -> None:
         """Dispatch a ``/command`` line through the slash registry."""
+        self._feed.user_message(text)
         parts = text[1:].split()
         query = parts[0] if parts else ""
         args = parts[1:]

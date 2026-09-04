@@ -13,6 +13,7 @@ Tests inject scripted answers by monkeypatching :func:`_ask_text`,
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import stat
@@ -23,19 +24,19 @@ from typing import Any
 from prompt_toolkit import PromptSession
 
 from lecode.config.loader import config_dir
-from lecode.providers.catalog import Catalog
+from lecode.providers.catalog import ModelInfo
 from lecode.tui.statusline import human_tokens
 
 #: Providers offered by the wizard: OpenRouter, or any custom
 #: OpenRouter-compatible endpoint reached via a base URL.
 PROVIDER_CHOICES = ("openrouter", "custom")
 
-#: Catalog top picks offered as the default-model menu (all in models.json).
+#: Default-model menu picks; annotated live from the provider's ``/models``.
 MODEL_PICKS = (
-    "deepseek/deepseek-v4-flash",
-    "deepseek/deepseek-v4-pro",
-    "moonshotai/kimi-k2.6",
-    "z-ai/glm-4.7",
+    "tencent/hy4-preview",
+    "deepseek/deepseek-v4-flash-0731",
+    "z-ai/glm-5.3-flash",
+    "z-ai/glm-5.2",
 )
 
 #: Providers that cannot work without an API key.
@@ -190,16 +191,40 @@ def _import_summary(answers: dict[str, str]) -> str:
     return " · ".join(parts)
 
 
-def _model_detail(model_id: str) -> str:
+def _model_detail(model_id: str, details: dict[str, ModelInfo]) -> str:
     """Menu annotation for a model pick: context size and per-million pricing."""
-    try:
-        info = Catalog.default().get(model_id)
-    except Exception:  # catalog must never break the wizard
+    info = details.get(model_id)
+    if info is None:
         return ""
     return (
         f"ctx {human_tokens(info.context_window)} · "
         f"${info.pricing.prompt}/M in · ${info.pricing.completion}/M out"
     )
+
+
+async def _live_model_details(provider: str, base_url: str, api_key: str) -> dict[str, ModelInfo]:
+    """Fetch the provider's ``/models`` for menu annotations; ``{}`` on failure.
+
+    Runs after the provider/key questions, so the menu annotates with real,
+    current data. Any failure (offline, bad key, non-listing endpoint) just
+    means bare model ids.
+    """
+    try:
+        from lecode.providers.openai_compat import ChatClient
+        from lecode.providers.openrouter import (
+            fetch_remote_catalog,
+            openrouter_client,
+        )
+
+        if provider == "openrouter":
+            client = openrouter_client(api_key or None)
+        else:
+            client = ChatClient(base_url, api_key=api_key or None)
+        async with client:
+            entries = await asyncio.wait_for(fetch_remote_catalog(client), 5.0)
+        return {e.id: e for e in entries}
+    except Exception:
+        return {}
 
 
 async def _ask_text(session: PromptSession, message: str, default: str = "") -> str:
@@ -321,8 +346,13 @@ async def gather_answers(session: PromptSession, home: Path | None = None) -> di
     model_default = imported.get("model")
     if model_default and model_default not in model_choices:
         model_choices.insert(0, model_default)
+    details = await _live_model_details(provider, base_url, api_key)
     model = await _ask_choice(
-        session, "Default model:", model_choices, describe=_model_detail, default=model_default
+        session,
+        "Default model:",
+        model_choices,
+        describe=lambda m: _model_detail(m, details),
+        default=model_default,
     )
     notifications = await _ask_yes_no(session, "Audio notifications?", default=True)
     advisor = await _ask_yes_no(

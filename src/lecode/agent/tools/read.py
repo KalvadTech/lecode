@@ -32,6 +32,11 @@ def _resolve(ctx: ToolContext, path: str) -> Path:
     return p if p.is_absolute() else ctx.cwd / p
 
 
+def _catalog(ctx: ToolContext) -> Catalog:
+    """The session's live catalog; empty (fail-open) when none was fetched."""
+    return ctx.catalog if ctx.catalog is not None else Catalog.default()
+
+
 class ReadTool(Tool):
     def __init__(self) -> None:
         super().__init__(
@@ -73,7 +78,7 @@ class ReadTool(Tool):
                 attachment = None  # e.g. over the 20 MB cap
             if (
                 attachment is not None
-                and check_modalities([attachment], ctx.config.llm.model, Catalog.default()) is None
+                and check_modalities([attachment], ctx.config.llm.model, _catalog(ctx)) is None
             ):
                 # The model takes image input: wire the image as a content part.
                 parts: list = [{"type": "text", "text": note}]

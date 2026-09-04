@@ -1,10 +1,10 @@
 """The one fixed statusline.
 
-Three-line layout::
+Three-line layout, every element labelled::
 
-    <folder> · <commit> · <branch> · <diff-stat>
-    <model> · <cost> · ctx ▓▓▓░░ 84.0k/200k 42%
-    <session-name> · <agent> · ↑1.2k ↓0.4k · <state>
+    dir: <folder> · commit: <hash> · branch: <branch> · diff: <diff-stat>
+    model: <model> · cost: <$0.00> · ctx: ▓▓▓░░ 84.0k/200k 42%
+    session: <name> · agent: <agent> · in: 1.2k · out: 0.4k · <state>
 
 Not user-configurable. Lines are truncated to the terminal width.
 """
@@ -119,42 +119,43 @@ def render_statusline(state: StatusState, theme: Theme, width: int = 100) -> Tex
     """Render the fixed three-line statusline, truncating each line to ``width``."""
     sep = Text(" · ", style=theme.muted)
 
-    # Line 1: folder · commit · branch · diff
+    def labelled(line: Text, label: str, value: str, style: str, *, first: bool = False) -> None:
+        if not first:
+            line.append_text(sep.copy())
+        line.append(f"{label}: ", style=theme.muted)
+        line.append(value, style=style)
+
+    # Line 1: dir · commit · branch · diff
     line1 = Text()
-    line1.append(Path(state.cwd).name, style=theme.accent)
+    labelled(line1, "dir", Path(state.cwd).name, theme.accent, first=True)
     if state.git is not None:
-        for value, style in (
-            (state.git.commit, theme.muted),
-            (state.git.branch, theme.muted),
-            (state.git.diff, theme.muted),
+        for label, value in (
+            ("commit", state.git.commit),
+            ("branch", state.git.branch),
+            ("diff", state.git.diff),
         ):
             if value:
-                line1.append_text(sep.copy())
-                line1.append(value, style=style)
+                labelled(line1, label, value, theme.muted)
 
     # Line 2: model · cost · ctx meter x/y pct%
     bar, pct = context_meter(state.context_used, state.context_window)
     line2 = Text()
-    line2.append(state.model, style=theme.text)
-    line2.append_text(sep.copy())
-    line2.append(format_cost(state.cost_usd), style=theme.muted)
-    line2.append_text(sep.copy())
-    line2.append(
-        f"ctx {bar} {human_tokens(state.context_used)}/{human_tokens(state.context_window)} {pct}%",
-        style=theme.text,
+    labelled(line2, "model", state.model, theme.text, first=True)
+    labelled(line2, "cost", format_cost(state.cost_usd), theme.muted)
+    labelled(
+        line2,
+        "ctx",
+        f"{bar} {human_tokens(state.context_used)}/{human_tokens(state.context_window)} {pct}%",
+        theme.text,
     )
 
-    # Line 3: session · agent · tokens · state
+    # Line 3: session · agent · in/out tokens · state
     state_seg, state_color = _state_segment(state)
     line3 = Text()
-    line3.append(state.session_name, style=theme.accent)
-    line3.append_text(sep.copy())
-    line3.append(state.agent, style=theme.accent)
-    line3.append_text(sep.copy())
-    line3.append(
-        f"↑{human_tokens(state.input_tokens)} ↓{human_tokens(state.output_tokens)}",
-        style=theme.muted,
-    )
+    labelled(line3, "session", state.session_name, theme.accent, first=True)
+    labelled(line3, "agent", state.agent, theme.accent)
+    labelled(line3, "in", human_tokens(state.input_tokens), theme.muted)
+    labelled(line3, "out", human_tokens(state.output_tokens), theme.muted)
     line3.append_text(sep.copy())
     line3.append(state_seg, style=getattr(theme, state_color))
 

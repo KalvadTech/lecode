@@ -11,9 +11,17 @@ The one exception to append-only is the *activity indicator*: a transient
 one-line spinner (``⠋ thinking…``) shown while the model or a tool is
 working. It is drawn with ``\\r`` + erase-line and removed by the next real
 output, so it never persists in scrollback.
+
+Logbook style: every discrete line carries a ``[HH:MM:SS]`` timestamp, and
+action lines (user input, tool calls, tool results) end with the live
+``ctx used/window · $cost-so-far`` segment when a ``metrics`` callable is
+bound (the TUI binds it to the statusline state).
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import datetime
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -29,6 +37,9 @@ TOOL_CALL_MAX_LEN = 120
 #: Lines of a tool result shown before elision kicks in.
 TOOL_RESULT_HEAD_LINES = 10
 
+#: ``(context_used, context_window, cost_usd)`` at render time.
+MetricsFn = Callable[[], tuple[int, int, float]]
+
 
 class Feed:
     """Renders user/assistant/tool/status output to a Rich console."""
@@ -43,6 +54,21 @@ class Feed:
         #: Transient activity line: label + spinner frame; erased by real output.
         self._activity_label: str | None = None
         self._activity_frame = 0
+        #: Live context/cost source for the logbook suffix (None = no suffix).
+        self.metrics: MetricsFn | None = None
+
+    # -- logbook stamp ---------------------------------------------------------
+
+    @staticmethod
+    def _stamp() -> str:
+        return datetime.now().strftime("%H:%M:%S")
+
+    def _suffix(self) -> str:
+        """`` · ctx 12.3k/200.0k · $0.0412`` when metrics are bound."""
+        if self.metrics is None:
+            return ""
+        used, window, cost = self.metrics()
+        return f" · ctx {human_tokens(used)}/{human_tokens(window)} · {format_cost(cost)}"
 
     # -- transient activity indicator -------------------------------------------
 
@@ -78,7 +104,9 @@ class Feed:
     def user_message(self, text: str) -> None:
         """Echo the user's input as ``> text`` in the accent color."""
         self.activity_stop()
-        self._console.print(Text(f"> {text}", style=self._theme.accent))
+        self._console.print(
+            Text(f"[{self._stamp()}] > {text}{self._suffix()}", style=self._theme.accent)
+        )
 
     def assistant_text(self, markdown: str) -> None:
         """Render a completed assistant message as Markdown."""
@@ -113,7 +141,12 @@ class Feed:
         count = len(self._thinking_parts)
         self._thinking_parts = []
         if self._collapse_thinking:
-            self._console.print(Text(f"▸ thinking ({count} tokens)", style=self._theme.thinking))
+            self._console.print(
+                Text(
+                    f"[{self._stamp()}] ▸ thinking ({count} tokens)",
+                    style=self._theme.thinking,
+                )
+            )
         else:
             self._console.print(
                 Panel(
@@ -126,10 +159,10 @@ class Feed:
     def tool_call(self, name: str, args_preview: str) -> None:
         """Render ``⚙ name(args_preview)``, truncated to ~120 chars."""
         self.activity_stop()
-        line = f"⚙ {name}({args_preview})"
+        line = f"[{self._stamp()}] ⚙ {name}({args_preview})"
         if len(line) > TOOL_CALL_MAX_LEN:
             line = line[: TOOL_CALL_MAX_LEN - 1] + "…"
-        self._console.print(Text(line, style=self._theme.tool))
+        self._console.print(Text(line + self._suffix(), style=self._theme.tool))
 
     def tool_result(self, name: str, content: str, is_error: bool = False) -> None:
         """Render a tool result head with ``… (N more lines)`` elision."""
@@ -138,6 +171,8 @@ class Feed:
         shown = lines[:TOOL_RESULT_HEAD_LINES]
         if len(lines) > TOOL_RESULT_HEAD_LINES:
             shown.append(f"… ({len(lines) - TOOL_RESULT_HEAD_LINES} more lines)")
+        if shown:
+            shown[0] = f"[{self._stamp()}] {shown[0]}{self._suffix()}"
         style = self._theme.error if is_error else self._theme.muted
         self._console.print(Text("\n".join(shown), style=style))
 
@@ -171,29 +206,33 @@ class Feed:
             activity.append(f"{elapsed_s:.1f}s")
         if activity:
             parts.append(" · ".join(activity))
-        self._console.print(Text(" · ".join(parts), style=self._theme.muted))
+        line = f"[{self._stamp()}] " + " · ".join(parts)
+        self._console.print(Text(line, style=self._theme.muted))
 
     def error(self, msg: str) -> None:
         """Render an error one-liner."""
         self.activity_stop()
-        self._console.print(Text(f"✗ {msg}", style=self._theme.error))
+        self._console.print(Text(f"[{self._stamp()}] ✗ {msg}", style=self._theme.error))
 
     def info(self, msg: str) -> None:
         """Render an informational one-liner."""
         self.activity_stop()
-        self._console.print(Text(msg, style=self._theme.muted))
+        lines = msg.splitlines()
+        if lines:
+            lines[0] = f"[{self._stamp()}] {lines[0]}"
+        self._console.print(Text("\n".join(lines), style=self._theme.muted))
 
     def permission(self, msg: str) -> None:
         """Render a permission-prompt one-liner."""
         self.activity_stop()
-        self._console.print(Text(msg, style=self._theme.permission))
+        self._console.print(Text(f"[{self._stamp()}] {msg}", style=self._theme.permission))
 
     def retrying(self, attempt: int, delay_s: float) -> None:
         """Render a retry notice one-liner."""
         self.activity_stop()
         self._console.print(
             Text(
-                f"retrying (attempt {attempt}) in {delay_s:.1f}s…",
+                f"[{self._stamp()}] retrying (attempt {attempt}) in {delay_s:.1f}s…",
                 style=self._theme.warning,
             )
         )

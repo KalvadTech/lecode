@@ -397,6 +397,7 @@ async def cmd_model(app: TuiApp, args: list[str]) -> None:
     app.config.llm.model = info.id
     app.runner.model = info.id
     app.status.model = info.id
+    app.status.context_window = info.context_window
     app.refresh()
     app.feed.info(f"model: {info.id}")
 

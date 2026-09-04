@@ -37,11 +37,12 @@ hooks, LSP, MCP — before the chat opens.
   Ollama, LM Studio, llama.cpp, corporate proxies — plug in with one
   `--base-url` flag or a `[custom_providers]` entry. Keyless local endpoints
   supported. The model catalog is fetched live from the provider at startup
-  (cached on disk, bundled snapshot as offline fallback).
+  (when the fetch fails the catalog is simply empty — models lose their
+  pricing/modality annotations; nothing cached on disk).
 - **Real permissions, not vibes.** Two modes (`yolo` by default, `readonly`
-  when you want a look-but-don't-touch agent), glob + regex rules,
-  last-match-wins, unbypassable denies, doom-loop detection, and lifecycle
-  hooks that can narrow — never widen — any decision.
+  via `--safe` when you want a look-but-don't-touch agent), glob + regex
+  rules, last-match-wins, unbypassable denies, doom-loop detection, and
+  lifecycle hooks that can narrow — never widen — any decision.
 - **Money is a metric.** Live token + cost totals in the statusline, and a
   `tokens in/out · cost` summary every time a chat ends.
 - **Inspectable by design.** Sessions are append-only JSONL you can grep;
@@ -81,11 +82,14 @@ lecode                               # name the session, then ask for something
 ```
 
 ```text
-fix-auth · build · deepseek/deepseek-v4-flash · lecode:main · ctx ▓▓░░░ 18% · ↑4.1k ↓0.9k · $0.0062 · ⠼
+dir: lecode · commit: 974015a · branch: main · diff: ±1 +4 -4
+model: deepseek/deepseek-v4-flash · cost: $0.0062 · ctx: ▓▓░░░ 36.0k/200.0k 18%
+session: fix-auth · agent: build · in: 4.1k · out: 0.9k · ⠼
 ```
 
-One fixed statusline: session · agent · model · cwd:branch · context meter ·
-tokens · cost · state. No configuration needed.
+One fixed statusline, every element labelled: directory · commit · branch ·
+diff / model · cost · context meter / session · agent · tokens · state.
+No configuration needed.
 
 Useful things to type:
 
@@ -155,7 +159,7 @@ non-tty `--setup`) · `3` max turns / max loop iterations.
 
 Global config: `~/.config/lecode/config.toml` (override the directory with
 `LECODE_CONFIG_DIR`); a project-local `.lecode/config.toml` deep-merges over
-it. YAML and JSON config files are accepted too. The setup wizard writes the
+it. TOML is the only accepted format. The setup wizard writes the
 file with `0600` permissions because it can hold an API key — prefer the
 `OPENROUTER_API_KEY` / `OPENAI_API_KEY` env vars to keep secrets out of it.
 

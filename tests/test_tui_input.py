@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
 from lecode.extras.proc import ProcResult
+from lecode.session import SessionStore
 from lecode.tui.input import (
-    JsonlHistory,
     KillRing,
     PathCompleter,
+    SessionHistory,
     _path_token_before_cursor,
     kill_to_end_of_line,
     kill_to_start_of_line,
@@ -19,30 +21,43 @@ from lecode.tui.input import (
     open_in_editor,
 )
 
-# -- JsonlHistory -------------------------------------------------------------
+# -- SessionHistory -------------------------------------------------------------
 
 
-def test_history_round_trip(tmp_path):
-    path = tmp_path / "input_history.jsonl"
-    history = JsonlHistory(path)
+@pytest.fixture
+def session(tmp_path, monkeypatch):
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    store = SessionStore()
+    return store, store.create("hist", cwd="/tmp")
+
+
+def test_history_round_trip(session):
+    store, s = session
+    history = SessionHistory(store, s)
     history.store_string("first")
     history.store_string("second")
-    reloaded = JsonlHistory(path)
+    reloaded = SessionHistory(store, s)
     assert list(reloaded.load_history_strings()) == ["first", "second"]
 
 
-def test_history_cap_rewrites_file(tmp_path):
-    path = tmp_path / "input_history.jsonl"
-    history = JsonlHistory(path, cap=3)
+def test_history_lives_in_the_session_file(session):
+    store, s = session
+    SessionHistory(store, s).store_string("hello")
+    kinds = [r.kind for r in store.read_records(s) if hasattr(r, "kind")]
+    assert "input" in kinds
+
+
+def test_history_cap_keeps_recent_in_memory(session):
+    store, s = session
+    history = SessionHistory(store, s, cap=3)
     for i in range(5):
         history.store_string(f"entry-{i}")
-    reloaded = JsonlHistory(path, cap=3)
-    assert list(reloaded.load_history_strings()) == ["entry-2", "entry-3", "entry-4"]
-    assert len(path.read_text().splitlines()) == 3
+    assert list(history.load_history_strings()) == ["entry-2", "entry-3", "entry-4"]
 
 
-def test_history_dedupes_consecutive(tmp_path):
-    history = JsonlHistory(tmp_path / "h.jsonl")
+def test_history_dedupes_consecutive(session):
+    store, s = session
+    history = SessionHistory(store, s)
     history.store_string("same")
     history.store_string("same")
     history.store_string("other")
@@ -50,34 +65,41 @@ def test_history_dedupes_consecutive(tmp_path):
     assert list(history.load_history_strings()) == ["same", "other", "same"]
 
 
-def test_history_skips_blank_and_corrupt_lines(tmp_path):
-    path = tmp_path / "h.jsonl"
-    path.write_text('{"ts": "t", "text": "good"}\nnot json\n\n{"ts": "t"}\n')
-    history = JsonlHistory(path)
-    assert list(history.load_history_strings()) == ["good"]
-
-
-def test_history_ignores_blank_entries(tmp_path):
-    history = JsonlHistory(tmp_path / "h.jsonl")
+def test_history_ignores_blank_entries(session):
+    store, s = session
+    history = SessionHistory(store, s)
     history.store_string("")
     history.store_string("   ")
     assert list(history.load_history_strings()) == []
 
 
-def test_draft_persist_load_clear(tmp_path):
-    path = tmp_path / "h.jsonl"
-    history = JsonlHistory(path)
+def test_draft_persist_load_clear(session):
+    store, s = session
+    history = SessionHistory(store, s)
     history.store_string("submitted")
     history.save_draft("half-typed")
-    reloaded = JsonlHistory(path)
+    reloaded = SessionHistory(store, s)
     assert reloaded.load_draft() == "half-typed"
-    # cleared from the file, submitted entries survive
-    assert JsonlHistory(path).load_draft() == ""
-    assert list(JsonlHistory(path).load_history_strings()) == ["submitted"]
+    # consumed (tombstoned), submitted entries survive
+    assert SessionHistory(store, s).load_draft() == ""
+    assert list(SessionHistory(store, s).load_history_strings()) == ["submitted"]
 
 
-def test_load_draft_without_draft(tmp_path):
-    assert JsonlHistory(tmp_path / "h.jsonl").load_draft() == ""
+def test_load_draft_without_draft(session):
+    store, s = session
+    assert SessionHistory(store, s).load_draft() == ""
+
+
+def test_rebind_switches_session(session):
+    store, s = session
+    history = SessionHistory(store, s)
+    history.store_string("in-first")
+    other = store.create("other", cwd="/tmp")
+    history.rebind(other)
+    assert list(history.load_history_strings()) == []
+    history.store_string("in-second")
+    history.rebind(s)
+    assert list(history.load_history_strings()) == ["in-first"]
 
 
 # -- KillRing ------------------------------------------------------------------

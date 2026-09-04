@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 
 import pytest
+from tests.fakes import sample_catalog
 from tests.test_tui_app import make_app, make_blocking_app, wait_for
 
 from lecode.agent.tools.base import ToolContext, ToolRegistry
@@ -37,7 +38,7 @@ AUDIO_MODEL = "google/gemini-2.5-pro"
 
 @pytest.fixture
 def catalog() -> Catalog:
-    return Catalog.default()
+    return sample_catalog()
 
 
 def _write(tmp_path, name: str, data: bytes):
@@ -343,7 +344,13 @@ def _read_ctx(tmp_path, model: str) -> ToolContext:
     config = Config()
     config.llm.model = model
     checker = PermissionChecker(config, mode="yolo", cwd=tmp_path)
-    return ToolContext(cwd=tmp_path, config=config, permission_checker=checker, auto_approve=True)
+    return ToolContext(
+        cwd=tmp_path,
+        config=config,
+        permission_checker=checker,
+        auto_approve=True,
+        catalog=sample_catalog(),
+    )
 
 
 async def test_read_image_part_when_model_supports(tmp_path):

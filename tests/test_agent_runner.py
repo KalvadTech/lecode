@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from tests.fakes import FakeProvider
+from tests.fakes import FakeProvider, sample_catalog
 
 from lecode.agent.runner import (
     CONTINUE_PROMPT,
@@ -53,6 +53,7 @@ class SleepTool(Tool):
 
 def make_runner(tool_ctx, script, **kwargs) -> tuple[AgentRunner, FakeProvider]:
     provider = FakeProvider(script)
+    kwargs.setdefault("catalog", sample_catalog())
     runner = AgentRunner(provider, ToolRegistry([EchoTool()]), tool_ctx, **kwargs)
     return runner, provider
 
@@ -302,7 +303,12 @@ async def test_session_records_include_usage(tool_ctx, tmp_path):
         {"text": "done", "usage": {"input_tokens": 42, "output_tokens": 7}},
     ]
     runner = AgentRunner(
-        FakeProvider(script), ToolRegistry([EchoTool()]), tool_ctx, session=session, store=store
+        FakeProvider(script),
+        ToolRegistry([EchoTool()]),
+        tool_ctx,
+        session=session,
+        store=store,
+        catalog=sample_catalog(),
     )
 
     result = await runner.run([{"role": "user", "content": "go"}])

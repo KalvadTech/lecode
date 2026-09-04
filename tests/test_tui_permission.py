@@ -293,4 +293,5 @@ async def test_pipe_approval_escape_denies(tmp_path, monkeypatch):
         if "should-not-run" in line
     ]
     assert tool_lines
-    assert all(line.startswith(("⚙", "allow bash")) for line in tool_lines)
+    # logbook lines: "[HH:MM:SS] ⚙ …" / "[HH:MM:SS] allow bash …"
+    assert all(re.match(r"\[\d\d:\d\d:\d\d\] (⚙|allow bash)", line) for line in tool_lines)

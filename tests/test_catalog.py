@@ -1,8 +1,9 @@
-"""Tests for the static model catalog."""
+"""Tests for the model catalog (lookup, merge; there is no bundled snapshot)."""
 
 from __future__ import annotations
 
 import pytest
+from tests.fakes import sample_catalog
 
 from lecode.providers.catalog import (
     AmbiguousModelError,
@@ -12,60 +13,45 @@ from lecode.providers.catalog import (
 )
 
 
-def test_bundled_catalog_loads_and_validates():
+def test_default_catalog_is_empty():
+    """No bundled snapshot: the default catalog holds nothing, fail-open."""
     catalog = Catalog.default()
-    entries = catalog.all()
-    assert len(entries) >= 25
-    for entry in entries:
-        assert entry.context_window > 0
-        assert entry.pricing.prompt >= 0
-        assert "text" in entry.modalities.input
-    ids = [e.id for e in entries]
-    assert len(ids) == len(set(ids))
-    for expected in (
-        "openai/gpt-5",
-        "anthropic/claude-sonnet-4",
-        "google/gemini-2.5-pro",
-        "deepseek/deepseek-r1",
-        "qwen/qwen3-coder",
-        "meta-llama/llama-4-maverick",
-        "mistralai/codestral-2501",
-        "x-ai/grok-4",
-    ):
-        assert expected in ids
+    assert catalog.all() == []
+    with pytest.raises(ModelNotFoundError):
+        catalog.get("openai/gpt-5")
 
 
 def test_lookup_by_exact_id():
-    info = Catalog.default().get("openai/gpt-5-mini")
+    info = sample_catalog().get("openai/gpt-5-mini")
     assert info.name == "GPT-5 Mini"
 
 
 def test_lookup_by_unique_prefix():
-    info = Catalog.default().get("anthropic/claude-sonnet")
+    info = sample_catalog().get("anthropic/claude-sonnet")
     assert info.id == "anthropic/claude-sonnet-4"
 
 
 def test_ambiguous_prefix_raises():
     with pytest.raises(AmbiguousModelError) as excinfo:
-        Catalog.default().get("openai/gpt")
+        sample_catalog().get("openai/gpt")
     assert "openai/gpt-5" in excinfo.value.matches
     assert "openai/gpt-4o" in excinfo.value.matches
 
 
 def test_lookup_by_case_insensitive_name():
-    info = Catalog.default().get("gpt-4o")
+    info = sample_catalog().get("gpt-4o")
     assert info.id == "openai/gpt-4o"
 
 
 def test_unknown_model_raises():
     with pytest.raises(ModelNotFoundError):
-        Catalog.default().get("no/such-model")
+        sample_catalog().get("no/such-model")
 
 
 def test_modalities_for():
-    catalog = Catalog.default()
+    catalog = sample_catalog()
     assert "image" in catalog.modalities_for("openai/gpt-4o").input
-    assert catalog.modalities_for("deepseek/deepseek-r1").input == ["text"]
+    assert catalog.modalities_for("deepseek/deepseek-v4-flash").input == ["text"]
 
 
 def _entry(model_id: str, **overrides) -> ModelInfo:

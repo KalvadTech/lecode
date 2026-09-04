@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+from lecode.providers.catalog import Catalog, ModelInfo
 from lecode.providers.types import (
     CompletedMessage,
     Done,
@@ -29,6 +30,67 @@ from lecode.providers.types import (
 #:   usage: dict                     — usage event before Done
 #:   finish_reason: str              — default: "tool_calls" / "stop"
 ScriptEntry = dict[str, Any]
+
+
+def sample_catalog() -> Catalog:
+    """A small catalog standing in for the live ``/models`` fetch in tests.
+
+    There is no bundled catalog anymore, so tests that need model metadata
+    (pricing, context windows, modalities) build this explicitly.
+    """
+
+    def entry(
+        id: str,
+        name: str,
+        context_window: int,
+        prompt: float,
+        completion: float,
+        inputs: list[str] | None = None,
+    ) -> ModelInfo:
+        return ModelInfo.model_validate(
+            {
+                "id": id,
+                "name": name,
+                "context_window": context_window,
+                "pricing": {"prompt": prompt, "completion": completion},
+                "modalities": {"input": inputs or ["text"], "output": ["text"]},
+            }
+        )
+
+    return Catalog(
+        [
+            entry("deepseek/deepseek-v4-flash", "DeepSeek V4 Flash", 1048576, 0.09, 0.18),
+            entry("openai/gpt-5", "GPT-5", 400000, 1.25, 10.0, ["text", "image"]),
+            entry("openai/gpt-5-mini", "GPT-5 Mini", 400000, 0.25, 2.0, ["text", "image"]),
+            entry("openai/gpt-5-nano", "GPT-5 Nano", 400000, 0.05, 0.4),
+            entry(
+                "anthropic/claude-sonnet-4",
+                "Claude Sonnet 4",
+                200000,
+                3.0,
+                15.0,
+                ["text", "image", "pdf"],
+            ),
+            entry("moonshotai/kimi-k2.6", "Kimi K2.6", 262144, 0.6, 2.5),
+            entry("openai/gpt-4o", "GPT-4o", 128000, 2.5, 10.0, ["text", "image"]),
+            entry("deepseek/deepseek-r1", "DeepSeek R1", 163840, 0.55, 2.19),
+            entry(
+                "google/gemini-2.5-pro",
+                "Gemini 2.5 Pro",
+                1048576,
+                1.25,
+                10.0,
+                ["text", "image", "audio"],
+            ),
+            # wizard MODEL_PICKS
+            entry("tencent/hy4-preview", "Tencent Hy4 Preview", 1048576, 0.834, 2.501),
+            entry(
+                "deepseek/deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731", 1310720, 0.065, 0.18
+            ),
+            entry("z-ai/glm-5.3-flash", "GLM 5.3 Flash", 1310720, 0.075, 0.25),
+            entry("z-ai/glm-5.2", "GLM 5.2", 1048576, 0.966, 3.036),
+        ]
+    )
 
 
 def _as_list(value: Any) -> list[str]:

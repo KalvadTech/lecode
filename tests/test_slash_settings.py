@@ -26,6 +26,14 @@ async def test_model_switch_updates_everywhere(tmp_path, monkeypatch):
     assert "model: anthropic/claude-sonnet-4" in out.getvalue()
 
 
+async def test_model_switch_updates_context_window(tmp_path, monkeypatch):
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    # default model: deepseek/deepseek-v4-flash (1.0M window in the catalog)
+    assert app.status.context_window == 1048576
+    await app.handle_command("/model openai/gpt-5")
+    assert app.status.context_window == 400_000
+
+
 async def test_model_unique_prefix_resolves(tmp_path, monkeypatch):
     app, _, _ = make_app(tmp_path, monkeypatch, [])
     await app.handle_command("/model moonshotai")

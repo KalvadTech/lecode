@@ -111,13 +111,11 @@ def build_load_report(
         )
     )
 
-    # model catalog provenance (live fetch / cache / bundled snapshot)
+    # model catalog provenance (live fetch, else empty)
     if models_origin == "live":
         steps.append(LoadStep("models", f"{models_count} fetched live from the provider"))
-    elif models_origin == "cache":
-        steps.append(LoadStep("models", f"{models_count} from cache (fetch failed)", WARN))
     elif models_origin is not None:
-        steps.append(LoadStep("models", "bundled snapshot (offline)", WARN))
+        steps.append(LoadStep("models", "unavailable (fetch failed)", WARN))
 
     # system prompt
     sp = config.llm.system_prompt
@@ -173,7 +171,7 @@ def build_load_report(
 
     # permissions
     mode = runtime.ctx.permission_checker.mode
-    detail = f"mode {mode}" + (" · --read-only" if read_only else "")
+    detail = f"mode {mode}" + (" · --safe" if read_only else "")
     rules = config.permissions.rules
     if rules.allow or rules.ask or rules.deny:
         detail += " · custom rules"

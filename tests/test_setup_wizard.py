@@ -61,7 +61,7 @@ async def test_wizard_happy_path_writes_config(cfg_dir, clean_home):
     assert path == cfg_dir / "config.toml"
     raw = tomllib.loads(path.read_text())
     assert raw["llm"]["provider"] == "openrouter"
-    assert raw["llm"]["model"] == "deepseek/deepseek-v4-flash"
+    assert raw["llm"]["model"] == "tencent/hy4-preview"
     assert raw["llm"]["api_key"] == "sk-or-test-key"
     assert "ui" not in raw
     assert raw["notifications"]["enabled"] is True  # empty answer → default yes
@@ -80,7 +80,7 @@ async def test_wizard_custom_provider_asks_base_url(cfg_dir, clean_home):
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
     assert raw["llm"]["provider"] == "custom"
     assert raw["llm"]["base_url"] == "https://llm.local/v1"
-    assert raw["llm"]["model"] == "deepseek/deepseek-v4-pro"  # pick 2
+    assert raw["llm"]["model"] == "deepseek/deepseek-v4-flash-0731"  # pick 2
 
 
 async def test_wizard_base_url_validated(cfg_dir, clean_home):
@@ -101,7 +101,7 @@ async def test_wizard_key_required_loops_until_nonempty(cfg_dir, clean_home):
 async def test_wizard_advisor_opt_in(cfg_dir, clean_home):
     await run_wizard(FakeSession(["1", "sk-or-key", "1", "", "y"]), home=clean_home)
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
-    assert raw["advisor"] == {"enabled": True, "model": "deepseek/deepseek-v4-flash"}
+    assert raw["advisor"] == {"enabled": True, "model": "tencent/hy4-preview"}
 
 
 async def test_wizard_notifications_off(cfg_dir, clean_home):
@@ -132,8 +132,8 @@ async def test_model_menu_shows_context_and_price(cfg_dir, clean_home, capsys):
     session = FakeSession(["1", "sk-or-key", "2", "", "n"])
     answers = await gather_answers(session, home=clean_home)
     menu = capsys.readouterr().out
-    assert "2) deepseek/deepseek-v4-pro — ctx 1.0M · $1.04/M in · $2.08/M out" in menu
-    assert answers["model"] == "deepseek/deepseek-v4-pro"  # bare id returned
+    assert "2) deepseek/deepseek-v4-flash-0731 — ctx 1.3M · $0.065/M in · $0.18/M out" in menu
+    assert answers["model"] == "deepseek/deepseek-v4-flash-0731"  # bare id returned
 
 
 # -- --setup CLI flag --------------------------------------------------------------

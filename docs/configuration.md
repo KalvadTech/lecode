@@ -1,6 +1,6 @@
 # Configuration reference
 
-lecode reads TOML (preferred), YAML, or JSON config:
+lecode reads TOML config only (`config.toml`):
 
 - **Global**: `~/.config/lecode/config.toml` (the directory is overridable
   with the `LECODE_CONFIG_DIR` env var). Auto-created with commented defaults
@@ -34,9 +34,10 @@ it owner-only (`chmod 600`); `lecode --setup` does that for you.
 | `tls_verify` | `true` | set `false` for self-signed endpoints |
 
 The model catalog is fetched live from the provider's `/models` endpoint at
-startup (context windows, pricing, modalities), cached to
-`~/.config/lecode/models-cache.json`, and falls back to the bundled snapshot
-when offline. Plain OpenAI-shaped `/models` responses (id only) get a 128k
+startup (context windows, pricing, modalities). When the fetch fails the
+catalog is empty — models lose pricing/modality annotations and costs report
+as unknown until the provider reports usage — and nothing is cached on disk. Plain
+OpenAI-shaped `/models` responses (id only) get a 128k
 default context window and zeroed pricing.
 
 ### `[llm.system_prompt]`

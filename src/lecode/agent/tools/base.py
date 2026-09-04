@@ -58,6 +58,8 @@ class ToolContext:
     read_paths: set[str] = field(default_factory=set)  # files read (edit guard)
     todos: list[dict[str, Any]] = field(default_factory=list)  # todo_write state
     extras: dict[str, Any] = field(default_factory=dict)  # advisor/memory/MCP later
+    #: Live model catalog (modality checks, pricing); ``None`` → empty, fail-open.
+    catalog: Any | None = None  # lecode.providers.catalog.Catalog
 
 
 def grant_always(ctx: ToolContext, tool: str, pattern: str) -> None:

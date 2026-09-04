@@ -1,10 +1,11 @@
 """Input-editor extras: persisted history, kill ring, $EDITOR, path completion.
 
-History is a prompt_toolkit ``History`` subclass backed by
-``<config_dir>/input_history.jsonl``: submitted entries are appended as
-``{ts, text}`` (cap 1000, consecutive repeats deduped), and the unsubmitted
-draft is persisted on exit as ``{ts, draft}`` so a restart offers it back
-via :meth:`JsonlHistory.load_draft`. In-session draft handling while
+History is a prompt_toolkit ``History`` subclass backed by the **session
+file itself**: submitted entries are appended as ``input`` events
+(``{"text": ...}``; consecutive repeats deduped, capped in memory), and the
+unsubmitted draft is persisted on exit as a ``draft`` event (last one wins)
+so a restart offers it back via :meth:`SessionHistory.load_draft`. No
+separate ``input_history.jsonl`` exists. In-session draft handling while
 navigating (Up/Down) is prompt_toolkit's own buffer-history behavior.
 
 The kill ring keeps Ctrl-K/Ctrl-U/Ctrl-W kills for Ctrl-Y yank; Ctrl-G opens
@@ -16,14 +17,12 @@ screen to suspend); Tab on text completes path-ish tokens from a cached
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import shlex
 import subprocess
 import tempfile
 import time
 from collections.abc import AsyncGenerator, Callable, Iterable
-from datetime import UTC, datetime
 from pathlib import Path
 
 from prompt_toolkit.application.run_in_terminal import run_in_terminal
@@ -32,8 +31,9 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.history import History
 
 from lecode.extras.proc import run_proc
+from lecode.session.model import EventRecord
 
-#: Maximum number of history entries kept (file is rewritten when exceeded).
+#: Maximum number of history entries offered to the editor.
 HISTORY_CAP = 1000
 
 #: Time-to-live for the cached fd file listing.
@@ -46,58 +46,42 @@ FD_TIMEOUT_S = 5.0
 _WORD_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 
 
-def history_path(config_dir: Path | None = None) -> Path:
-    """``<config_dir>/input_history.jsonl`` (``LECODE_CONFIG_DIR`` aware)."""
-    if config_dir is None:
-        from lecode.config.loader import config_dir as _config_dir
-
-        config_dir = _config_dir()
-    return Path(config_dir) / "input_history.jsonl"
-
-
 # -- history with drafts ------------------------------------------------------
 
 
-def _read_entries(path: Path) -> list[tuple[str, str]]:
-    """Parse the JSONL history file into ``(kind, value)`` pairs; skips junk."""
-    if not path.is_file():
-        return []
-    entries: list[tuple[str, str]] = []
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(record, dict):
-                continue
-            if isinstance(record.get("text"), str):
-                entries.append(("text", record["text"]))
-            elif isinstance(record.get("draft"), str):
-                entries.append(("draft", record["draft"]))
-    return entries
+class SessionHistory(History):
+    """Per-session prompt_toolkit history with a draft slot, in the JSONL."""
 
-
-class JsonlHistory(History):
-    """Persistent prompt_toolkit history with a persistent draft slot."""
-
-    def __init__(self, path: Path, cap: int = HISTORY_CAP) -> None:
+    def __init__(self, store: object, session: object, cap: int = HISTORY_CAP) -> None:
         super().__init__()
-        self._path = Path(path)
+        self._store = store
+        self._session = session
         self._cap = cap
+        self._strings: list[str] = []
+        self._draft = ""
+        self._load()
+
+    def _load(self) -> None:
         strings: list[str] = []
         draft = ""
-        for kind, value in _read_entries(self._path):
-            if kind == "text":
+        for record in self._store.read_records(self._session):
+            if not isinstance(record, EventRecord):
+                continue
+            value = record.data.get("text")
+            if not isinstance(value, str):
+                continue
+            if record.kind == "input":
                 if not strings or strings[-1] != value:
                     strings.append(value)
-            else:
+            elif record.kind == "draft":
                 draft = value
-        self._strings = strings[-cap:]
+        self._strings = strings[-self._cap :]
         self._draft = draft
+
+    def rebind(self, session: object) -> None:
+        """Point at another session (``/new``, ``/resume`` mid-TUI)."""
+        self._session = session
+        self._load()
 
     # -- prompt_toolkit History interface ------------------------------------
 
@@ -112,9 +96,7 @@ class JsonlHistory(History):
         self._strings.append(string)
         if len(self._strings) > self._cap:
             self._strings = self._strings[-self._cap :]
-            self._rewrite()
-            return
-        self._append_record({"text": string})
+        self._store.append_event(self._session, "input", {"text": string})
 
     # -- drafts ----------------------------------------------------------------
 
@@ -123,32 +105,16 @@ class JsonlHistory(History):
         if not text.strip():
             return
         self._draft = text
-        self._append_record({"draft": text})
+        self._store.append_event(self._session, "draft", {"text": text})
 
     def load_draft(self) -> str:
-        """Return the persisted draft (if any) and clear it from the file."""
+        """Return the persisted draft (if any) and tombstone it."""
         draft = self._draft
         self._draft = ""
         if draft:
-            self._rewrite()
+            # An empty draft event marks it consumed (append-only file).
+            self._store.append_event(self._session, "draft", {"text": ""})
         return draft
-
-    # -- persistence ------------------------------------------------------------
-
-    def _append_record(self, record: dict) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({"ts": datetime.now(UTC).isoformat(), **record})
-        with self._path.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-
-    def _rewrite(self) -> None:
-        """Rewrite the whole file from memory (cap enforcement, draft clear)."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        now = datetime.now(UTC).isoformat()
-        lines = [json.dumps({"ts": now, "text": s}) for s in self._strings]
-        if self._draft:
-            lines.append(json.dumps({"ts": now, "draft": self._draft}))
-        self._path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
 # -- kill ring ------------------------------------------------------------------

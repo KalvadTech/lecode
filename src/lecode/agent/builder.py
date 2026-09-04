@@ -22,6 +22,7 @@ from lecode.memory import MemoryStore, memory_injection, memory_root, memory_too
 from lecode.permission import PermissionChecker, SessionPermissions
 
 if TYPE_CHECKING:
+    from lecode.providers.catalog import Catalog
     from lecode.session.storage import Session, SessionStore
 
 
@@ -50,14 +51,17 @@ def build_runtime(
     agent_name: str | None = "build",
     agent_registry: AgentRegistry | None = None,
     skill_registry: SkillRegistry | None = None,
+    catalog: Catalog | None = None,
 ) -> Runtime:
     """Build the permission checker, tool context, registry, and system prompt.
 
-    ``mode`` overrides the configured permission mode (e.g. ``--read-only``);
+    ``mode`` overrides the configured permission mode (e.g. ``--safe``);
     ``allowed_tools`` filters the core tool registry (``--allowed-tools``).
     ``agent_name`` selects a custom agent: its overlay narrows the permission
     checker and its prompt body is prepended to the system prompt (before the
     skills listing). Unknown agent names are ignored (fail-open).
+    ``catalog`` is the live model catalog (modality checks in tools); ``None``
+    leaves tools with an empty, fail-open catalog.
     """
     grants = store.load_grants(session) if session is not None and store is not None else None
     session_perms = SessionPermissions(grants)
@@ -80,6 +84,7 @@ def build_runtime(
         session_store=store,
         session_perms=session_perms,
         auto_approve=auto_approve,
+        catalog=catalog,
     )
 
     tools = core_tools()
