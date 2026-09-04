@@ -62,6 +62,15 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
                 continue
             cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1_000_000
 
+    # Pierre reviews carry their own usage on the event record.
+    for record in records:
+        if isinstance(record, EventRecord) and record.kind == "pierre":
+            usage = record.data.get("usage") or {}
+            in_tok, out_tok = _usage_tokens(usage)
+            input_tokens += in_tok
+            output_tokens += out_tok
+            cost_usd += float(usage.get("cost_usd") or 0.0)
+
     timestamps = [
         r.ts for r in records if isinstance(r, MessageRecord | EventRecord | TombstoneRecord)
     ]

@@ -73,6 +73,7 @@ def test_report_covers_all_subsystems(env):
         "tools",
         "permissions",
         "hooks",
+        "pierre",
         "lsp",
         "mcp",
     ]
@@ -279,6 +280,19 @@ def test_render_outputs_panel_with_all_labels(env):
     for label in ("config", "provider", "prompt", "tools"):
         assert label in text
     assert "✓" in text and "–" in text  # ok and skip marks  # noqa: RUF001
+
+
+def test_render_prints_ascii_banner_and_byline(env):
+    steps, _session, *_ = _make(env)
+    out = io.StringIO()
+    console = Console(file=out, force_terminal=False, no_color=True, width=100)
+    render_loading_screen(console, THEME, session_name="demo", steps=steps, cwd=env)
+    text = out.getvalue()
+    # figlet "standard" banner for "lecode", byline below it
+    assert "| | ___  ___ ___   __| | ___" in text
+    assert "|_|\\___|\\___\\___/ \\__,_|\\___|" in text
+    assert "by wowi42" in text
+    assert text.index("by wowi42") < text.index("session")  # banner above the panel
 
 
 def test_show_loading_screen_never_raises(env, monkeypatch):

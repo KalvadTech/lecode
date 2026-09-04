@@ -35,6 +35,15 @@ SKIP = "skip"
 
 _MARKS = {OK: "✓", WARN: "!", SKIP: "–"}  # noqa: RUF001 — the en dash is the intended skip glyph
 
+#: ASCII-art banner (figlet "standard") printed above the loading panel.
+_BANNER = r""" _                    _
+| | ___  ___ ___   __| | ___
+| |/ _ \/ __/ _ \ / _` |/ _ \
+| |  __/ (_| (_) | (_| |  __/
+|_|\___|\___\___/ \__,_|\___|"""
+
+_BYLINE = "by wowi42"
+
 
 @dataclass(frozen=True)
 class LoadStep:
@@ -184,6 +193,13 @@ def build_load_report(
     else:
         steps.append(LoadStep("hooks", "none configured", SKIP))
 
+    # pierre (post-task reviewer)
+    if config.pierre.enabled:
+        reviewer = config.pierre.model or config.llm.model
+        steps.append(LoadStep("pierre", f"reviewing with {reviewer}"))
+    else:
+        steps.append(LoadStep("pierre", "off", SKIP))
+
     # lsp
     steps.append(
         LoadStep(
@@ -247,7 +263,10 @@ def render_loading_screen(
     steps: list[LoadStep],
     cwd: Path,
 ) -> None:
-    """Render the loading panel: one status line per loaded subsystem."""
+    """Render the banner and the loading panel: one status line per subsystem."""
+    console.print(Text(_BANNER, style=theme.accent), justify="center")
+    console.print(Text(_BYLINE, style=theme.muted), justify="center")
+    console.print()
     body = Text()
     width = max(len(s.label) for s in steps)
     for i, step in enumerate(steps):

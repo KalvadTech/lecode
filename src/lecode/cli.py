@@ -42,6 +42,7 @@ from lecode.hooks import (
     dispatcher_from_config,
 )
 from lecode.providers import ProviderError, build_client, resolve_provider
+from lecode.providers.catalog import Catalog
 from lecode.providers.live import LoadedCatalog, load_catalog
 from lecode.providers.openai_compat import ChatClient
 from lecode.providers.types import ChatMessage
@@ -149,9 +150,25 @@ def build_provider(config: Config, api_key: str | None = None) -> ChatClient:
     return build_client(spec, key)
 
 
-def fetch_catalog(client: ChatClient) -> LoadedCatalog:
-    """Fetch the live model catalog (empty on failure); never raises."""
-    return asyncio.run(load_catalog(client))
+def fetch_catalog(config: Config, api_key: str | None = None) -> LoadedCatalog:
+    """Fetch the live model catalog (empty on failure); never raises.
+
+    Uses a short-lived client on its own event loop: the session client's
+    connection pool must stay on the loop that runs the session, or closing
+    pooled connections later explodes with "Event loop is closed".
+    """
+
+    async def _fetch() -> LoadedCatalog:
+        client = build_provider(config, api_key=api_key)
+        try:
+            return await load_catalog(client)
+        finally:
+            await _aclose(client)
+
+    try:
+        return asyncio.run(_fetch())
+    except (AuthError, ValueError):  # same build errors the caller already handles
+        return LoadedCatalog(Catalog.default(), "empty")
 
 
 async def _run_headless(
@@ -278,7 +295,7 @@ def run_headless(
         cwd = wt_info.path
     store = SessionStore()
     session = store.create(auto_name(store), cwd, model=config.llm.model)
-    models = fetch_catalog(client)
+    models = fetch_catalog(config, api_key)
     runtime = build_runtime(
         config,
         cwd,
@@ -319,6 +336,8 @@ def run_headless(
         shutdown_telemetry()
 
     typer.echo(result.final_text)
+    if result.review:
+        typer.echo(f"\npierre: {result.review}", err=True)
     totals = result.usage_totals
     typer.echo(
         f"tokens: {totals.input_tokens} in / {totals.output_tokens} out "
@@ -375,7 +394,7 @@ def run_loop_mode(
         plan_path = cwd / plan_path
     store = SessionStore()
     session = store.create(loop_session_name(), cwd, model=config.llm.model)
-    models = fetch_catalog(client)
+    models = fetch_catalog(config, api_key)
     runtime = build_runtime(
         config,
         cwd,
@@ -479,7 +498,7 @@ def run_chain_mode(
     cwd = Path.cwd()
     store = SessionStore()
     session = store.create(auto_name(store), cwd, model=config.llm.model)
-    chain_catalog = fetch_catalog(client).catalog
+    chain_catalog = fetch_catalog(config, api_key).catalog
     runtime = build_runtime(
         config,
         cwd,
@@ -611,7 +630,7 @@ def run_interactive(
         session = store.open(meta.id)
     elif resume is not None or continue_last:
         try:
-            meta = store.resolve(resume)
+            meta = store.resolve(resume, cwd=cwd)
         except (SessionNotFoundError, AmbiguousSessionError) as e:
             typer.echo(f"error: {e}", err=True)
             return EXIT_STARTUP
@@ -631,7 +650,7 @@ def run_interactive(
         typer.echo(f"error: {e}", err=True)
         return EXIT_STARTUP
     try:
-        models = fetch_catalog(client)
+        models = fetch_catalog(config, api_key)
     except KeyboardInterrupt:
         return EXIT_OK
 
@@ -648,12 +667,23 @@ def run_interactive(
     for warning in runtime.warnings:
         typer.echo(f"warning: {warning}", err=True)
 
-    # Connect MCP servers up front so the loading screen can report live
-    # per-server status; TuiApp.run skips re-attaching when already present.
-    from lecode.extras.mcp_client import attach_mcp
+    # Probe MCP servers up front so the loading screen can report live
+    # per-server status. The probe connects on this throwaway loop with a
+    # scratch registry, then shuts down: MCP sessions are loop-bound, so the
+    # TUI re-attaches for real on its own loop (ctx.extras["mcp"] popped).
+    from lecode.agent.tools.base import ToolRegistry
+    from lecode.extras.mcp_client import MCP_EXTRA, attach_mcp
+
+    async def _probe_mcp() -> list:
+        probe = await attach_mcp(ToolRegistry(), runtime.ctx)
+        try:
+            return probe.status()
+        finally:
+            await probe.shutdown()
+            runtime.ctx.extras.pop(MCP_EXTRA, None)
 
     try:
-        mcp_manager = asyncio.run(attach_mcp(runtime.registry, runtime.ctx))
+        mcp_status = asyncio.run(_probe_mcp())
     except KeyboardInterrupt:
         return EXIT_OK
 
@@ -677,7 +707,7 @@ def run_interactive(
         read_only=read_only,
         models_origin=models.origin,
         models_count=models.remote_count,
-        mcp_servers=mcp_manager.status(),
+        mcp_servers=mcp_status,
     )
 
     tui = TuiApp(config, runtime, client, session, store, console=console, catalog=models.catalog)

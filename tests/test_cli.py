@@ -44,6 +44,38 @@ def test_startup_ok_when_binaries_present(monkeypatch):
     assert result.exit_code == EXIT_OK
 
 
+def test_fetch_catalog_uses_a_throwaway_client(monkeypatch):
+    """The catalog fetch never shares the session client's connection pool.
+
+    Pooling a connection on one ``asyncio.run`` loop and reusing it on the
+    TUI's loop crashes TLS teardown with "Event loop is closed".
+    """
+    import lecode.cli as cli
+    from lecode.config.models import Config
+    from lecode.providers.catalog import Catalog
+    from lecode.providers.live import LoadedCatalog
+
+    closed: list[bool] = []
+
+    class FakeClient:
+        async def aclose(self):
+            closed.append(True)
+
+    sentinel = FakeClient()
+    captured: dict = {}
+    monkeypatch.setattr(cli, "build_provider", lambda config, api_key=None: sentinel)
+
+    async def fake_load(client):
+        captured["client"] = client
+        return LoadedCatalog(Catalog.default(), "live")
+
+    monkeypatch.setattr(cli, "load_catalog", fake_load)
+    result = cli.fetch_catalog(Config())
+    assert result.origin == "live"
+    assert captured["client"] is sentinel
+    assert closed  # built, used, and closed inside the fetch's own loop
+
+
 def _fake_missing():
     from lecode.deps import MissingBinary
 

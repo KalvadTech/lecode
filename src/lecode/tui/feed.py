@@ -209,6 +209,12 @@ class Feed:
         line = f"[{self._stamp()}] " + " · ".join(parts)
         self._console.print(Text(line, style=self._theme.muted))
 
+    def review(self, model: str, feedback: str) -> None:
+        """Pierre-mode feedback: a labelled block after the stats line."""
+        self.activity_stop()
+        self._console.print(Text(f"[{self._stamp()}] ◆ pierre ({model})", style=self._theme.accent))
+        self._console.print(Text(feedback, style=self._theme.text))
+
     def error(self, msg: str) -> None:
         """Render an error one-liner."""
         self.activity_stop()

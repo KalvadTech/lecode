@@ -4,6 +4,13 @@
 just your terminal, an OpenAI-compatible model, and a sharp set of tools.
 
 ```text
+         _                    _
+        | | ___  ___ ___   __| | ___
+        | |/ _ \/ __/ _ \ / _` |/ _ \
+        | |  __/ (_| (_) | (_| |  __/
+        |_|\___|\___\___/ \__,_|\___|
+                  by wowi42
+
 ╭────────────────────────── lecode — fix-auth ───────────────────────────╮
 │  ✓ session      fix-auth — new session                                 │
 │  ✓ config       ~/.config/lecode/config.toml + .lecode/config.toml     │
@@ -18,6 +25,7 @@ just your terminal, an OpenAI-compatible model, and a sharp set of tools.
 │  ✓ tools        15 tools                                               │
 │  ✓ permissions  mode yolo · custom rules                               │
 │  – hooks        none configured                                        │
+│  – pierre       off                                                    │
 │  ✓ lsp          enabled                                                │
 │  ! mcp          exa (no EXA_API_KEY)                                   │
 ╰─────────────────── ~/github.com/you/your-project ─────────────────────╯
@@ -125,7 +133,8 @@ non-tty `--setup`) · `3` max turns / max loop iterations.
 - **Permissions** — two modes (`yolo` allows everything, `readonly` allows
   read-class tools only; default `yolo`), per-tool glob/regex rules, session
   allow-always grants, per-agent overlays. `/permissions`, `/mode`, `/toggle`.
-- **Sessions** — always named, append-only JSONL, `/new` `/resume`
+- **Sessions** — always named, append-only JSONL, scoped to the folder they
+  were created in (resume never crosses directories), `/new` `/resume`
   `/undo` `/redo` `/rewind` `/retry` `/compact` `/handoff` `/rename`,
   searchable picker with delete, HTML export (`/export`), secret-gist
   sharing (`/share`), re-import (`/import`).
@@ -143,6 +152,9 @@ non-tty `--setup`) · `3` max turns / max loop iterations.
   permissions. `--hooks-test` dry-runs the pipeline.
 - **Advisor** — a second, stronger model the agent consults mid-task for
   strategy, with a per-session budget — or routed to *you* in handoff mode.
+- **Pierre mode** — when enabled, a second model reviews every finished
+  task: it compares your request with the agent's result and tells you
+  plainly whether it delivered. `/pierre on|off|model`.
 - **MCP** — stdio + streamable-HTTP servers. Exa web search is
   preconfigured (needs `EXA_API_KEY`); context7 is one flag away.
 - **LSP** — diagnostics from real language servers appended to `write`/`edit`

@@ -112,6 +112,27 @@ def test_resolve_ambiguous_prefix_raises(store):
     assert b.id != a.id
 
 
+def test_list_sessions_scoped_to_folder(store):
+    store.create("here", cwd="/tmp/here")
+    store.create("there", cwd="/tmp/there")
+    assert [m.name for m in store.list_sessions(cwd="/tmp/here")] == ["here"]
+    assert {m.name for m in store.list_sessions()} == {"here", "there"}  # unscoped
+
+
+def test_resolve_scoped_to_folder(store):
+    store.create("same-name", cwd="/tmp/a")
+    other = store.create("same-name", cwd="/tmp/b")
+    # name resolution only sees the folder's own session
+    assert store.resolve("same-name", cwd="/tmp/b").id == other.id
+    # latest / None are folder-relative too
+    assert store.resolve(None, cwd="/tmp/b").id == other.id
+    # a foreign session is invisible, even by exact id
+    with pytest.raises(SessionNotFoundError):
+        store.resolve(other.id, cwd="/tmp/a")
+    with pytest.raises(SessionNotFoundError):
+        store.resolve(None, cwd="/tmp/empty")
+
+
 def test_delete(store, session):
     store.delete(session.id)
     assert store.list_sessions() == []

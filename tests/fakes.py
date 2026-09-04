@@ -82,7 +82,7 @@ def sample_catalog() -> Catalog:
                 10.0,
                 ["text", "image", "audio"],
             ),
-            # wizard MODEL_PICKS
+            # models the setup wizard's tests pin as the provider list
             entry("tencent/hy4-preview", "Tencent Hy4 Preview", 1048576, 0.834, 2.501),
             entry(
                 "deepseek/deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731", 1310720, 0.065, 0.18

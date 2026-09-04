@@ -152,7 +152,9 @@ async def cmd_clear(app: TuiApp, args: list[str]) -> None:
 
 async def cmd_resume(app: TuiApp, args: list[str]) -> None:
     """``/resume [ref]``: switch sessions; no arg lists them, ``--delete``
-    removes one. Resolution: id, unique id prefix, exact name, ``latest``."""
+    removes one. Only sessions created in the current folder are considered.
+    Resolution: id, unique id prefix, exact name, ``latest``."""
+    cwd = app.runtime.ctx.cwd
     if _busy(app):
         return
     if args and args[0] == "--delete":
@@ -161,7 +163,7 @@ async def cmd_resume(app: TuiApp, args: list[str]) -> None:
     if args:
         ref = " ".join(args)
         try:
-            meta = app.store.resolve(ref)
+            meta = app.store.resolve(ref, cwd=cwd)
         except (SessionNotFoundError, AmbiguousSessionError) as e:
             app.feed.error(str(e))
             return
@@ -172,9 +174,9 @@ async def cmd_resume(app: TuiApp, args: list[str]) -> None:
         app.switch_session(session)
         app.feed.info(f"resumed session: {session.name}")
         return
-    sessions = app.store.list_sessions()
+    sessions = app.store.list_sessions(cwd)
     if not sessions:
-        app.feed.info("(no sessions)")
+        app.feed.info("(no sessions in this folder)")
         return
     lines = []
     for index, meta in enumerate(sessions, 1):
@@ -191,7 +193,7 @@ def _delete_session(app: TuiApp, args: list[str]) -> None:
         return
     ref = " ".join(args)
     try:
-        meta = app.store.resolve(ref)
+        meta = app.store.resolve(ref, cwd=app.runtime.ctx.cwd)
     except (SessionNotFoundError, AmbiguousSessionError) as e:
         app.feed.error(str(e))
         return
@@ -606,6 +608,34 @@ async def cmd_advisor(app: TuiApp, args: list[str]) -> None:
         app.feed.error(
             "usage: /advisor [on|off|handoff|model <id>|max-uses <n>|context-limit <kb>]"
         )
+
+
+# -- pierre ---------------------------------------------------------------------
+
+
+async def cmd_pierre(app: TuiApp, args: list[str]) -> None:
+    """``/pierre``: status, or tune the post-task reviewer (session-scoped)."""
+    cfg = app.config.pierre
+    if not args:
+        app.feed.info(
+            f"pierre: {'on' if cfg.enabled else 'off'} · model: {cfg.model or app.config.llm.model}"
+        )
+        return
+    sub = args[0]
+    if sub == "on":
+        cfg.enabled = True
+        app.feed.info("pierre: on — every finished task gets reviewed")
+    elif sub == "off":
+        cfg.enabled = False
+        app.feed.info("pierre: off")
+    elif sub == "model":
+        if len(args) < 2:
+            app.feed.error("usage: /pierre model <model-id>")
+            return
+        cfg.model = " ".join(args[1:])
+        app.feed.info(f"pierre model: {cfg.model}")
+    else:
+        app.feed.error("usage: /pierre [on|off|model <id>]")
 
 
 # -- interface ------------------------------------------------------------------
@@ -1262,6 +1292,7 @@ _HANDLERS = {
     "help": cmd_help,
     "welcome": cmd_welcome,
     "advisor": cmd_advisor,
+    "pierre": cmd_pierre,
     "add": cmd_add,
     "drop": cmd_drop,
     "drop-all": cmd_drop_all,

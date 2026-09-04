@@ -38,6 +38,7 @@ from lecode.agent.runner import (
     Error,
     Reasoning,
     Retrying,
+    Review,
     Token,
     ToolCall,
     ToolResult,
@@ -210,6 +211,9 @@ class TuiApp:
             self._status.context_window = self.catalog.get(config.llm.model).context_window
 
         self._turn_task: asyncio.Task[None] | None = None
+        #: Pierre feedback stashed from the event stream; rendered after the
+        #: stats line at the end of the turn.
+        self._pending_review: Review | None = None
         #: In-flight ``!cmd`` shell-out (a submit task); Ctrl-C cancels it.
         self._shell_task: asyncio.Task[None] | None = None
         self._pending: set[asyncio.Task[None]] = set()  # in-flight submit tasks
@@ -615,8 +619,8 @@ class TuiApp:
         self._app = self._build_app(input=input, output=output)
         self._runtime.ctx.approval_callback = self._request_approval
         self._runtime.ctx.extras["advisor_handoff"] = self._request_advisor_handoff
-        # MCP may already be attached (cli attaches it before the loading
-        # screen to report live server status); attach only if not.
+        # MCP attach normally happens here, on this loop (the cli's up-front
+        # attach is only a probe for the loading screen and is shut down).
         if self._runtime.ctx.extras.get(MCP_EXTRA) is None:
             await attach_mcp(self._runtime.registry, self._runtime.ctx)
         self._file_lister.prefetch()
@@ -957,6 +961,9 @@ class TuiApp:
                 turns=result.turns,
                 elapsed_s=result.elapsed_s,
             )
+        if self._pending_review is not None:
+            self._feed.review(self._pending_review.model, self._pending_review.feedback)
+            self._pending_review = None
         # Queued messages were persisted by the runner; rebuild from disk so
         # the next turn sees the same history the model saw.
         self._history = [{"role": "system", "content": self._runtime.system_prompt}]
@@ -1109,6 +1116,9 @@ class TuiApp:
         elif isinstance(event, Done):
             self._feed.stream_end()
             self._spawn(self._notifier.task_finish())
+        elif isinstance(event, Review):
+            # Rendered after the stats line in _run_turn, not mid-stream.
+            self._pending_review = event
 
     def _on_child_event(self, agent: str, event: Any) -> None:
         """Subagent runner event → feed rendering, prefixed with the agent.

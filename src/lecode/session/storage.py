@@ -185,8 +185,12 @@ class SessionStore:
         """All records in file order; corrupt lines are skipped and counted."""
         return self._read_records_at(session.path)
 
-    def list_sessions(self) -> list[MetaRecord]:
-        """All sessions' meta records, most recent first."""
+    def list_sessions(self, cwd: Path | str | None = None) -> list[MetaRecord]:
+        """All sessions' meta records, most recent first.
+
+        ``cwd`` scopes the listing to sessions created in that folder —
+        resume never crosses directories.
+        """
         if not self.sessions_dir.is_dir():
             return []
         metas: list[MetaRecord] = []
@@ -201,6 +205,9 @@ class SessionStore:
                         self.corrupt_lines += 1
                         continue
                     break  # first valid record is not meta: skip file
+        if cwd is not None:
+            wanted = str(cwd)
+            metas = [m for m in metas if m.cwd == wanted]
         return sorted(metas, key=lambda m: (m.created_at, m.id), reverse=True)
 
     def delete(self, session_id: str) -> None:
@@ -209,12 +216,13 @@ class SessionStore:
             raise SessionNotFoundError(session_id)
         path.unlink()
 
-    def resolve(self, ref: str | None) -> MetaRecord:
+    def resolve(self, ref: str | None, cwd: Path | str | None = None) -> MetaRecord:
         """Resolve a reference by id, unique id prefix, exact name, or recency.
 
         ``None``/``"latest"`` resolve to the most recently created session.
+        ``cwd`` restricts the candidates to sessions created in that folder.
         """
-        sessions = self.list_sessions()
+        sessions = self.list_sessions(cwd)
         if not sessions:
             raise SessionNotFoundError(ref or "(no sessions)")
         if ref is None or ref == "latest":

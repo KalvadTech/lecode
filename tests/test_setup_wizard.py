@@ -38,6 +38,24 @@ class FakeSession:
             raise EOFError from None
 
 
+@pytest.fixture(autouse=True)
+def fake_model_list(monkeypatch):
+    """A deterministic provider model list for the wizard's model step.
+
+    The real implementation fetches the provider's ``/models``; tests pin
+    three entries (sorted: deepseek…, openai…, z-ai…) instead of going live.
+    """
+    from tests.fakes import sample_catalog
+
+    keep = ("deepseek/deepseek-v4-flash-0731", "openai/gpt-5-mini", "z-ai/glm-5.2")
+    entries = {e.id: e for e in sample_catalog().all() if e.id in keep}
+
+    async def fake(provider: str, base_url: str, api_key: str):
+        return entries
+
+    monkeypatch.setattr(setup_wizard, "_live_model_details", fake)
+
+
 @pytest.fixture
 def cfg_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
@@ -61,7 +79,7 @@ async def test_wizard_happy_path_writes_config(cfg_dir, clean_home):
     assert path == cfg_dir / "config.toml"
     raw = tomllib.loads(path.read_text())
     assert raw["llm"]["provider"] == "openrouter"
-    assert raw["llm"]["model"] == "tencent/hy4-preview"
+    assert raw["llm"]["model"] == "deepseek/deepseek-v4-flash-0731"  # sorted first
     assert raw["llm"]["api_key"] == "sk-or-test-key"
     assert "ui" not in raw
     assert raw["notifications"]["enabled"] is True  # empty answer → default yes
@@ -80,7 +98,7 @@ async def test_wizard_custom_provider_asks_base_url(cfg_dir, clean_home):
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
     assert raw["llm"]["provider"] == "custom"
     assert raw["llm"]["base_url"] == "https://llm.local/v1"
-    assert raw["llm"]["model"] == "deepseek/deepseek-v4-flash-0731"  # pick 2
+    assert raw["llm"]["model"] == "openai/gpt-5-mini"  # pick 2
 
 
 async def test_wizard_base_url_validated(cfg_dir, clean_home):
@@ -101,7 +119,7 @@ async def test_wizard_key_required_loops_until_nonempty(cfg_dir, clean_home):
 async def test_wizard_advisor_opt_in(cfg_dir, clean_home):
     await run_wizard(FakeSession(["1", "sk-or-key", "1", "", "y"]), home=clean_home)
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
-    assert raw["advisor"] == {"enabled": True, "model": "tencent/hy4-preview"}
+    assert raw["advisor"] == {"enabled": True, "model": "deepseek/deepseek-v4-flash-0731"}
 
 
 async def test_wizard_notifications_off(cfg_dir, clean_home):
@@ -132,8 +150,27 @@ async def test_model_menu_shows_context_and_price(cfg_dir, clean_home, capsys):
     session = FakeSession(["1", "sk-or-key", "2", "", "n"])
     answers = await gather_answers(session, home=clean_home)
     menu = capsys.readouterr().out
-    assert "2) deepseek/deepseek-v4-flash-0731 — ctx 1.3M · $0.065/M in · $0.18/M out" in menu
-    assert answers["model"] == "deepseek/deepseek-v4-flash-0731"  # bare id returned
+    assert "1) deepseek/deepseek-v4-flash-0731 — ctx 1.3M · $0.065/M in · $0.18/M out" in menu
+    assert "3) z-ai/glm-5.2 — ctx 1.0M · $0.966/M in · $3.036/M out" in menu
+    assert answers["model"] == "openai/gpt-5-mini"  # pick 2, bare id returned
+
+
+async def test_model_menu_accepts_a_unique_substring(cfg_dir, clean_home):
+    session = FakeSession(["1", "sk-or-key", "glm-5.2", "", "n"])
+    answers = await gather_answers(session, home=clean_home)
+    assert answers["model"] == "z-ai/glm-5.2"
+
+
+async def test_model_step_falls_back_to_free_text(cfg_dir, clean_home, monkeypatch):
+    """When the provider list can't be fetched, the model id is typed."""
+
+    async def no_list(provider: str, base_url: str, api_key: str):
+        return {}
+
+    monkeypatch.setattr(setup_wizard, "_live_model_details", no_list)
+    session = FakeSession(["1", "sk-or-key", "", "my/corp-model", "", "n"])
+    answers = await gather_answers(session, home=clean_home)
+    assert answers["model"] == "my/corp-model"
 
 
 # -- --setup CLI flag --------------------------------------------------------------

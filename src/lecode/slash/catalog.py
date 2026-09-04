@@ -60,6 +60,7 @@ BUILTIN_COMMANDS: list[tuple[str, str]] = [
     ("notifications", "Configure audio notifications"),
     ("memory", "Inspect/edit persistent memory"),
     ("advisor", "Ask the advisor model"),
+    ("pierre", "Post-task review by a second model"),
     ("hooks", "Show configured hooks"),
     ("agents", "List agents"),
 ]

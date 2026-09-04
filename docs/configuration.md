@@ -186,6 +186,16 @@ See [memory.md](memory.md).
 | `context_limit_kb` | `32` | conversation context sent along |
 | `mode` | `"model"` | `model` \| `handoff` (ask the human inline) |
 
+## `[pierre]`
+
+Post-task reviewer: after every completed task, a second model compares the
+request with the result and gives feedback in the feed.
+
+| field | default | meaning |
+|---|---|---|
+| `enabled` | `false` | review every finished task + `/pierre` |
+| `model` | unset | reviewer model id (defaults to the main model) |
+
 ## `[hooks]`
 
 Event name → list of shell commands:

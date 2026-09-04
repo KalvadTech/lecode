@@ -26,6 +26,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from lecode.agent.review import review, user_request
 from lecode.agent.tools.base import ToolContext, ToolRegistry
 from lecode.config.models import Config
 from lecode.providers.catalog import Catalog, ModelNotFoundError
@@ -91,8 +92,16 @@ class Done:
     turns: int
 
 
+@dataclass(frozen=True)
+class Review:
+    """Pierre-mode feedback on the finished run (request vs result)."""
+
+    feedback: str
+    model: str
+
+
 #: Everything the runner reports through ``on_event``.
-AgentEvent = Token | Reasoning | ToolCall | ToolResult | Error | Retrying | Done
+AgentEvent = Token | Reasoning | ToolCall | ToolResult | Error | Retrying | Done | Review
 
 #: on_event(event) — sync or async.
 OnEvent = Callable[[AgentEvent], Any]
@@ -135,6 +144,8 @@ class RunResult:
     tool_calls: int = 0
     #: Wall-clock seconds for the whole run.
     elapsed_s: float = 0.0
+    #: Pierre-mode feedback (``[pierre] enabled``); ``None`` when not reviewed.
+    review: str | None = None
 
 
 def _usage_tokens(usage: dict[str, Any]) -> tuple[int, int]:
@@ -250,6 +261,40 @@ class AgentRunner:
             raise
 
         await self._emit(on_event, Done(stop_reason=stop_reason, turns=turns))
+
+        # Pierre mode: a second model reviews the request vs the result.
+        review_text: str | None = None
+        pierre = self.config.pierre
+        if pierre.enabled and stop_reason == "done" and final_text:
+            outcome = await review(
+                self.provider,
+                pierre.model or self.model,
+                request=user_request(messages),
+                response=final_text,
+                cwd=self.ctx.cwd,
+            )
+            if outcome is not None:
+                review_text = outcome.feedback
+                in_tok, out_tok, cost = self._usage_cost(outcome.model, outcome.usage or {})
+                input_tokens += in_tok
+                output_tokens += out_tok
+                cost_usd += cost
+                if self.session is not None and self.store is not None:
+                    self.store.append_event(
+                        self.session,
+                        "pierre",
+                        {
+                            "model": outcome.model,
+                            "feedback": outcome.feedback,
+                            "usage": {
+                                "input_tokens": in_tok,
+                                "output_tokens": out_tok,
+                                "cost_usd": cost,
+                            },
+                        },
+                    )
+                await self._emit(on_event, Review(feedback=outcome.feedback, model=outcome.model))
+
         elapsed_s = time.monotonic() - started_at
         record_turn(
             model=self.model,
@@ -272,6 +317,7 @@ class AgentRunner:
             ),
             tool_calls=tool_calls,
             elapsed_s=elapsed_s,
+            review=review_text,
         )
 
     # -- one turn --------------------------------------------------------------
@@ -423,9 +469,8 @@ class AgentRunner:
 
     # -- usage / cost ---------------------------------------------------------------
 
-    def _turn_cost(self, completed: CompletedMessage) -> tuple[int, int, float]:
-        """(input tokens, output tokens, cost in USD) for one turn."""
-        usage = completed.usage or {}
+    def _usage_cost(self, model: str, usage: dict[str, Any]) -> tuple[int, int, float]:
+        """(input tokens, output tokens, cost in USD) for one usage dict."""
         in_tok, out_tok = _usage_tokens(usage)
         if usage.get("cost_usd") is not None:
             return in_tok, out_tok, float(usage["cost_usd"])
@@ -434,10 +479,14 @@ class AgentRunner:
         if self._catalog is None:
             self._catalog = Catalog.default()
         try:
-            pricing = self._catalog.get(self.model).pricing
+            pricing = self._catalog.get(model).pricing
         except ModelNotFoundError:
             return in_tok, out_tok, 0.0
         return in_tok, out_tok, (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
+
+    def _turn_cost(self, completed: CompletedMessage) -> tuple[int, int, float]:
+        """(input tokens, output tokens, cost in USD) for one turn."""
+        return self._usage_cost(self.model, completed.usage or {})
 
     # -- persistence ------------------------------------------------------------------
 

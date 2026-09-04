@@ -144,7 +144,11 @@ async def run_subagent(
     )
 
     system_prompt = build_system_prompt(ctx.config, ctx.cwd, extra=agent.body or None)
-    child = AgentRunner(provider, child_registry(parent_registry), child_ctx, config=ctx.config)
+    # Pierre reviews the user's task, not subagent side-quests.
+    child_config = ctx.config.model_copy(
+        update={"pierre": ctx.config.pierre.model_copy(update={"enabled": False})}
+    )
+    child = AgentRunner(provider, child_registry(parent_registry), child_ctx, config=child_config)
     child.model = agent.model or ctx.config.agent.subagent_model or ctx.config.llm.model
 
     forward = (lambda event: on_event(name, event)) if on_event is not None else None

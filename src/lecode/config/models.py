@@ -219,6 +219,17 @@ class AdvisorConfig(BaseModel):
     mode: Literal["model", "handoff"] = "model"
 
 
+class PierreConfig(BaseModel):
+    """``[pierre]`` — post-task reviewer: a second model compares the request
+    with the result and gives feedback after every completed task."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    #: Reviewer model; ``None`` falls back to the main model.
+    model: str | None = None
+
+
 class TelemetryConfig(BaseModel):
     """``[telemetry]`` — Sentry errors + OpenTelemetry metrics (opt-in).
 
@@ -272,6 +283,7 @@ class Config(BaseModel):
     lsp: LspConfig = Field(default_factory=LspConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     advisor: AdvisorConfig = Field(default_factory=AdvisorConfig)
+    pierre: PierreConfig = Field(default_factory=PierreConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     hooks: dict[str, list[str]] = Field(default_factory=dict)
     model_presets: dict[str, str] = Field(default_factory=dict)

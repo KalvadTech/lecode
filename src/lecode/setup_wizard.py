@@ -31,14 +31,6 @@ from lecode.tui.statusline import human_tokens
 #: OpenRouter-compatible endpoint reached via a base URL.
 PROVIDER_CHOICES = ("openrouter", "custom")
 
-#: Default-model menu picks; annotated live from the provider's ``/models``.
-MODEL_PICKS = (
-    "tencent/hy4-preview",
-    "deepseek/deepseek-v4-flash-0731",
-    "z-ai/glm-5.3-flash",
-    "z-ai/glm-5.2",
-)
-
 #: Providers that cannot work without an API key.
 _KEY_REQUIRED = ("openrouter",)
 
@@ -244,7 +236,9 @@ async def _ask_choice(
     """A numbered menu; empty answer picks ``default`` (or 1). Loops until valid.
 
     ``describe`` adds a " — <detail>" suffix to each menu line (the return
-    value is still the bare choice).
+    value is still the bare choice). Accepts a number, an exact choice, or a
+    unique case-insensitive substring — handy when the menu is a provider's
+    full model list.
     """
     print(message)
     for i, choice in enumerate(choices, start=1):
@@ -259,7 +253,15 @@ async def _ask_choice(
             return choices[int(answer) - 1]
         if answer in choices:
             return answer
-        print(f"error: pick 1-{len(choices)} or one of {', '.join(choices)}")
+        matches = [c for c in choices if answer.lower() in c.lower()]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            shown = ", ".join(matches[:10])
+            more = f" +{len(matches) - 10} more" if len(matches) > 10 else ""
+            print(f"error: '{answer}' is ambiguous ({shown}{more}) — be more specific")
+        else:
+            print(f"error: pick 1-{len(choices)}, an id from the list, or a unique substring")
 
 
 async def _ask_yes_no(session: PromptSession, message: str, default: bool = True) -> bool:
@@ -342,18 +344,29 @@ async def gather_answers(session: PromptSession, home: Path | None = None) -> di
     while not api_key and provider in _KEY_REQUIRED:
         print(f"error: {provider} needs an API key")
         api_key = await _ask_text(session, "API key")
-    model_choices: list[str] = list(MODEL_PICKS)
     model_default = imported.get("model")
-    if model_default and model_default not in model_choices:
-        model_choices.insert(0, model_default)
     details = await _live_model_details(provider, base_url, api_key)
-    model = await _ask_choice(
-        session,
-        "Default model:",
-        model_choices,
-        describe=lambda m: _model_detail(m, details),
-        default=model_default,
-    )
+    if details:
+        # The full provider list, sorted, annotated with ctx size and pricing.
+        model_choices = sorted(details)
+        if model_default and model_default not in details:
+            model_choices.insert(0, model_default)
+        model = await _ask_choice(
+            session,
+            f"Default model ({len(details)} from the provider):",
+            model_choices,
+            describe=lambda m: _model_detail(m, details),
+            default=model_default,
+        )
+    else:
+        # Fetch failed (offline, keyless non-listing endpoint): free text.
+        model = ""
+        while not model:
+            model = await _ask_text(
+                session, "Default model (provider list unavailable)", default=model_default or ""
+            )
+            if not model:
+                print("error: a model id is required")
     notifications = await _ask_yes_no(session, "Audio notifications?", default=True)
     advisor = await _ask_yes_no(
         session, "Enable the advisor (second-opinion model)?", default=False

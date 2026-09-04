@@ -50,8 +50,7 @@ async def prompt_session_name(
 
 def folder_sessions(store: SessionStore, cwd: Path | str) -> list[MetaRecord]:
     """Sessions created in ``cwd``, most recent first."""
-    wanted = str(cwd)
-    return [m for m in store.list_sessions() if m.cwd == wanted]
+    return store.list_sessions(cwd)
 
 
 async def pick_session(
