@@ -11,12 +11,14 @@ Ask becomes a denial ("requires approval"). Deny is never converted.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from lecode.config.models import Config
 from lecode.permission import AllowAlways, Decision, Deny, PermissionChecker
+from lecode.telemetry import capture_exception, record_tool_call
 
 #: Cap on tool-argument JSON size (guard against runaway payloads).
 MAX_ARGS_BYTES = 1_000_000
@@ -160,6 +162,11 @@ class ToolRegistry:
             # AllowOnce / AllowAlways fall through to running the tool.
 
         try:
-            return await tool.run(args, ctx)
+            started = time.monotonic()
+            result = await tool.run(args, ctx)
+            record_tool_call(name, is_error=result.is_error, duration_s=time.monotonic() - started)
+            return result
         except Exception as e:  # tools never crash the loop
+            record_tool_call(name, is_error=True, duration_s=time.monotonic() - started)
+            capture_exception(e, context=f"tool:{name}")
             return ToolResult(f"error: {type(e).__name__}: {e}", is_error=True)

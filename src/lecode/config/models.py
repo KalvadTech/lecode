@@ -219,6 +219,30 @@ class AdvisorConfig(BaseModel):
     mode: Literal["model", "handoff"] = "model"
 
 
+class TelemetryConfig(BaseModel):
+    """``[telemetry]`` — Sentry errors + OpenTelemetry metrics (opt-in).
+
+    Both are off by default and need the ``telemetry`` extra
+    (``uv tool install 'lecode[telemetry]'``). Sentry needs a DSN (GlitchTip
+    works too); OTel metrics export over OTLP/HTTP to ``otlp_endpoint``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    #: Sentry DSN; empty disables error reporting.
+    sentry_dsn: str | None = None
+    #: OTLP/HTTP metrics endpoint, e.g. ``http://localhost:4318``; empty
+    #: disables metrics export.
+    otlp_endpoint: str | None = None
+    #: Export interval for metrics.
+    export_interval_s: float = 60.0
+    #: Service name reported to both backends.
+    service_name: str = "lecode"
+    #: Environment tag (e.g. ``prod``/``dev``).
+    environment: str = "dev"
+
+
 class CustomProvider(BaseModel):
     """One entry of ``[custom_providers]``."""
 
@@ -248,6 +272,7 @@ class Config(BaseModel):
     lsp: LspConfig = Field(default_factory=LspConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     advisor: AdvisorConfig = Field(default_factory=AdvisorConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     hooks: dict[str, list[str]] = Field(default_factory=dict)
     model_presets: dict[str, str] = Field(default_factory=dict)
     custom_providers: dict[str, CustomProvider] = Field(default_factory=dict)

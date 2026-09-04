@@ -212,3 +212,23 @@ api_key_env = "LOCAL_API_KEY"   # optional
 auth_policy = "none"            # auto | required | none
 # headers = { X-Team = "infra" }
 ```
+
+## `[telemetry]`
+
+Opt-in Sentry error reporting + OpenTelemetry metrics. Requires the
+`telemetry` extra (`uv tool install 'lecode[telemetry]'`); every failure mode
+is fail-open (telemetry never breaks the agent).
+
+| field | default | meaning |
+|---|---|---|
+| `enabled` | `false` | master switch |
+| `sentry_dsn` | unset | Sentry (or GlitchTip) DSN for error reports |
+| `otlp_endpoint` | unset | OTLP/HTTP base URL for metrics (e.g. `http://localhost:4318`) |
+| `export_interval_s` | `60.0` | metric export interval |
+| `service_name` | `"lecode"` | OTel `service.name` resource |
+| `environment` | `"dev"` | Sentry/OTel environment tag |
+
+Metrics: `lecode.turns`, `lecode.turn.duration_s`, `lecode.tokens.input`,
+`lecode.tokens.output`, `lecode.cost_usd`, `lecode.tool_calls`,
+`lecode.tool.duration_s` (all tagged by model / tool / stop reason). Sentry
+receives provider and tool errors with `send_default_pii = false`.

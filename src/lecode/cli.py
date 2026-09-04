@@ -52,6 +52,7 @@ from lecode.session.storage import (
     SessionStore,
 )
 from lecode.setup_wizard import offer_first_run_setup, run_wizard
+from lecode.telemetry import init_telemetry, shutdown_telemetry
 from lecode.tui.app import TuiApp
 from lecode.tui.name_prompt import prompt_session_name
 
@@ -213,6 +214,12 @@ def _tool_filter(allowed_tools: str | None) -> list[str] | None:
     return [name.strip() for name in allowed_tools.split(",") if name.strip()]
 
 
+def _init_telemetry(config: Config) -> None:
+    """Start Sentry/OTel if configured; problems degrade to warnings."""
+    for warning in init_telemetry(config.telemetry, version=__version__):
+        typer.echo(f"warning: {warning}", err=True)
+
+
 async def _create_worktree(cwd: Path, name: str) -> tuple[WorktreeManager, WorktreeInfo]:
     """Create the ``--worktree`` isolation; the session then runs inside it."""
     manager = await WorktreeManager.discover(cwd)
@@ -251,6 +258,7 @@ def run_headless(
         tls_verify=tls_verify,
         max_turns=max_turns,
     )
+    _init_telemetry(config)
 
     try:
         client = build_provider(config, api_key=api_key)
@@ -305,6 +313,7 @@ def run_headless(
         return EXIT_ERROR
     finally:
         signals.emit(STOP)
+        shutdown_telemetry()
 
     typer.echo(result.final_text)
     totals = result.usage_totals
@@ -350,6 +359,7 @@ def run_loop_mode(
         tls_verify=tls_verify,
         max_turns=None,
     )
+    _init_telemetry(config)
     try:
         client = build_provider(config, api_key=api_key)
     except (AuthError, ValueError) as e:
@@ -415,6 +425,7 @@ def run_loop_mode(
         return EXIT_ERROR
     finally:
         signals.emit(STOP)
+        shutdown_telemetry()
     if result.stop_reason == "error":
         typer.echo(f"error: {result.error}", err=True)
         return EXIT_ERROR
@@ -453,6 +464,7 @@ def run_chain_mode(
         tls_verify=tls_verify,
         max_turns=None,
     )
+    _init_telemetry(config)
     try:
         client = build_provider(config, api_key=api_key)
     except (AuthError, ValueError) as e:
@@ -509,6 +521,7 @@ def run_chain_mode(
         return EXIT_ERROR
     finally:
         signals.emit(STOP)
+        shutdown_telemetry()
     return EXIT_OK
 
 
@@ -565,6 +578,7 @@ def run_interactive(
     )
     if no_color:
         config.ui.no_color = True
+    _init_telemetry(config)
 
     cwd = Path.cwd()
     wt_manager: WorktreeManager | None = None
@@ -665,9 +679,11 @@ def run_interactive(
     try:
         code = asyncio.run(_run_tui(tui, client))
     except KeyboardInterrupt:
+        shutdown_telemetry()
         return EXIT_OK
     if wt_info is not None:
         typer.echo(_worktree_exit_note(wt_info))
+    shutdown_telemetry()
     return code
 
 

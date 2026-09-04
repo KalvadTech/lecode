@@ -43,6 +43,7 @@ from lecode.providers.types import (
 from lecode.providers.types import (
     Done as StreamDone,
 )
+from lecode.telemetry import capture_exception, record_turn
 
 # -- runner events (the plan's taxonomy) --------------------------------------
 
@@ -249,6 +250,16 @@ class AgentRunner:
             raise
 
         await self._emit(on_event, Done(stop_reason=stop_reason, turns=turns))
+        elapsed_s = time.monotonic() - started_at
+        record_turn(
+            model=self.model,
+            stop_reason=stop_reason,
+            turns=turns,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            elapsed_s=elapsed_s,
+        )
         return RunResult(
             final_text=final_text,
             turns=turns,
@@ -260,7 +271,7 @@ class AgentRunner:
                 context_tokens=context_tokens,
             ),
             tool_calls=tool_calls,
-            elapsed_s=time.monotonic() - started_at,
+            elapsed_s=elapsed_s,
         )
 
     # -- one turn --------------------------------------------------------------
@@ -285,6 +296,7 @@ class AgentRunner:
             return await retry_async(invoke, on_retry=on_retry)
         except ProviderError as e:
             await self._emit(on_event, Error(message=str(e)))
+            capture_exception(e, context="provider")
             raise
 
     async def _collect(

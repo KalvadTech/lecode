@@ -49,6 +49,29 @@ def test_defaults_validate_from_empty():
     assert config.memory.max_bytes == 32768
     assert config.advisor.enabled is False
     assert config.advisor.mode == "model"
+    assert config.telemetry.enabled is False
+    assert config.telemetry.sentry_dsn is None
+    assert config.telemetry.otlp_endpoint is None
+
+
+def test_telemetry_section_parses(global_dir, tmp_path):
+    (global_dir / "config.toml").write_text(
+        "schema_version = 1\n"
+        "[telemetry]\n"
+        "enabled = true\n"
+        'sentry_dsn = "https://key@glitchtip.example.com/1"\n'
+        'otlp_endpoint = "http://localhost:4318"\n'
+        "export_interval_s = 30.0\n"
+        'environment = "prod"\n'
+    )
+    result = load_config(cwd=tmp_path)
+    tel = result.config.telemetry
+    assert tel.enabled is True
+    assert tel.sentry_dsn == "https://key@glitchtip.example.com/1"
+    assert tel.otlp_endpoint == "http://localhost:4318"
+    assert tel.export_interval_s == 30.0
+    assert tel.environment == "prod"
+    assert result.warnings == []
 
 
 def test_first_run_creates_default_config(global_dir, tmp_path):

@@ -147,6 +147,9 @@ non-tty `--setup`) · `3` max turns / max loop iterations.
   `/wt-merge` / `/wt-exit` with conflict detection.
 - **Multimodal** — `/add image.png` or `@file.pdf`; capability-checked
   against the model.
+- **Telemetry (opt-in)** — Sentry/GlitchTip error reports and OpenTelemetry
+  metrics (turns, tokens, cost, tool calls) via `[telemetry]`; needs the
+  `telemetry` extra, fail-open by design.
 
 ## Configuration
 
