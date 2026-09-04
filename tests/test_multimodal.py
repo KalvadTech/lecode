@@ -277,7 +277,9 @@ async def test_drop_all_handler(tmp_path, monkeypatch):
 
 async def test_submit_sends_content_parts(tmp_path, monkeypatch):
     _write(tmp_path, "img.png", PNG)
-    app, provider, out = make_app(tmp_path, monkeypatch, [{"text": "it's a png"}])
+    config = Config()
+    config.llm.model = IMAGE_MODEL
+    app, provider, out = make_app(tmp_path, monkeypatch, [{"text": "it's a png"}], config=config)
     await app.handle_command("/add img.png")
     await app._submit("what is this")
     await app._turn_task
@@ -306,7 +308,9 @@ async def test_submit_modality_error_blocks_send(tmp_path, monkeypatch):
 
 async def test_submit_at_path_attachment(tmp_path, monkeypatch):
     _write(tmp_path, "shot.png", PNG)
-    app, provider, out = make_app(tmp_path, monkeypatch, [{"text": "described"}])
+    config = Config()
+    config.llm.model = IMAGE_MODEL
+    app, provider, out = make_app(tmp_path, monkeypatch, [{"text": "described"}], config=config)
     await app._submit("describe @shot.png")
     await app._turn_task
     message = provider.requests[0]["messages"][-1]
@@ -317,7 +321,9 @@ async def test_submit_at_path_attachment(tmp_path, monkeypatch):
 
 async def test_queued_message_with_attachments(tmp_path, monkeypatch):
     _write(tmp_path, "img.png", PNG)
-    app, provider, out = make_blocking_app(tmp_path, monkeypatch)
+    config = Config()
+    config.llm.model = IMAGE_MODEL
+    app, provider, out = make_blocking_app(tmp_path, monkeypatch, config=config)
     await app._submit("first")
     await wait_for(lambda: len(provider.requests) == 1)
     await app._submit("@img.png queued pic")

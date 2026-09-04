@@ -9,14 +9,17 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 #: Current on-disk schema version. Bump when adding a migration.
 CURRENT_SCHEMA_VERSION = 1
 
 ThinkingLevel = Literal["none", "low", "medium", "high"]
 AuthPolicy = Literal["auto", "required", "none"]
-PermissionMode = Literal["standard", "restrictive", "readonly", "planwrite", "guarded", "yolo"]
+PermissionMode = Literal["readonly", "yolo"]
+
+#: Removed modes accepted from legacy configs; all coerced to ``yolo``.
+LEGACY_PERMISSION_MODES = frozenset({"standard", "restrictive", "planwrite", "guarded"})
 
 
 class SystemPromptConfig(BaseModel):
@@ -35,7 +38,7 @@ class LlmConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     provider: str = "openrouter"
-    model: str = "openai/gpt-5-mini"
+    model: str = "deepseek/deepseek-v4-flash"
     api_key: str | None = None
     base_url: str | None = None
     thinking: ThinkingLevel = "medium"
@@ -115,8 +118,17 @@ class PermissionsConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    mode: PermissionMode = "standard"
+    mode: PermissionMode = "yolo"
     rules: PermissionRuleSet = Field(default_factory=PermissionRuleSet)
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _coerce_legacy_mode(cls, value: object) -> object:
+        # Backwards compatibility: modes removed in the two-mode system map
+        # onto yolo (readonly loads unchanged).
+        if isinstance(value, str) and value in LEGACY_PERMISSION_MODES:
+            return "yolo"
+        return value
 
 
 class NotificationsConfig(BaseModel):

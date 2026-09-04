@@ -235,7 +235,7 @@ portal.
 - **Slash commands** (~50): `/new /clear /resume /session /undo /redo /rewind /retry
   /rename /history /quit /exit /handoff /compact /compress /model /models /models-add
   /provider /thinking /reasoning /permissions /mode /toggle /theme /themes /prompt
-  /regen-prompts /regen-themes /editsys /add /drop /drop-all /init /help /welcome
+  /editsys /add /drop /drop-all /init /help /welcome
   /tutor /review /btw /queue /copy /export /import /share /loop /worktree /wt-exit
   /wt-merge /mcp /model-subagent /models-subagent /notifications /memory /advisor
   /hooks /agents` + skill-registered commands. Prefixes: `!cmd`, `!!cmd`, `.prompt`,

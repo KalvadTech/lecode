@@ -145,6 +145,48 @@ def test_error_info_retrying(theme):
     assert "retrying (attempt 2) in 1.5s…" in rendered
 
 
+def test_turn_stats_line(theme):
+    feed, out = make_feed(theme)
+    feed.turn_stats(
+        context_used=36_864,
+        context_window=204_800,
+        input_tokens=4_100,
+        output_tokens=900,
+        cost_usd=0.0062,
+        session_cost_usd=0.0314,
+        tool_calls=3,
+        turns=2,
+        elapsed_s=12.34,
+    )
+    rendered = out.getvalue()
+    assert "ctx 36.9k/204.8k (18%)" in rendered
+    assert "↑4.1k in" in rendered
+    assert "↓0.9k out" in rendered
+    assert "$0.0062 this answer" in rendered
+    assert "$0.0314 total" in rendered
+    assert "3 tool calls" in rendered
+    assert "2 rounds" in rendered
+    assert "12.3s" in rendered
+
+
+def test_turn_stats_line_plain_answer_hides_tool_count(theme):
+    feed, out = make_feed(theme)
+    feed.turn_stats(
+        context_used=1_000,
+        context_window=200_000,
+        input_tokens=1_000,
+        output_tokens=50,
+        cost_usd=0.0001,
+        session_cost_usd=0.0001,
+        turns=1,
+        elapsed_s=0.4,
+    )
+    rendered = out.getvalue()
+    assert "tool call" not in rendered
+    assert "1 round" in rendered
+    assert "0.4s" in rendered
+
+
 def test_error_emits_ansi_when_terminal(theme, monkeypatch):
     monkeypatch.delenv("NO_COLOR", raising=False)
     feed, out = make_feed(theme, force_terminal=True)

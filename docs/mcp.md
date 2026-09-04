@@ -42,9 +42,9 @@ browser flow); pass bearer tokens via `headers` instead.
 ## Permissions
 
 Tools from the read-only-ish servers **exa**, **context7**, and **grep-app**
-are read-equivalent: auto-allowed in `standard` and `readonly` modes. Every
-other MCP tool follows the mode fallback (`ask` in standard, denied in
-readonly) and can be matched by rules:
+are read-equivalent: allowed in both `yolo` and `readonly` modes. Every
+other MCP tool follows the mode fallback (allowed in `yolo`, denied in
+`readonly`) and can be matched by rules:
 
 ```toml
 # rule keys are exact tool names; the pattern matches the call target

@@ -21,10 +21,9 @@ __all__ = [
     "resolve_provider",
 ]
 
-OPENAI_BASE_URL = "https://api.openai.com/v1"
-
-#: Provider names with built-in base URLs.
-BUILTIN_PROVIDERS = ("openrouter", "openai")
+#: Provider names with built-in base URLs. Anything else is a custom
+#: OpenRouter-compatible endpoint via ``[custom_providers]`` or ``--base-url``.
+BUILTIN_PROVIDERS = ("openrouter",)
 
 
 @dataclass(frozen=True)
@@ -47,9 +46,10 @@ def resolve_provider(
     """Resolve which endpoint to talk to.
 
     Precedence: ``--base-url`` (ad-hoc provider named ``custom``) >
-    ``--provider`` > ``[llm].provider``. Built-ins are ``openrouter`` and
-    ``openai``; anything else must exist in ``[custom_providers]``.
-    ``[llm].base_url`` overrides a built-in's default base URL.
+    ``--provider`` > ``[llm].provider``. The only built-in is ``openrouter``;
+    anything else must exist in ``[custom_providers]`` (any OpenRouter-
+    compatible endpoint). ``[llm].base_url`` overrides a built-in's default
+    base URL.
     """
     if cli_base_url:
         return ProviderSpec(
@@ -68,8 +68,6 @@ def resolve_provider(
     if name == "openrouter":
         base_url = base_url or OPENROUTER_BASE_URL
         headers = dict(APP_HEADERS)
-    elif name == "openai":
-        base_url = base_url or OPENAI_BASE_URL
     elif name in config.custom_providers:
         custom = config.custom_providers[name]
         base_url = base_url or custom.base_url
@@ -77,8 +75,8 @@ def resolve_provider(
         auth_policy = custom.auth_policy
     else:
         raise ValueError(
-            f"unknown provider '{name}'; expected one of {BUILTIN_PROVIDERS} "
-            "or a [custom_providers] entry"
+            f"unknown provider '{name}'; expected 'openrouter' "
+            "or a [custom_providers] entry (any OpenRouter-compatible endpoint)"
         )
 
     return ProviderSpec(

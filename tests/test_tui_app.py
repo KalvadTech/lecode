@@ -56,8 +56,8 @@ class BlockingProvider:
         yield Done(finish_reason="stop")
 
 
-def make_blocking_app(tmp_path, monkeypatch):
-    app, _, out = make_app(tmp_path, monkeypatch, [])
+def make_blocking_app(tmp_path, monkeypatch, config=None):
+    app, _, out = make_app(tmp_path, monkeypatch, [], config=config)
     provider = BlockingProvider()
     app._runner.provider = provider
     return app, provider, out
@@ -84,6 +84,19 @@ async def test_submit_streams_answer(tmp_path, monkeypatch):
     assert "> hi" in rendered
     assert "Hello world" in rendered
     assert provider.requests[0]["messages"][-1] == {"role": "user", "content": "hi"}
+
+
+async def test_submit_prints_per_answer_stats_line(tmp_path, monkeypatch):
+    script = [{"text": "done", "usage": {"input_tokens": 1234, "output_tokens": 42}}]
+    app, _, out = make_app(tmp_path, monkeypatch, script)
+    await app._submit("hi")
+    await app._turn_task
+    rendered = out.getvalue()
+    assert "ctx 1.2k/" in rendered  # last call's prompt size over the model window
+    assert "↑1.2k in" in rendered
+    assert "↓42 out" in rendered
+    assert "this answer" in rendered
+    assert "1 round" in rendered
 
 
 async def test_reasoning_and_tool_events_render(tmp_path, monkeypatch):

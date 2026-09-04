@@ -1,12 +1,13 @@
 """Theme loading and resolution for the TUI.
 
 A theme is a JSON file with a ``name`` and a ``colors`` mapping over the
-nine semantic color slots (see :data:`COLOR_KEYS`). Resolution follows the
-standard resource precedence (embedded ``data/themes/`` < global config dir
-< project ``.lecode/themes/``) via :mod:`lecode.context.resources`, then the
-``[colors]`` config table overrides individual slots last. Missing color
-keys inherit from the ``default`` theme; an unknown theme name falls back
-to ``default`` with a warning.
+nine semantic color slots (see :data:`COLOR_KEYS`). Resolution follows
+resource precedence **without the global config dir** (embedded
+``data/themes/`` < project ``.lecode/themes/``) via
+:mod:`lecode.context.resources`, then the ``[colors]`` config table
+overrides individual slots last. Missing color keys inherit from the
+``default`` theme; an unknown theme name falls back to ``default`` with a
+warning.
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ class Theme:
 def _load_colors(name: str, cwd: Path | None = None) -> dict[str, str] | None:
     """Load the color mapping for a theme, or ``None`` if it does not exist."""
     try:
-        raw = load_text("themes", f"{name}.json", cwd=cwd)
+        raw = load_text("themes", f"{name}.json", cwd=cwd, include_global=False)
     except FileNotFoundError:
         return None
     data = json.loads(raw)
@@ -86,6 +87,6 @@ def load_theme(name: str, config: Config, cwd: Path | None = None) -> Theme:
 
 
 def list_themes(cwd: Path | None = None) -> list[str]:
-    """List theme names across all layers (embedded, global, project)."""
-    names = list_available("themes", cwd=cwd)
+    """List theme names across the embedded and project layers."""
+    names = list_available("themes", cwd=cwd, include_global=False)
     return sorted(n.removesuffix(".json") for n in names if n.endswith(".json"))

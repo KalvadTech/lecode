@@ -15,6 +15,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from lecode.tui.statusline import context_meter, format_cost, human_tokens
 from lecode.tui.themes import Theme
 
 #: Max length of a rendered tool-call line.
@@ -98,6 +99,37 @@ class Feed:
             shown.append(f"… ({len(lines) - TOOL_RESULT_HEAD_LINES} more lines)")
         style = self._theme.error if is_error else self._theme.muted
         self._console.print(Text("\n".join(shown), style=style))
+
+    def turn_stats(
+        self,
+        *,
+        context_used: int,
+        context_window: int,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float,
+        session_cost_usd: float,
+        tool_calls: int = 0,
+        turns: int = 0,
+        elapsed_s: float = 0.0,
+    ) -> None:
+        """Muted per-answer line: context fill, tokens in/out, price, activity."""
+        _, pct = context_meter(context_used, context_window)
+        parts = [
+            f"ctx {human_tokens(context_used)}/{human_tokens(context_window)} ({pct}%)",
+            f"↑{human_tokens(input_tokens)} in · ↓{human_tokens(output_tokens)} out",
+            f"{format_cost(cost_usd)} this answer · {format_cost(session_cost_usd)} total",
+        ]
+        activity = []
+        if tool_calls:
+            activity.append(f"{tool_calls} tool call{'s' if tool_calls != 1 else ''}")
+        if turns:
+            activity.append(f"{turns} round{'s' if turns != 1 else ''}")
+        if elapsed_s:
+            activity.append(f"{elapsed_s:.1f}s")
+        if activity:
+            parts.append(" · ".join(activity))
+        self._console.print(Text(" · ".join(parts), style=self._theme.muted))
 
     def error(self, msg: str) -> None:
         """Render an error one-liner."""

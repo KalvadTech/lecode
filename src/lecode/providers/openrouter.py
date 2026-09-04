@@ -51,15 +51,16 @@ def _per_million(pricing: dict[str, Any], key: str) -> float:
 
 
 def map_remote_model(item: dict[str, Any]) -> ModelInfo | None:
-    """Map one OpenRouter ``/models`` entry to :class:`ModelInfo`.
+    """Map one ``/models`` entry to :class:`ModelInfo`.
 
-    Tolerates missing fields; returns ``None`` for entries without an id or
-    context length (e.g. deprecated aliases).
+    Tolerates missing fields; returns ``None`` only for entries without an
+    id. Entries from a plain OpenAI-shaped endpoint carry just an id — those
+    get a default 128k context window and zeroed pricing.
     """
     model_id = item.get("id")
-    context_length = item.get("context_length")
-    if not model_id or not context_length:
+    if not model_id:
         return None
+    context_length = item.get("context_length") or 128_000
     architecture = item.get("architecture") or {}
     supported = item.get("supported_parameters") or []
     top_provider = item.get("top_provider") or {}

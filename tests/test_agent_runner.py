@@ -273,7 +273,7 @@ async def test_non_retryable_error_propagates(tool_ctx):
 
 
 async def test_usage_and_cost_totals(tool_ctx):
-    # catalog pricing for openai/gpt-5-mini: $0.25 / $2.00 per million tokens
+    # catalog pricing for deepseek/deepseek-v4-flash: $0.09 / $0.18 per million tokens
     script = [
         {
             "tool_calls": [{"id": "c1", "name": "echo", "arguments": "{}"}],
@@ -288,7 +288,9 @@ async def test_usage_and_cost_totals(tool_ctx):
     totals = result.usage_totals
     assert totals.input_tokens == 3000
     assert totals.output_tokens == 600
-    expected = (1000 * 0.25 + 500 * 2.0) / 1_000_000 + 0.5  # catalog + provider-reported
+    # context fill = last call's prompt size, not the accumulated sum
+    assert totals.context_tokens == 2000
+    expected = (1000 * 0.09 + 500 * 0.18) / 1_000_000 + 0.5  # catalog + provider-reported
     assert totals.cost_usd == pytest.approx(expected)
 
 
@@ -313,7 +315,7 @@ async def test_session_records_include_usage(tool_ctx, tmp_path):
     assert final.usage == {
         "input_tokens": 42,
         "output_tokens": 7,
-        "cost_usd": (42 * 0.25 + 7 * 2.0) / 1_000_000,
+        "cost_usd": (42 * 0.09 + 7 * 0.18) / 1_000_000,
     }
     assert records[1].usage is None  # tool messages carry no usage
 

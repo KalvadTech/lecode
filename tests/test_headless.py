@@ -40,7 +40,7 @@ def test_headless_prints_final_text_and_cost(headless):
     assert result.stdout == "final answer\n"
     match = re.search(r"tokens: 10 in / 5 out · cost: \$(\d+\.\d{4})", result.stderr)
     assert match is not None
-    # 10 * 0.25 + 5 * 2.0 per million (default model openai/gpt-5-mini)
+    # 10 * 0.09 + 5 * 0.18 per million (default model deepseek/deepseek-v4-flash)
     assert float(match.group(1)) == pytest.approx(0.0, abs=1e-9)
 
 
@@ -99,7 +99,7 @@ def test_headless_auth_required_without_key_is_startup_error(headless, monkeypat
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-    args = ["-p", "hello", "--provider", "openai", "--auth-policy", "required"]
+    args = ["-p", "hello", "--base-url", "http://localhost:9/v1", "--auth-policy", "required"]
     result = runner.invoke(app, args)
 
     assert result.exit_code == EXIT_STARTUP

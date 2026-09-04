@@ -86,7 +86,7 @@ def test_agent_name_prepends_body(cwd):
 def test_unknown_agent_name_ignored(cwd):
     runtime = build_runtime(Config(), cwd, agent_name="nope")
     checker = runtime.ctx.permission_checker
-    assert checker.check("write", {"file_path": "x.txt"}).decision == Decision.ASK
+    assert checker.check("write", {"file_path": "x.txt"}).decision == Decision.ALLOW
     assert "planning mode" not in runtime.system_prompt
 
 

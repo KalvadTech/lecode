@@ -8,8 +8,9 @@ Decision pipeline in :meth:`PermissionChecker.check`:
 4. overlay extra allow/ask rules, last match wins
 5. global allow rules then ask rules, last match wins
 6. session "allow always" grants → Allow
-7. mode fallback (six modes; MCP read-equivalence makes Exa/context7/grep.app
-   tools read-class in every mode)
+7. mode fallback (two modes: ``yolo`` allows everything, ``readonly`` allows
+   read-class tools only; MCP read-equivalence makes Exa/context7/grep.app
+   tools read-class in both modes)
 8. doom-loop escalation wraps the result: 3rd identical consecutive call
    turns Allow into Ask with a coach reason; 4th+ is Deny
 
@@ -84,24 +85,6 @@ READ_TOOLS = frozenset(
         "advisor",  # a model call, not a mutation — read-class in every mode
         "task",  # dispatches a subagent; its own calls are gated individually
     }
-)
-
-#: Tools that modify files, state, or the world.
-WRITE_TOOLS = frozenset({"write", "edit", "bash", "todo_write", "memory_write", "memory_edit"})
-
-#: Baked-in bash denies for restrictive mode.
-RESTRICTIVE_BASH_DENIES = (
-    "rm -rf /",
-    "rm -rf /*",
-    "rm -rf ~*",
-    "sudo",
-    "sudo *",
-    "git push",
-    "git push *",
-    ":(){ :|:& };:",
-    "mkfs*",
-    "dd *of=/dev/*",
-    "chmod -R 777 /*",
 )
 
 #: Doom-loop thresholds (consecutive identical calls).
@@ -283,48 +266,10 @@ class PermissionChecker:
     def _is_read_class(self, tool_name: str) -> bool:
         return tool_name in READ_TOOLS or is_read_equiv_mcp(tool_name)
 
-    def _path_in_project(self, target: str) -> bool:
-        try:
-            path = Path(target)
-            if not path.is_absolute():
-                path = self._cwd / path
-            return path.resolve().is_relative_to(self._cwd.resolve())
-        except OSError:
-            return False
-
     def _mode_fallback(self, mode: PermissionMode, tool_name: str, target: str) -> CheckResult:
         reason = f"mode: {mode}"
         if mode == "yolo":
             return CheckResult(Decision.ALLOW, reason)
-        if mode == "guarded":
-            return CheckResult(Decision.ASK, reason)
-        if mode == "standard":
-            decision = Decision.ALLOW if self._is_read_class(tool_name) else Decision.ASK
-            return CheckResult(decision, reason)
-        if mode == "restrictive":
-            if tool_name == "bash":
-                for pattern in RESTRICTIVE_BASH_DENIES:
-                    if fnmatch_glob(pattern, target):
-                        return CheckResult(
-                            Decision.DENY,
-                            f"restrictive bash deny: {pattern}",
-                        )
-                return CheckResult(Decision.ASK, reason)
-            decision = Decision.ALLOW if self._is_read_class(tool_name) else Decision.ASK
-            return CheckResult(decision, reason)
-        if mode == "readonly":
-            decision = Decision.ALLOW if self._is_read_class(tool_name) else Decision.DENY
-            return CheckResult(decision, reason)
-        if mode == "planwrite":
-            if self._is_read_class(tool_name):
-                return CheckResult(Decision.ALLOW, reason)
-            if tool_name in ("write", "edit"):
-                if self._path_in_project(target):
-                    return CheckResult(Decision.ALLOW, f"{reason} (path inside project)")
-                return CheckResult(Decision.ASK, f"{reason} (path outside project)")
-            if tool_name == "bash":
-                return CheckResult(Decision.ASK, reason)
-            # path-less writes (todo_write, memory_*): allowed
-            decision = Decision.ALLOW if tool_name in WRITE_TOOLS else Decision.ASK
-            return CheckResult(decision, reason)
-        return CheckResult(Decision.ASK, f"unknown mode: {mode}")
+        # readonly: read-class tools are allowed, everything else is denied.
+        decision = Decision.ALLOW if self._is_read_class(tool_name) else Decision.DENY
+        return CheckResult(decision, reason)

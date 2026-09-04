@@ -14,7 +14,7 @@ from tests.fakes import FakeProvider
 
 from lecode.agent.builder import build_runtime
 from lecode.agent.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
-from lecode.config.models import Config
+from lecode.config.models import Config, PermissionRule
 from lecode.permission import (
     AllowAlways,
     AllowOnce,
@@ -40,11 +40,17 @@ class FakeTool(Tool):
         return ToolResult(f"ran: {args}")
 
 
-def make_ctx(tmp_path, monkeypatch, callback=None, mode="standard", tool_name="bash"):
-    """A ToolContext with session + store so grants can persist."""
+def make_ctx(tmp_path, monkeypatch, callback=None, mode="yolo", tool_name="bash", ask=True):
+    """A ToolContext with session + store so grants can persist.
+
+    The two modes never Ask by themselves, so ``ask=True`` installs an ask
+    rule for ``tool_name`` to drive the approval-prompt flows.
+    """
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
     config = Config()
     config.notifications.enabled = False  # never play sounds in tests
+    if ask:
+        config.permissions.rules.ask[tool_name] = [PermissionRule(pattern="*")]
     store = SessionStore()
     session = store.create("s", tmp_path)
     perms = SessionPermissions()
@@ -72,7 +78,7 @@ async def test_allow_once_runs_without_grant(tmp_path, monkeypatch):
     registry = ToolRegistry([FakeTool("bash")])
     _, result = await registry.dispatch_result("1", "bash", '{"command": "ls"}', ctx)
     assert result.content == "ran: {'command': 'ls'}"
-    assert calls == [("bash", {"command": "ls"}, "mode: standard")]
+    assert calls == [("bash", {"command": "ls"}, "ask rule matched: *")]
     assert perms.grants == []
     assert store.load_grants(session) == []
 
@@ -101,19 +107,22 @@ async def test_allow_always_persists_grant(tmp_path, monkeypatch):
     assert store.load_grants(session) == [("bash", "ls")]
 
 
-async def test_allow_always_skips_prompt_next_time(tmp_path, monkeypatch):
+async def test_allow_always_still_prompts_for_ask_rules(tmp_path, monkeypatch):
+    """Ask rules are evaluated before session grants, so (a)lways records the
+    grant but the next rule-matched call still prompts."""
     calls = []
 
     async def always(name, args, reason):
         calls.append(name)
         return AllowAlways(pattern="ls")
 
-    ctx, _, _, _ = make_ctx(tmp_path, monkeypatch, always)
+    ctx, _, _, perms = make_ctx(tmp_path, monkeypatch, always)
     registry = ToolRegistry([FakeTool("bash")])
     await registry.dispatch_result("1", "bash", '{"command": "ls"}', ctx)
     _, result = await registry.dispatch_result("2", "bash", '{"command": "ls"}', ctx)
     assert result.content.startswith("ran:")
-    assert calls == ["bash"]  # granted: the checker never reaches Ask again
+    assert calls == ["bash", "bash"]  # ask rules outrank session grants
+    assert perms.matching_grant("bash", "ls") == "ls"
 
 
 async def test_no_callback_keeps_needs_approval(tmp_path, monkeypatch):
@@ -131,7 +140,7 @@ async def test_checker_deny_never_reaches_callback(tmp_path, monkeypatch):
         calls.append(name)
         return AllowOnce()
 
-    ctx, _, _, _ = make_ctx(tmp_path, monkeypatch, approve, mode="restrictive")
+    ctx, _, _, _ = make_ctx(tmp_path, monkeypatch, approve, mode="readonly", ask=False)
     registry = ToolRegistry([FakeTool("bash")])
     _, result = await registry.dispatch_result("1", "bash", '{"command": "sudo ls"}', ctx)
     assert result.is_error
@@ -194,6 +203,8 @@ def make_app(tmp_path, monkeypatch, script):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
     config = Config()
     config.notifications.enabled = False  # never play sounds in tests
+    # the two modes never Ask by themselves; gate bash with an ask rule
+    config.permissions.rules.ask["bash"] = [PermissionRule(pattern="*")]
     store = SessionStore()
     session = store.create("s", tmp_path, model=config.llm.model)
     runtime = build_runtime(config, tmp_path, session=session, store=store)
@@ -238,7 +249,7 @@ async def test_request_approval_shows_doom_reason(tmp_path, monkeypatch):
     task.result()  # consume
 
 
-async def test_pipe_approval_y_runs_guarded_tool(tmp_path, monkeypatch):
+async def test_pipe_approval_y_runs_asked_tool(tmp_path, monkeypatch):
     """Full flow: model calls bash, user answers 'y', output appears."""
     script = [
         {"tool_calls": [{"name": "bash", "arguments": '{"command": "echo approved-output"}'}]},

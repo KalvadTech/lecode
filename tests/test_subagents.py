@@ -433,7 +433,7 @@ async def test_at_agent_while_busy_queues_as_note(tmp_path, monkeypatch):
 async def test_model_subagent_show_set_reset(tmp_path, monkeypatch):
     app, _, out = make_app(tmp_path, monkeypatch, [])
     await app.handle_command("/model-subagent")
-    assert "subagent model: (inherits main: openai/gpt-5-mini)" in out.getvalue()
+    assert "subagent model: (inherits main: deepseek/deepseek-v4-flash)" in out.getvalue()
     await app.handle_command("/model-subagent deepseek/deepseek-r1")
     assert app.config.agent.subagent_model == "deepseek/deepseek-r1"
     await app.handle_command("/model-subagent")

@@ -70,7 +70,11 @@ async def test_fetch_remote_catalog_maps_fields():
                 # No pricing, architecture, or supported_parameters: tolerated.
             },
             {
-                "id": "deprecated/no-context",  # no context_length: skipped
+                "id": "sparse/no-context",  # no context_length: default window
+            },
+            {
+                # No id at all: skipped.
+                "context_length": 8192,
             },
         ]
     }
@@ -78,7 +82,7 @@ async def test_fetch_remote_catalog_maps_fields():
     async with openrouter_client() as client:
         entries = await fetch_remote_catalog(client)
 
-    assert [e.id for e in entries] == ["openai/gpt-5", "some/text-only"]
+    assert [e.id for e in entries] == ["openai/gpt-5", "some/text-only", "sparse/no-context"]
 
     gpt5 = entries[0]
     assert gpt5.name == "OpenAI: GPT-5"
@@ -97,6 +101,10 @@ async def test_fetch_remote_catalog_maps_fields():
     assert sparse.modalities.input == ["text"]
     assert sparse.supports_tools is True
     assert sparse.supports_reasoning is False
+
+    defaulted = entries[2]
+    assert defaulted.context_window == 128_000
+    assert defaulted.pricing.prompt == 0.0
 
 
 @respx.mock

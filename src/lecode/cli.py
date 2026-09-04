@@ -42,6 +42,7 @@ from lecode.hooks import (
     dispatcher_from_config,
 )
 from lecode.providers import ProviderError, build_client, resolve_provider
+from lecode.providers.live import LoadedCatalog, load_catalog
 from lecode.providers.openai_compat import ChatClient
 from lecode.providers.types import ChatMessage
 from lecode.session.naming import auto_name
@@ -124,6 +125,11 @@ def build_provider(config: Config, api_key: str | None = None) -> ChatClient:
     spec = resolve_provider(config)
     key = resolve_api_key(spec.name, config, cli_key=api_key)
     return build_client(spec, key)
+
+
+def fetch_catalog(client: ChatClient) -> LoadedCatalog:
+    """Fetch the live model catalog (cache/bundled fallback); never raises."""
+    return asyncio.run(load_catalog(client, config_dir()))
 
 
 async def _run_headless(
@@ -252,7 +258,14 @@ def run_headless(
         mode="readonly" if read_only else None,
         allowed_tools=_tool_filter(allowed_tools),
     )
-    runner = AgentRunner(client, runtime.registry, runtime.ctx, session=session, store=store)
+    runner = AgentRunner(
+        client,
+        runtime.registry,
+        runtime.ctx,
+        session=session,
+        store=store,
+        catalog=fetch_catalog(client).catalog,
+    )
     signals = StatusEmitter(config.signals, session=session.name)
 
     user_message: ChatMessage = {"role": "user", "content": prompt}
@@ -338,7 +351,14 @@ def run_loop_mode(
         mode="readonly" if read_only else None,
         allowed_tools=_tool_filter(allowed_tools),
     )
-    runner = AgentRunner(client, runtime.registry, runtime.ctx, session=session, store=store)
+    runner = AgentRunner(
+        client,
+        runtime.registry,
+        runtime.ctx,
+        session=session,
+        store=store,
+        catalog=fetch_catalog(client).catalog,
+    )
     signals = StatusEmitter(config.signals, session=session.name)
 
     async def run_iteration(prompt: str) -> str:
@@ -432,9 +452,17 @@ def run_chain_mode(
         allowed_tools=_tool_filter(allowed_tools),
     )
     signals = StatusEmitter(config.signals, session=session.name)
+    chain_catalog = fetch_catalog(client).catalog
 
     def factory() -> AgentRunner:
-        return AgentRunner(client, runtime.registry, runtime.ctx, session=session, store=store)
+        return AgentRunner(
+            client,
+            runtime.registry,
+            runtime.ctx,
+            session=session,
+            store=store,
+            catalog=chain_catalog,
+        )
 
     def on_phase(phase: str, output: str) -> None:
         typer.echo(f"## {phase}\n\n{output}\n")
@@ -504,7 +532,8 @@ def run_interactive(
         and sys.stdin.isatty()
     ):
         asyncio.run(offer_first_run_setup())
-    config = load_config().config
+    loaded = load_config()
+    config = loaded.config
     _apply_cli_overrides(
         config,
         model=model,
@@ -551,6 +580,7 @@ def run_interactive(
     except (AuthError, ValueError) as e:
         typer.echo(f"error: {e}", err=True)
         return EXIT_STARTUP
+    models = fetch_catalog(client)
 
     runtime = build_runtime(
         config,
@@ -564,7 +594,29 @@ def run_interactive(
     for warning in runtime.warnings:
         typer.echo(f"warning: {warning}", err=True)
 
-    tui = TuiApp(config, runtime, client, session, store)
+    from rich.console import Console
+
+    from lecode.tui.loading import show_loading_screen
+
+    console = Console(no_color=config.ui.no_color)
+    spec = resolve_provider(config)
+    show_loading_screen(
+        config=config,
+        loaded=loaded,
+        runtime=runtime,
+        session=session,
+        store=store,
+        cwd=cwd,
+        resumed=resume is not None or continue_last,
+        provider_spec=spec,
+        key_source=resolve_api_key(spec.name, config, cli_key=api_key).source,
+        console=console,
+        read_only=read_only,
+        models_origin=models.origin,
+        models_count=models.remote_count,
+    )
+
+    tui = TuiApp(config, runtime, client, session, store, console=console, catalog=models.catalog)
     if wt_info is not None and wt_manager is not None:
         tui.attach_worktree(wt_manager, wt_info, original_cwd)
     try:

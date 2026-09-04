@@ -29,7 +29,7 @@ async def test_model_switch_updates_everywhere(tmp_path, monkeypatch):
 async def test_model_unique_prefix_resolves(tmp_path, monkeypatch):
     app, _, _ = make_app(tmp_path, monkeypatch, [])
     await app.handle_command("/model moonshotai")
-    assert app.config.llm.model == "moonshotai/kimi-k2"
+    assert app.config.llm.model == "moonshotai/kimi-k2.6"
 
 
 async def test_model_unknown_and_ambiguous_error(tmp_path, monkeypatch):
@@ -38,14 +38,14 @@ async def test_model_unknown_and_ambiguous_error(tmp_path, monkeypatch):
     assert "unknown model: nope/not-a-model" in out.getvalue()
     await app.handle_command("/model openai/gpt-5-")
     assert "ambiguous model" in out.getvalue()
-    assert app.config.llm.model == "openai/gpt-5-mini"  # unchanged
+    assert app.config.llm.model == "deepseek/deepseek-v4-flash"  # unchanged
 
 
 async def test_models_lists_catalog_and_marks_current(tmp_path, monkeypatch):
     app, _, out = make_app(tmp_path, monkeypatch, [])
     await app.handle_command("/models")
     rendered = out.getvalue()
-    assert "openai/gpt-5-mini (current)" in rendered
+    assert "deepseek/deepseek-v4-flash (current)" in rendered
     assert "anthropic/claude-sonnet-4" in rendered
 
 
@@ -116,25 +116,25 @@ async def test_permissions_shows_mode_and_rules(tmp_path, monkeypatch):
     app, _, out = make_app(tmp_path, monkeypatch, [])
     await app.handle_command("/permissions")
     rendered = out.getvalue()
-    assert "permission mode: standard" in rendered
+    assert "permission mode: yolo" in rendered
     assert "rules: 0 allow · 0 ask · 0 deny" in rendered
 
 
 async def test_permissions_switch_affects_checker(tmp_path, monkeypatch):
     app, _, out = make_app(tmp_path, monkeypatch, [])
     checker = app.runtime.ctx.permission_checker
-    assert checker.check("bash", {"command": "ls"}).decision == Decision.ASK
-    await app.handle_command("/permissions yolo")
-    assert "permission mode: yolo" in out.getvalue()
-    assert app.config.permissions.mode == "yolo"
     assert checker.check("bash", {"command": "ls"}).decision == Decision.ALLOW
+    await app.handle_command("/permissions readonly")
+    assert "permission mode: readonly" in out.getvalue()
+    assert app.config.permissions.mode == "readonly"
+    assert checker.check("bash", {"command": "ls"}).decision == Decision.DENY
 
 
 async def test_permissions_unknown_mode_errors(tmp_path, monkeypatch):
     app, _, out = make_app(tmp_path, monkeypatch, [])
     await app.handle_command("/permissions bogus")
     assert "unknown mode: bogus" in out.getvalue()
-    assert app.runtime.ctx.permission_checker.mode == "standard"
+    assert app.runtime.ctx.permission_checker.mode == "yolo"
 
 
 async def test_mode_alias_switches(tmp_path, monkeypatch):
@@ -146,12 +146,12 @@ async def test_mode_alias_switches(tmp_path, monkeypatch):
     )
 
 
-async def test_toggle_cycles_standard_yolo(tmp_path, monkeypatch):
+async def test_toggle_cycles_readonly_yolo(tmp_path, monkeypatch):
     app, _, out = make_app(tmp_path, monkeypatch, [])
     await app.handle_command("/toggle")
-    assert app.runtime.ctx.permission_checker.mode == "yolo"
+    assert app.runtime.ctx.permission_checker.mode == "readonly"
     await app.handle_command("/toggle")
-    assert app.runtime.ctx.permission_checker.mode == "standard"
+    assert app.runtime.ctx.permission_checker.mode == "yolo"
     assert out.getvalue().count("permission mode:") >= 2
 
 

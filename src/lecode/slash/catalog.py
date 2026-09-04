@@ -36,8 +36,6 @@ BUILTIN_COMMANDS: list[tuple[str, str]] = [
     ("theme", "Switch the theme"),
     ("themes", "List available themes"),
     ("prompt", "Switch prompt style/persona"),
-    ("regen-prompts", "Regenerate bundled prompts"),
-    ("regen-themes", "Regenerate bundled themes"),
     ("editsys", "Edit the system prompt"),
     ("add", "Add a file to context"),
     ("drop", "Drop a file from context"),

@@ -66,13 +66,14 @@ def test_unknown_theme_falls_back_to_default_with_warning(tmp_path, caplog):
     assert theme.accent == load_theme("default", Config(), cwd=tmp_path).accent
 
 
-def test_global_overrides_embedded(global_dir, tmp_path):
+def test_global_dir_is_ignored(global_dir, tmp_path):
+    """The global config dir is no longer a theme layer: embedded wins there."""
     _write_theme(global_dir / "themes" / "default.json", "default", _override_colors())
     theme = load_theme("default", Config(), cwd=tmp_path)
-    assert theme.accent == "#123456"
+    assert theme.accent != "#123456"
 
 
-def test_project_overrides_global(global_dir, tmp_path):
+def test_project_overrides_embedded(global_dir, tmp_path):
     (tmp_path / ".git").mkdir()
     _write_theme(global_dir / "themes" / "default.json", "default", _override_colors())
     _write_theme(
@@ -82,7 +83,6 @@ def test_project_overrides_global(global_dir, tmp_path):
     )
     theme = load_theme("default", Config(), cwd=tmp_path)
     assert theme.accent == "#abcdef"
-    assert theme.text == "#123456"
 
 
 def test_config_colors_override_last(global_dir, tmp_path):
@@ -123,7 +123,7 @@ def test_list_themes_merges_layers(global_dir, tmp_path):
     _write_theme(global_dir / "themes" / "mine.json", "mine", _override_colors())
     _write_theme(tmp_path / ".lecode" / "themes" / "proj.json", "proj", _override_colors())
     names = list_themes(cwd=tmp_path)
-    assert "mine" in names
+    assert "mine" not in names  # global layer is not consulted for themes
     assert "proj" in names
     assert "default" in names
     assert names == sorted(names)

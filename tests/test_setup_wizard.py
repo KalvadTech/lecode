@@ -47,7 +47,7 @@ async def test_wizard_happy_path_writes_config(cfg_dir):
     assert path == cfg_dir / "config.toml"
     raw = tomllib.loads(path.read_text())
     assert raw["llm"]["provider"] == "openrouter"
-    assert raw["llm"]["model"] == "openai/gpt-5-mini"
+    assert raw["llm"]["model"] == "deepseek/deepseek-v4-flash"
     assert raw["llm"]["api_key"] == "sk-or-test-key"
     assert raw["ui"]["theme"]
     assert raw["notifications"]["enabled"] is True  # empty answer → default yes
@@ -66,11 +66,11 @@ async def test_wizard_custom_provider_asks_base_url(cfg_dir):
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
     assert raw["llm"]["provider"] == "custom"
     assert raw["llm"]["base_url"] == "https://llm.local/v1"
-    assert raw["llm"]["model"] == "openai/gpt-5"  # pick 2
+    assert raw["llm"]["model"] == "deepseek/deepseek-v4-pro"  # pick 2
 
 
 async def test_wizard_base_url_validated(cfg_dir):
-    session = FakeSession(["3", "ftp://nope", "https://ok.example/v1", "", "1", "1", "", "n"])
+    session = FakeSession(["2", "ftp://nope", "https://ok.example/v1", "", "1", "1", "", "n"])
     await run_wizard(session)
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
     assert raw["llm"]["base_url"] == "https://ok.example/v1"
@@ -78,7 +78,7 @@ async def test_wizard_base_url_validated(cfg_dir):
 
 
 async def test_wizard_key_required_loops_until_nonempty(cfg_dir):
-    session = FakeSession(["openai", "", "", "sk-live", "1", "1", "", "n"])
+    session = FakeSession(["openrouter", "", "", "sk-live", "1", "1", "", "n"])
     await run_wizard(session)
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
     assert raw["llm"]["api_key"] == "sk-live"
@@ -87,7 +87,7 @@ async def test_wizard_key_required_loops_until_nonempty(cfg_dir):
 async def test_wizard_advisor_opt_in(cfg_dir):
     await run_wizard(FakeSession(["1", "sk-or-key", "1", "1", "", "y"]))
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
-    assert raw["advisor"] == {"enabled": True, "model": "openai/gpt-5-mini"}
+    assert raw["advisor"] == {"enabled": True, "model": "deepseek/deepseek-v4-flash"}
 
 
 async def test_wizard_notifications_off(cfg_dir):

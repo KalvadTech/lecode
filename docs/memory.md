@@ -31,8 +31,8 @@ tools:
 | `memory_edit` | search/replace inside a memory file |
 | `memory_search` | regex search across the store (≤ 50 hits) |
 
-`memory_read` and `memory_search` are read-class (auto-allowed in standard
-and readonly modes); `memory_write` and `memory_edit` are write-class.
+`memory_read` and `memory_search` are read-class (allowed in `readonly`
+mode); `memory_write` and `memory_edit` are write-class.
 
 ## `/memory`
 

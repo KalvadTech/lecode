@@ -43,7 +43,7 @@ def test_defaults_validate_from_empty():
     assert config.agent.max_turns == 500
     assert config.tools.enabled == {}
     assert config.ui.theme == "default"
-    assert config.permissions.mode == "standard"
+    assert config.permissions.mode == "yolo"
     assert config.notifications.volume == 0.5
     assert config.mcp.enable_exa is True
     assert config.mcp.enable_context7 is False
@@ -68,6 +68,16 @@ def test_load_toml(global_dir, tmp_path):
     result = load_config(cwd=tmp_path)
     assert result.config.llm.model == "anthropic/claude-sonnet-4"
     assert result.warnings == []
+
+
+@pytest.mark.parametrize("legacy", ["standard", "restrictive", "planwrite", "guarded"])
+def test_legacy_permission_mode_coerced_to_yolo(global_dir, tmp_path, legacy):
+    (global_dir / "config.toml").write_text(
+        f'schema_version = 1\n[permissions]\nmode = "{legacy}"\n'
+    )
+    result = load_config(cwd=tmp_path)
+    assert result.config.permissions.mode == "yolo"
+    assert any(f"'{legacy}' is deprecated" in w for w in result.warnings)
 
 
 def test_load_yaml_when_no_toml(global_dir, tmp_path):

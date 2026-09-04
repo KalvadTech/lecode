@@ -106,11 +106,11 @@ def test_permission_overlay_mapping(dirs):
     write_agent(
         project / ".lecode" / "agents",
         "guard",
-        "description: guarded\npermission:\n  mode: restrictive\n  denied_tools: [bash]\n"
+        "description: guarded\npermission:\n  mode: readonly\n  denied_tools: [bash]\n"
         "  rules:\n    allow:\n      write: ['docs/*']",
     )
     overlay = load_agents(cwd=project).overlay_for("guard")
-    assert overlay.mode == "restrictive"
+    assert overlay.mode == "readonly"
     assert overlay.denied_tools == ("bash",)
     rule = overlay.extra_rules.allow["write"][0]
     assert rule.pattern == "docs/*"

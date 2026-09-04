@@ -125,6 +125,7 @@ class TuiApp:
         session: Session,
         store: SessionStore,
         console: Console | None = None,
+        catalog: Any | None = None,
     ) -> None:
         self._config = config
         self._runtime = runtime
@@ -162,8 +163,9 @@ class TuiApp:
         self._pending_notes: list[str] = []
         #: Pending attachments for the next user submission (``/add``, ``@path``).
         self._attachments = AttachmentStore()
-        #: Model catalog for ``/model``/``/models`` (lazy; ``/models-add`` merges in).
-        self._catalog: Any | None = None
+        #: Model catalog for ``/model``/``/models``; the live-fetched one when
+        #: startup resolved it, else the lazy bundled default.
+        self._catalog: Any | None = catalog
         self._commands = build_registry(runtime.skills)
         self._runner = AgentRunner(
             provider,
@@ -173,6 +175,7 @@ class TuiApp:
             store=store,
             steer_queue=self._steer_queue,
             input_queue=self._input_queue,
+            catalog=catalog,
         )
         # Subagent progress (the task tool and direct @agent turns) renders
         # inline through the feed; installed here so tests driving _submit
@@ -597,7 +600,7 @@ class TuiApp:
         self._file_lister.prefetch()
         self._spinner_task = asyncio.ensure_future(self._spinner_loop())
         try:
-            with patch_stdout():
+            with patch_stdout(raw=True):
                 try:
                     await self._app.run_async()
                 except (EOFError, KeyboardInterrupt):
@@ -895,8 +898,19 @@ class TuiApp:
             self._status.input_tokens += totals.input_tokens
             self._status.output_tokens += totals.output_tokens
             self._status.cost_usd += totals.cost_usd
-            # Rough proxy for the meter: tokens sent to the model this run.
-            self._status.context_used = totals.input_tokens
+            # Last API call's prompt size — the real context fill.
+            self._status.context_used = totals.context_tokens or totals.input_tokens
+            self._feed.turn_stats(
+                context_used=self._status.context_used,
+                context_window=self._status.context_window,
+                input_tokens=totals.input_tokens,
+                output_tokens=totals.output_tokens,
+                cost_usd=totals.cost_usd,
+                session_cost_usd=self._status.cost_usd,
+                tool_calls=result.tool_calls,
+                turns=result.turns,
+                elapsed_s=result.elapsed_s,
+            )
         # Queued messages were persisted by the runner; rebuild from disk so
         # the next turn sees the same history the model saw.
         self._history = [{"role": "system", "content": self._runtime.system_prompt}]
@@ -991,7 +1005,12 @@ class TuiApp:
         def factory() -> AgentRunner:
             # Fresh runner per phase; no session binding → chain is a side
             # computation rendered to the feed, not written to the session.
-            return AgentRunner(self._runner.provider, self._runtime.registry, self._runtime.ctx)
+            return AgentRunner(
+                self._runner.provider,
+                self._runtime.registry,
+                self._runtime.ctx,
+                catalog=self.catalog,
+            )
 
         def on_phase(phase: str, output: str) -> None:
             self._feed.assistant_text(f"## {phase}\n\n{output}")

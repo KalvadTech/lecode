@@ -1,5 +1,5 @@
 """Tests for the phase-11 handlers: init/tutor/review/notifications/prompt/
-compress/editsys/regen-*."""
+compress/editsys."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ async def test_tutor_lists_topics(tmp_path, monkeypatch):
 async def test_tutor_answers_a_topic(tmp_path, monkeypatch):
     app, _, out = make_app(tmp_path, monkeypatch, [])
     await app.handle_command("/tutor permissions")
-    assert "standard" in out.getvalue()
+    assert "readonly" in out.getvalue()
 
 
 async def test_tutor_unknown_topic(tmp_path, monkeypatch):
@@ -170,28 +170,3 @@ async def test_editsys_unchanged_is_noop(tmp_path, monkeypatch):
     assert app.runtime.system_prompt == original
     assert app.config.llm.system_prompt.custom is None
     assert "unchanged" in out.getvalue()
-
-
-# -- /regen-prompts /regen-themes --------------------------------------------------------
-
-
-async def test_regen_copies_embedded_resources(tmp_path, monkeypatch):
-    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
-    app, _, out = make_app(tmp_path, monkeypatch, [])
-    await app.handle_command("/regen-prompts")
-    await app.handle_command("/regen-themes")
-    assert (tmp_path / "cfg" / "prompts" / "rich.md").is_file()
-    assert (tmp_path / "cfg" / "prompts" / "personas" / "reviewer.md").is_file()
-    assert (tmp_path / "cfg" / "themes" / "default.json").is_file()
-    assert "copied" in out.getvalue()
-
-
-async def test_regen_is_idempotent_and_keeps_edits(tmp_path, monkeypatch):
-    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
-    app, _, out = make_app(tmp_path, monkeypatch, [])
-    await app.handle_command("/regen-themes")
-    edited = tmp_path / "cfg" / "themes" / "default.json"
-    edited.write_text('{"mine": true}\n')
-    await app.handle_command("/regen-themes")
-    assert edited.read_text() == '{"mine": true}\n'  # user edit kept
-    assert "kept" in out.getvalue()

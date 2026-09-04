@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -118,6 +119,9 @@ class UsageTotals:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
+    #: Prompt size of the last API call — the real context fill (the
+    #: accumulated ``input_tokens`` double-counts across tool-call rounds).
+    context_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -126,6 +130,10 @@ class RunResult:
     turns: int
     stop_reason: str
     usage_totals: UsageTotals
+    #: Tool calls executed across all rounds of the run.
+    tool_calls: int = 0
+    #: Wall-clock seconds for the whole run.
+    elapsed_s: float = 0.0
 
 
 def _usage_tokens(usage: dict[str, Any]) -> tuple[int, int]:
@@ -149,6 +157,7 @@ class AgentRunner:
         config: Config | None = None,
         steer_queue: asyncio.Queue[Any] | None = None,
         input_queue: asyncio.Queue[Any] | None = None,
+        catalog: Catalog | None = None,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -160,7 +169,7 @@ class AgentRunner:
         #: Priority queue drained first between turns (TUI Alt+Enter), then input.
         self.steer_queue = steer_queue
         self.input_queue = input_queue
-        self._catalog: Catalog | None = None
+        self._catalog: Catalog | None = catalog
         #: Partially collected turn, for cancellation-safe persistence.
         self._partial: CompletedMessage | None = None
         # Advisor seam: the advisor tool reaches the provider through ctx.
@@ -178,7 +187,10 @@ class AgentRunner:
         input_tokens = 0
         output_tokens = 0
         cost_usd = 0.0
+        context_tokens = 0
         turns = 0
+        tool_calls = 0
+        started_at = time.monotonic()
         empty_retries = 0
         final_text = ""
         continuing = False
@@ -203,6 +215,7 @@ class AgentRunner:
                 input_tokens += in_tok
                 output_tokens += out_tok
                 cost_usd += cost
+                context_tokens = in_tok or context_tokens
                 history.append(completed.as_message())
                 self._persist_assistant(completed, in_tok, out_tok, cost)
 
@@ -210,6 +223,7 @@ class AgentRunner:
                     final_text = ""
                     continuing = False
                     results = await self._run_tools(completed, on_event)
+                    tool_calls += len(results)
                     history.extend(results)
                     continue
 
@@ -240,8 +254,13 @@ class AgentRunner:
             turns=turns,
             stop_reason=stop_reason,
             usage_totals=UsageTotals(
-                input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost_usd
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost_usd,
+                context_tokens=context_tokens,
             ),
+            tool_calls=tool_calls,
+            elapsed_s=time.monotonic() - started_at,
         )
 
     # -- one turn --------------------------------------------------------------

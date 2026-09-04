@@ -21,7 +21,7 @@ import yaml
 from pydantic import BaseModel
 
 from lecode.config.migrations import migrate_config
-from lecode.config.models import Config
+from lecode.config.models import LEGACY_PERMISSION_MODES, Config
 
 #: Environment variable overriding the global config directory.
 CONFIG_ENV_VAR = "LECODE_CONFIG_DIR"
@@ -36,7 +36,7 @@ schema_version = 1
 
 # [llm]
 # provider = "openrouter"
-# model = "openai/gpt-5-mini"
+# model = "deepseek/deepseek-v4-flash"
 # api_key = "sk-or-..."            # or use the OPENROUTER_API_KEY env var
 # thinking = "medium"              # none | low | medium | high
 # auth_policy = "auto"             # auto | required | none
@@ -241,5 +241,9 @@ def load_config(cwd: Path | None = None) -> LoadedConfig:
         sources.append(project_file)
 
     _collect_unknown_keys(merged, Config, "", warnings)
+    raw_perms = merged.get("permissions")
+    legacy_mode = raw_perms.get("mode") if isinstance(raw_perms, dict) else None
+    if legacy_mode in LEGACY_PERMISSION_MODES:
+        warnings.append(f"permissions.mode: '{legacy_mode}' is deprecated; coerced to 'yolo'")
     config = Config.model_validate(merged)
     return LoadedConfig(config=config, warnings=warnings, sources=sources)

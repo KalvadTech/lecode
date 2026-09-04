@@ -140,11 +140,21 @@
     "supports_reasoning": false
   },
   {
-    "id": "deepseek/deepseek-chat-v3.1",
-    "name": "DeepSeek V3.1",
-    "context_window": 163840,
-    "max_output": 8192,
-    "pricing": { "prompt": 0.27, "completion": 1.1 },
+    "id": "deepseek/deepseek-v4-pro",
+    "name": "DeepSeek V4 Pro",
+    "context_window": 1048576,
+    "max_output": 384000,
+    "pricing": { "prompt": 1.04, "completion": 2.08 },
+    "modalities": { "input": ["text"], "output": ["text"] },
+    "supports_tools": true,
+    "supports_reasoning": true
+  },
+  {
+    "id": "deepseek/deepseek-v4-flash",
+    "name": "DeepSeek V4 Flash",
+    "context_window": 1048576,
+    "max_output": 384000,
+    "pricing": { "prompt": 0.09, "completion": 0.18 },
     "modalities": { "input": ["text"], "output": ["text"] },
     "supports_tools": true,
     "supports_reasoning": true
@@ -280,21 +290,21 @@
     "supports_reasoning": true
   },
   {
-    "id": "moonshotai/kimi-k2",
-    "name": "Kimi K2",
+    "id": "moonshotai/kimi-k2.6",
+    "name": "Kimi K2.6",
     "context_window": 262144,
-    "max_output": 8192,
-    "pricing": { "prompt": 0.6, "completion": 2.5 },
-    "modalities": { "input": ["text"], "output": ["text"] },
+    "max_output": 235929,
+    "pricing": { "prompt": 0.95, "completion": 4.0 },
+    "modalities": { "input": ["text", "image"], "output": ["text"] },
     "supports_tools": true,
-    "supports_reasoning": false
+    "supports_reasoning": true
   },
   {
-    "id": "z-ai/glm-4.5",
-    "name": "GLM 4.5",
-    "context_window": 131072,
-    "max_output": 8192,
-    "pricing": { "prompt": 0.6, "completion": 2.2 },
+    "id": "z-ai/glm-4.7",
+    "name": "GLM 4.7",
+    "context_window": 204800,
+    "max_output": 131072,
+    "pricing": { "prompt": 0.4, "completion": 1.75 },
     "modalities": { "input": ["text"], "output": ["text"] },
     "supports_tools": true,
     "supports_reasoning": true

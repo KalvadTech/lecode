@@ -1,4 +1,4 @@
-"""The permission system: rules, six modes, overlays, doom-loop detection."""
+"""The permission system: rules, two modes (readonly/yolo), overlays, doom-loop detection."""
 
 from __future__ import annotations
 

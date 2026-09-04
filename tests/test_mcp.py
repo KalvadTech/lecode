@@ -205,13 +205,17 @@ async def test_dispatch_denied_in_readonly_mode(tmp_path, monkeypatch):
         await manager.shutdown()
 
 
-def test_permission_ask_for_regular_mcp_server():
-    checker = PermissionChecker(Config(), mode="standard")
+def test_permission_ask_rule_for_regular_mcp_server():
+    # the two modes never Ask by themselves; an ask rule gates the tool
+    config = Config.model_validate(
+        {"permissions": {"rules": {"ask": {"mcp:test:echo": [{"pattern": "*"}]}}}}
+    )
+    checker = PermissionChecker(config)
     assert checker.check("mcp:test:echo", {"text": "x"}).decision == Decision.ASK
 
 
 def test_permission_allow_for_read_equiv_servers():
-    checker = PermissionChecker(Config(), mode="standard")
+    checker = PermissionChecker(Config(), mode="readonly")
     assert checker.check("mcp:exa:web_search_exa", {"query": "x"}).decision == Decision.ALLOW
     assert checker.check("mcp:context7:resolve-library-id", {}).decision == Decision.ALLOW
 

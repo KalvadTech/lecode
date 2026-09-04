@@ -9,11 +9,9 @@ so. Pickers are inline numbered lists — no dialogs.
 
 from __future__ import annotations
 
-from importlib import resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, get_args
+from typing import TYPE_CHECKING, get_args
 
-from lecode.config.loader import config_dir
 from lecode.config.models import PermissionMode, ThinkingLevel
 from lecode.context.resources import load_text
 from lecode.extras.export import ShareError, export_html, share_gist
@@ -553,9 +551,9 @@ async def cmd_permissions(app: TuiApp, args: list[str]) -> None:
 
 
 async def cmd_toggle(app: TuiApp, args: list[str]) -> None:
-    """``/toggle``: cycle the standard ↔ yolo pair."""
+    """``/toggle``: cycle the readonly ↔ yolo pair."""
     current = app.runtime.ctx.permission_checker.mode
-    mode = "standard" if current == "yolo" else "yolo"
+    mode = "readonly" if current == "yolo" else "yolo"
     app.set_permission_mode(mode)
     app.feed.info(f"permission mode: {mode}")
 
@@ -1006,10 +1004,10 @@ TUTOR_TOPICS: dict[str, str] = {
         "/compact summarizes old context, /handoff seeds a fresh session."
     ),
     "permissions": (
-        "Six modes (standard, restrictive, readonly, planwrite, guarded, yolo); "
-        "switch with /mode. Rules in [permissions.rules] allow/ask/deny are glob "
-        "or regex, last match wins, deny is unbypassable. Repeat identical calls "
-        "escalate (doom-loop guard)."
+        "Two modes: yolo (default, everything allowed) and readonly (read-class "
+        "tools only); switch with /mode or /toggle. Rules in [permissions.rules] "
+        "allow/ask/deny are glob or regex, last match wins, deny is "
+        "unbypassable. Repeat identical calls escalate (doom-loop guard)."
     ),
     "worktrees": (
         "/worktree <name> moves the session into an isolated git worktree+branch; "
@@ -1044,8 +1042,8 @@ TUTOR_TOPICS: dict[str, str] = {
         "the task tool invokes subagents. /agents lists them."
     ),
     "themes": (
-        "/theme <name> switches, /themes lists. Copy embedded themes for editing "
-        "with /regen-themes; prompts likewise with /regen-prompts."
+        "/theme <name> switches, /themes lists. Themes are JSON files in "
+        ".lecode/themes (project-local; see docs/configuration.md)."
     ),
 }
 
@@ -1133,42 +1131,6 @@ async def cmd_editsys(app: TuiApp, args: list[str]) -> None:
     app.config.llm.system_prompt.custom = edited
     app.runtime.system_prompt = edited
     app.feed.info("system prompt overridden for this session")
-
-
-async def cmd_regen_prompts(app: TuiApp, args: list[str]) -> None:
-    """``/regen-prompts``: copy embedded prompts into the global config dir."""
-    _regen_resources(app, "prompts")
-
-
-async def cmd_regen_themes(app: TuiApp, args: list[str]) -> None:
-    """``/regen-themes``: copy embedded themes into the global config dir."""
-    _regen_resources(app, "themes")
-
-
-def _regen_resources(app: TuiApp, kind: str) -> None:
-    """Copy embedded ``lecode/data/<kind>`` files to ``<config_dir>/<kind>``;
-    existing files are kept (user edits win), so the command is idempotent."""
-    target_root = config_dir() / kind
-    copied = kept = 0
-
-    def walk(node: Any, prefix: str) -> None:
-        nonlocal copied, kept
-        for child in node.iterdir():
-            rel = f"{prefix}{child.name}"
-            if child.is_dir():
-                walk(child, rel + "/")
-                continue
-            target = target_root / rel
-            if target.exists():
-                kept += 1
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(child.read_bytes())
-            copied += 1
-
-    walk(resources.files("lecode.data").joinpath(kind), "")
-    note = f" — {kept} existing file(s) kept" if kept else ""
-    app.feed.info(f"{kind}: copied {copied} file(s) to {target_root}{note}")
 
 
 # -- help / welcome / quit ---------------------------------------------------------
@@ -1262,8 +1224,6 @@ CATEGORIES: list[tuple[str, list[str]]] = [
         [
             "theme",
             "themes",
-            "regen-prompts",
-            "regen-themes",
             "notifications",
             "copy",
             "queue",
@@ -1348,8 +1308,6 @@ _HANDLERS = {
     "prompt": cmd_prompt,
     "compress": cmd_compact,
     "editsys": cmd_editsys,
-    "regen-prompts": cmd_regen_prompts,
-    "regen-themes": cmd_regen_themes,
 }
 
 #: Usage hints shown by ``/help <name>``.

@@ -74,9 +74,12 @@ async def test_dispatch_success(registry, tool_ctx, tmp_path):
 # -- permission gating ---------------------------------------------------------------
 
 
-def _ctx(tmp_path, mode, auto_approve, monkeypatch, perms=None):
+def _ctx(tmp_path, mode, auto_approve, monkeypatch, perms=None, rules=None):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
-    config = Config.model_validate({"permissions": {"mode": mode}})
+    permissions = {"mode": mode}
+    if rules:
+        permissions["rules"] = rules
+    config = Config.model_validate({"permissions": permissions})
     checker = PermissionChecker(config, session_perms=perms, cwd=tmp_path)
     return ToolContext(
         cwd=tmp_path,
@@ -88,14 +91,27 @@ def _ctx(tmp_path, mode, auto_approve, monkeypatch, perms=None):
 
 
 async def test_ask_without_approver_denied(registry, tmp_path, monkeypatch):
-    ctx = _ctx(tmp_path, "standard", auto_approve=False, monkeypatch=monkeypatch)
+    # yolo allows everything, so the Ask is driven by an ask rule
+    ctx = _ctx(
+        tmp_path,
+        "yolo",
+        auto_approve=False,
+        monkeypatch=monkeypatch,
+        rules={"ask": {"bash": [{"pattern": "*"}]}},
+    )
     message = await registry.dispatch("c1", "bash", '{"command": "ls"}', ctx)
     assert "requires approval" in message["content"]
     assert message["content"].startswith("denied")
 
 
 async def test_ask_with_auto_approve_runs(registry, tmp_path, monkeypatch):
-    ctx = _ctx(tmp_path, "standard", auto_approve=True, monkeypatch=monkeypatch)
+    ctx = _ctx(
+        tmp_path,
+        "yolo",
+        auto_approve=True,
+        monkeypatch=monkeypatch,
+        rules={"ask": {"bash": [{"pattern": "*"}]}},
+    )
     message = await registry.dispatch("c1", "bash", '{"command": "echo ran"}', ctx)
     assert "ran" in message["content"]
 
@@ -123,7 +139,7 @@ async def test_grant_always_persists_when_session_present(tmp_path, monkeypatch)
     store = SessionStore()
     session = store.create("s", cwd=str(tmp_path))
     perms = SessionPermissions()
-    config = Config.model_validate({"permissions": {"mode": "standard"}})
+    config = Config.model_validate({"permissions": {"mode": "yolo"}})
     ctx = ToolContext(
         cwd=tmp_path,
         config=config,

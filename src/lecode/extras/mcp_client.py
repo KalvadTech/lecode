@@ -5,7 +5,8 @@ connected lazily at session start with a ~10s budget; failures are isolated
 per server (one bad server never blocks the others or startup). Discovered
 tools are registered as lecode tools named ``mcp:<server>:<tool>`` — the
 permission system already treats exa/context7/grep-app as read-equivalent,
-every other MCP tool falls back to the mode default (Ask in standard mode).
+every other MCP tool falls back to the mode default (Allow in yolo, Deny in
+readonly).
 
 Auto-configured servers (``[mcp] enable_exa`` / ``enable_context7``):
 

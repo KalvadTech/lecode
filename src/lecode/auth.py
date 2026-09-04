@@ -21,10 +21,9 @@ KeySource = Literal["cli", "env", "config", "none"]
 #: Environment variables checked per built-in provider, in order.
 _ENV_VARS: dict[str, tuple[str, ...]] = {
     "openrouter": ("OPENROUTER_API_KEY", "OPENAI_API_KEY"),
-    "openai": ("OPENAI_API_KEY",),
 }
 
-#: Fallback env chain for any other (generic OpenAI-compatible) provider.
+#: Fallback env chain for any custom OpenRouter-compatible provider.
 _DEFAULT_ENV_VARS = ("OPENAI_API_KEY",)
 
 

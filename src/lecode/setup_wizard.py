@@ -20,19 +20,20 @@ from prompt_toolkit import PromptSession
 
 from lecode.config.loader import config_dir
 
-#: Providers offered by the wizard (custom = any OpenAI-compatible endpoint).
-PROVIDER_CHOICES = ("openrouter", "openai", "custom")
+#: Providers offered by the wizard: OpenRouter, or any custom
+#: OpenRouter-compatible endpoint reached via a base URL.
+PROVIDER_CHOICES = ("openrouter", "custom")
 
 #: Catalog top picks offered as the default-model menu (all in models.json).
 MODEL_PICKS = (
-    "openai/gpt-5-mini",
-    "openai/gpt-5",
-    "anthropic/claude-sonnet-4",
-    "google/gemini-2.5-flash",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-pro",
+    "moonshotai/kimi-k2.6",
+    "z-ai/glm-4.7",
 )
 
 #: Providers that cannot work without an API key.
-_KEY_REQUIRED = ("openrouter", "openai")
+_KEY_REQUIRED = ("openrouter",)
 
 
 async def _ask_text(session: PromptSession, message: str, default: str = "") -> str:
@@ -103,10 +104,10 @@ async def gather_answers(session: PromptSession) -> dict[str, Any]:
     provider = await _ask_choice(session, "Provider:", PROVIDER_CHOICES)
     base_url = ""
     if provider == "custom":
-        base_url = await _ask_text(session, "Base URL (OpenAI-compatible)")
+        base_url = await _ask_text(session, "Base URL (OpenRouter-compatible)")
         while not base_url.startswith(("http://", "https://")):
             print("error: the base URL must start with http:// or https://")
-            base_url = await _ask_text(session, "Base URL (OpenAI-compatible)")
+            base_url = await _ask_text(session, "Base URL (OpenRouter-compatible)")
     api_key = await _ask_text(session, "API key (stored in config.toml, chmod 0600)")
     while not api_key and provider in _KEY_REQUIRED:
         print(f"error: {provider} needs an API key")

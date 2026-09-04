@@ -1,4 +1,4 @@
-"""Tests for provider resolution (built-ins, custom, --base-url) and build_client."""
+"""Tests for provider resolution (openrouter, custom, --base-url) and build_client."""
 
 from __future__ import annotations
 
@@ -6,11 +6,7 @@ import pytest
 
 from lecode.auth import ResolvedKey, resolve_api_key
 from lecode.config.models import Config
-from lecode.providers import (
-    OPENAI_BASE_URL,
-    build_client,
-    resolve_provider,
-)
+from lecode.providers import build_client, resolve_provider
 from lecode.providers.openrouter import OPENROUTER_BASE_URL
 
 
@@ -23,18 +19,16 @@ def test_openrouter_default():
     assert spec.name == "openrouter"
     assert spec.base_url == OPENROUTER_BASE_URL
     assert spec.headers["X-Title"] == "lecode"
-    assert spec.model == "openai/gpt-5-mini"
+    assert spec.model == "deepseek/deepseek-v4-flash"
 
 
-def test_openai_builtin():
-    spec = resolve_provider(_config(llm={"provider": "openai"}))
-    assert spec.name == "openai"
-    assert spec.base_url == OPENAI_BASE_URL
-    assert spec.headers == {}
+def test_openai_is_not_a_builtin():
+    with pytest.raises(ValueError, match="unknown provider 'openai'"):
+        resolve_provider(_config(llm={"provider": "openai"}))
 
 
 def test_cli_provider_flag_overrides_config():
-    spec = resolve_provider(_config(llm={"provider": "openai"}), cli_provider="openrouter")
+    spec = resolve_provider(_config(llm={"provider": "nope"}), cli_provider="openrouter")
     assert spec.name == "openrouter"
     assert spec.base_url == OPENROUTER_BASE_URL
 

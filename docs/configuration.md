@@ -23,8 +23,8 @@ it owner-only (`chmod 600`); `lecode --setup` does that for you.
 
 | field | default | meaning |
 |---|---|---|
-| `provider` | `"openrouter"` | `openrouter`, `openai`, or a `[custom_providers]` name |
-| `model` | `"openai/gpt-5-mini"` | default model id |
+| `provider` | `"openrouter"` | `openrouter` or a `[custom_providers]` name |
+| `model` | `"deepseek/deepseek-v4-flash"` | default model id |
 | `api_key` | unset | provider key (env vars preferred) |
 | `base_url` | unset | override the provider's endpoint |
 | `thinking` | `"medium"` | `none` \| `low` \| `medium` \| `high` |
@@ -32,6 +32,12 @@ it owner-only (`chmod 600`); `lecode --setup` does that for you.
 | `read_timeout_s` | `300.0` | HTTP read (streaming) timeout |
 | `auth_policy` | `"auto"` | `auto` \| `required` \| `none` — fail when no key found |
 | `tls_verify` | `true` | set `false` for self-signed endpoints |
+
+The model catalog is fetched live from the provider's `/models` endpoint at
+startup (context windows, pricing, modalities), cached to
+`~/.config/lecode/models-cache.json`, and falls back to the bundled snapshot
+when offline. Plain OpenAI-shaped `/models` responses (id only) get a 128k
+default context window and zeroed pricing.
 
 ### `[llm.system_prompt]`
 
@@ -79,13 +85,15 @@ it owner-only (`chmod 600`); `lecode --setup` does that for you.
 
 ## `[permissions]`
 
-`mode` is one of `standard` (default), `restrictive`, `readonly`, `planwrite`,
-`guarded`, `yolo`. Rules live under `[permissions.rules]` as
+`mode` is one of `yolo` (default; everything allowed) or `readonly` (read-class
+tools allowed, everything else denied). Legacy mode values (`standard`,
+`restrictive`, `planwrite`, `guarded`) still load but are coerced to `yolo`
+with a deprecation warning. Rules live under `[permissions.rules]` as
 `allow` / `ask` / `deny` tables mapping tool names to pattern lists:
 
 ```toml
 [permissions]
-mode = "standard"
+mode = "yolo"
 
 [[permissions.rules.allow.bash]]
 pattern = "git status"
@@ -98,11 +106,12 @@ pattern = "rm -rf*"
 kind = "glob"   # "glob" (default) or "regex"
 ```
 
-Last match wins within a table; deny rules are unbypassable. Read-class tools
-(`read`, `grep`, `find_files`, `list_dir`, `lsp_diagnostics`, `memory_read`,
-`memory_search`, `advisor`, `task`, and Exa/context7/grep.app MCP tools) are
-auto-allowed in `standard` and `readonly`. A 3rd identical consecutive call
-escalates Allow → Ask, the 4th is denied (doom-loop guard).
+Last match wins within a table; deny rules are unbypassable (even in `yolo`),
+and `ask` rules still prompt. Read-class tools (`read`, `grep`, `find_files`,
+`list_dir`, `lsp_diagnostics`, `memory_read`, `memory_search`, `advisor`,
+`task`, and Exa/context7/grep.app MCP tools) are the only tools allowed in
+`readonly`. A 3rd identical consecutive call escalates Allow → Ask, the 4th
+is denied (doom-loop guard).
 
 ## `[notifications]`
 
@@ -193,7 +202,7 @@ narrow permission verdicts. See [hooks.md](hooks.md).
 - `[colors]` — theme color overrides (`name = "#hex"`).
 - `[model_presets]` — `alias = "model-id"` shortcuts added to `/models`
   (`/models-add` writes here).
-- `[custom_providers.<name>]` — extra OpenAI-compatible providers:
+- `[custom_providers.<name>]` — extra OpenRouter-compatible providers:
 
 ```toml
 [custom_providers.local]
