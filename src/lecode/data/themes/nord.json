@@ -1,0 +1,14 @@
+{
+  "name": "nord",
+  "colors": {
+    "accent": "#88c0d0",
+    "text": "#d8dee9",
+    "muted": "#4c566a",
+    "error": "#bf616a",
+    "warning": "#ebcb8b",
+    "success": "#a3be8c",
+    "thinking": "#616e88",
+    "tool": "#81a1c1",
+    "permission": "#b48ead"
+  }
+}

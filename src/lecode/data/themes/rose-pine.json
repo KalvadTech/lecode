@@ -1,0 +1,14 @@
+{
+  "name": "rose-pine",
+  "colors": {
+    "accent": "#c4a7e7",
+    "text": "#e0def4",
+    "muted": "#6e6a86",
+    "error": "#eb6f92",
+    "warning": "#f6c177",
+    "success": "#9ccfd8",
+    "thinking": "#908caa",
+    "tool": "#ebbcba",
+    "permission": "#c4a7e7"
+  }
+}

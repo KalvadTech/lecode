@@ -1,0 +1,14 @@
+{
+  "name": "dark",
+  "colors": {
+    "accent": "#82aaff",
+    "text": "#c8d3f5",
+    "muted": "#636da6",
+    "error": "#ff757f",
+    "warning": "#ffc777",
+    "success": "#c3e88d",
+    "thinking": "#7a88cf",
+    "tool": "#86e1fc",
+    "permission": "#fca7ea"
+  }
+}

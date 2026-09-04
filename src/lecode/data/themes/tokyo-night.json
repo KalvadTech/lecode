@@ -1,0 +1,14 @@
+{
+  "name": "tokyo-night",
+  "colors": {
+    "accent": "#7aa2f7",
+    "text": "#c0caf5",
+    "muted": "#565f89",
+    "error": "#f7768e",
+    "warning": "#e0af68",
+    "success": "#9ece6a",
+    "thinking": "#565f89",
+    "tool": "#7dcfff",
+    "permission": "#bb9af7"
+  }
+}

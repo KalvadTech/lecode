@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.14", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.7"
+
+      - name: Install fd and ripgrep (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fd-find ripgrep
+          sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+
+      - name: Install fd and ripgrep (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fd ripgrep
+
+      - name: Install rtk shim
+        # rtk has no apt/brew package; CI uses a pass-through shim.
+        run: |
+          cat > /tmp/rtk <<'EOF'
+          #!/bin/sh
+          # Minimal rtk shim: `rtk rewrite` passes stdin through unchanged.
+          if [ "$1" = "rewrite" ]; then cat; else exit 0; fi
+          EOF
+          chmod +x /tmp/rtk
+          if [ "$RUNNER_OS" = "Windows" ]; then exit 1; fi
+          sudo cp /tmp/rtk /usr/local/bin/rtk 2>/dev/null || cp /tmp/rtk "$HOME/.local/bin/rtk"
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: uv sync --python ${{ matrix.python }}
+
+      - name: ruff check
+        run: uv run ruff check
+
+      - name: ruff format check
+        run: uv run ruff format --check
+
+      - name: pytest
+        run: uv run python -m pytest

@@ -1,0 +1,14 @@
+{
+  "name": "solarized-dark",
+  "colors": {
+    "accent": "#268bd2",
+    "text": "#839496",
+    "muted": "#586e75",
+    "error": "#dc322f",
+    "warning": "#b58900",
+    "success": "#859900",
+    "thinking": "#657b83",
+    "tool": "#2aa198",
+    "permission": "#6c71c4"
+  }
+}

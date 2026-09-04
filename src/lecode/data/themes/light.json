@@ -1,0 +1,14 @@
+{
+  "name": "light",
+  "colors": {
+    "accent": "#0969da",
+    "text": "#1f2328",
+    "muted": "#6e7781",
+    "error": "#cf222e",
+    "warning": "#9a6700",
+    "success": "#1a7f37",
+    "thinking": "#57606a",
+    "tool": "#0550ae",
+    "permission": "#8250df"
+  }
+}

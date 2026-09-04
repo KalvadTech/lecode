@@ -1,0 +1,14 @@
+{
+  "name": "monokai",
+  "colors": {
+    "accent": "#66d9ef",
+    "text": "#f8f8f2",
+    "muted": "#75715e",
+    "error": "#f92672",
+    "warning": "#e6db74",
+    "success": "#a6e22e",
+    "thinking": "#90908a",
+    "tool": "#a1efe4",
+    "permission": "#ae81ff"
+  }
+}

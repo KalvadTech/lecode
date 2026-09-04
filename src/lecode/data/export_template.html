@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>$title</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  background: #0d1117; color: #e6edf3;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  max-width: 860px; margin: 0 auto; padding: 2rem 1rem; line-height: 1.5;
+}
+header { border-bottom: 1px solid #30363d; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+h1 { font-size: 1.4rem; margin: 0 0 .5rem; }
+.meta, .stats { color: #8b949e; font-size: .85rem; margin: .15rem 0; }
+.msg { margin: 1rem 0; padding: .7rem 1rem; border-radius: 8px; white-space: pre-wrap; word-wrap: break-word; }
+.msg .role { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: #8b949e; margin-bottom: .3rem; }
+.user { background: #1f6feb22; border-left: 3px solid #1f6feb; }
+.assistant { background: #161b22; border-left: 3px solid #238636; }
+.system { background: #161b22; border-left: 3px solid #8b949e; color: #8b949e; }
+.tool-call, .tool-result {
+  background: #010409; border: 1px solid #30363d;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem;
+}
+.tool-call { border-left: 3px solid #bb8009; }
+.tool-result { border-left: 3px solid #30363d; }
+.attachment { color: #8b949e; font-size: .85rem; }
+details.thinking {
+  margin: 1rem 0; padding: .5rem 1rem; border: 1px dashed #30363d; border-radius: 8px;
+  color: #8b949e; font-size: .85rem;
+}
+details.thinking summary { cursor: pointer; text-transform: uppercase; font-size: .7rem; letter-spacing: .08em; }
+details.thinking div { margin-top: .5rem; white-space: pre-wrap; word-wrap: break-word; }
+footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid #30363d; color: #8b949e; font-size: .8rem; }
+</style>
+</head>
+<body>
+<header>
+<h1>$title</h1>
+<p class="meta">$meta</p>
+<p class="stats">$stats</p>
+</header>
+<main>
+$body
+</main>
+<footer>Exported from lecode · $exported_at</footer>
+</body>
+</html>
