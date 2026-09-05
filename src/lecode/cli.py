@@ -575,14 +575,32 @@ def run_interactive(
     no_color: bool = False,
     worktree: str | None = None,
 ) -> int:
-    """Interactive TUI path: name prompt → session on disk → chat.
+    """Interactive TUI path: banner → progressive load report → chat.
 
-    Startup order (locked): dependency check (done by the caller) → first-run
-    setup offer (no config + tty) → config load → session-name prompt. Ctrl-C/
-    Ctrl-D at the prompt exits 0 before any session file is created.
-    ``-r/--resume <ref>`` / ``-c/--continue`` reopen an existing session and
-    keep its name (no prompt).
+    Startup order (locked): dependency check (done by the caller) → ASCII
+    banner (printed immediately) → first-run setup offer (no config + tty)
+    → config load → session-name prompt. Ctrl-C/Ctrl-D at the prompt exits
+    0 before any session file is created. Each subsystem prints its loading
+    line as it finishes. ``-r/--resume <ref>`` / ``-c/--continue`` reopen an
+    existing session and keep its name (no prompt).
     """
+    from rich.console import Console
+
+    from lecode.tui.loading import (
+        LoadingProgress,
+        build_load_report,
+        config_step,
+        mcp_step,
+        models_step,
+        provider_step,
+        session_step,
+    )
+
+    # Banner first — before any slow work (setup wizard, network fetches).
+    console = Console(no_color=no_color)
+    progress = LoadingProgress(console)
+    progress.banner()
+
     if (
         resume is None
         and not continue_last
@@ -603,9 +621,12 @@ def run_interactive(
     )
     if no_color:
         config.ui.no_color = True
+    if config.ui.no_color:
+        console.no_color = True
     _init_telemetry(config)
 
     cwd = Path.cwd()
+    progress.step(config_step(loaded, cwd))
     wt_manager: WorktreeManager | None = None
     wt_info: WorktreeInfo | None = None
     original_cwd = cwd
@@ -644,16 +665,21 @@ def run_interactive(
             return EXIT_OK
         session = store.create(name, cwd, model=config.llm.model)
 
+    resumed = resume is not None or continue_last
+    progress.step(session_step(session, store, resumed=resumed))
+
     try:
         client = build_provider(config, api_key=api_key)
     except (AuthError, ValueError) as e:
         typer.echo(f"error: {e}", err=True)
         return EXIT_STARTUP
-    try:
-        models = fetch_catalog(config, api_key)
-    except KeyboardInterrupt:
-        return EXIT_OK
+    spec = resolve_provider(config)
+    key_source = resolve_api_key(spec.name, config, cli_key=api_key).source
+    progress.step(provider_step(config, spec, key_source))
 
+    # Build the runtime immediately — the two slow, network-bound steps (live
+    # model catalog, MCP probe) run concurrently afterwards. The catalog is
+    # bound late onto ctx: modality checks read it at tool-call time.
     runtime = build_runtime(
         config,
         cwd,
@@ -662,10 +688,30 @@ def run_interactive(
         mode="readonly" if read_only else None,
         allowed_tools=_tool_filter(allowed_tools),
         agent_name=session.meta.agent,
-        catalog=models.catalog,
     )
     for warning in runtime.warnings:
         typer.echo(f"warning: {warning}", err=True)
+
+    # The remaining local subsystems load with the runtime; print them now.
+    try:
+        already_shown = {"session", "config", "provider", "models", "mcp"}
+        for step in build_load_report(
+            config=config,
+            loaded=loaded,
+            runtime=runtime,
+            session=session,
+            store=store,
+            cwd=cwd,
+            resumed=resumed,
+            provider_spec=spec,
+            key_source=key_source,
+            read_only=read_only,
+        ):
+            if step.label not in already_shown:
+                progress.step(step)
+    except Exception:
+        # The loading screen is informational; it must never break startup.
+        pass
 
     # Probe MCP servers up front so the loading screen can report live
     # per-server status. The probe connects on this throwaway loop with a
@@ -682,33 +728,22 @@ def run_interactive(
             await probe.shutdown()
             runtime.ctx.extras.pop(MCP_EXTRA, None)
 
+    async def _load_slow() -> tuple[LoadedCatalog, list]:
+        # fetch_catalog manages its own event loop internally — run it in a
+        # thread so it can overlap with the MCP probe on this loop.
+        models_f = asyncio.to_thread(fetch_catalog, config, api_key)
+        return await asyncio.gather(models_f, _probe_mcp())
+
+    progress.pending("models", f"fetching live from {spec.name}…")
+    progress.pending("mcp", "probing servers…")
     try:
-        mcp_status = asyncio.run(_probe_mcp())
+        models, mcp_status = asyncio.run(_load_slow())
     except KeyboardInterrupt:
         return EXIT_OK
-
-    from rich.console import Console
-
-    from lecode.tui.loading import show_loading_screen
-
-    console = Console(no_color=config.ui.no_color)
-    spec = resolve_provider(config)
-    show_loading_screen(
-        config=config,
-        loaded=loaded,
-        runtime=runtime,
-        session=session,
-        store=store,
-        cwd=cwd,
-        resumed=resume is not None or continue_last,
-        provider_spec=spec,
-        key_source=resolve_api_key(spec.name, config, cli_key=api_key).source,
-        console=console,
-        read_only=read_only,
-        models_origin=models.origin,
-        models_count=models.remote_count,
-        mcp_servers=mcp_status,
-    )
+    runtime.ctx.catalog = models.catalog
+    progress.step(models_step(models.origin, models.remote_count))
+    progress.step(mcp_step(config, mcp_status))
+    console.print()
 
     tui = TuiApp(config, runtime, client, session, store, console=console, catalog=models.catalog)
     if wt_info is not None and wt_manager is not None:
