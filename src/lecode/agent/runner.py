@@ -87,6 +87,14 @@ class Retrying:
 
 
 @dataclass(frozen=True)
+class LlmCall:
+    """The runner is invoking the model — one event per round, before streaming."""
+
+    model: str
+    turn: int
+
+
+@dataclass(frozen=True)
 class Done:
     stop_reason: str
     turns: int
@@ -101,7 +109,7 @@ class Review:
 
 
 #: Everything the runner reports through ``on_event``.
-AgentEvent = Token | Reasoning | ToolCall | ToolResult | Error | Retrying | Done | Review
+AgentEvent = Token | Reasoning | ToolCall | ToolResult | Error | Retrying | LlmCall | Done | Review
 
 #: on_event(event) — sync or async.
 OnEvent = Callable[[AgentEvent], Any]
@@ -220,6 +228,7 @@ class AgentRunner:
                         await asyncio.sleep(self.config.agent.turn_cooldown_ms / 1000)
 
                 self._partial = None
+                await self._emit(on_event, LlmCall(model=self.model, turn=turns + 1))
                 completed = await self._stream_turn(history, on_event)
                 turns += 1
 

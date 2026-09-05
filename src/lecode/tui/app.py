@@ -36,6 +36,7 @@ from lecode.agent.runner import (
     AgentRunner,
     Done,
     Error,
+    LlmCall,
     Reasoning,
     Retrying,
     Review,
@@ -659,7 +660,6 @@ class TuiApp:
             await asyncio.sleep(SPINNER_INTERVAL_S)
             if self._status.state is StatusLineState.RUNNING:
                 self._status.spinner_frame += 1
-            self._feed.activity_tick()
             self._status.git = await self._git.get(self._cwd)
             if self._app is not None:
                 self._app.invalidate()
@@ -794,7 +794,7 @@ class TuiApp:
         if not cmd:
             return
         self._feed.user_message(("!!" if share_with_llm else "!") + cmd)
-        self._feed.activity_start("running shell")
+        self._activity("running shell")
         self._shell_task = asyncio.current_task()
         try:
             result = await run_proc(["bash", "-c", cmd], cwd=self._cwd, timeout=SHELL_TIMEOUT_S)
@@ -835,6 +835,16 @@ class TuiApp:
     def _invalidate(self) -> None:
         if self._app is not None:
             self._app.invalidate()
+
+    def _activity(self, label: str | None) -> None:
+        """Set the statusline activity label and repaint.
+
+        The indicator lives in the statusline's state segment, not as a
+        printed transient line — console writes through ``patch_stdout``
+        forced a full app repaint per write and visibly flickered.
+        """
+        self._status.activity = label
+        self._invalidate()
 
     async def _request_approval(
         self, tool_name: str, args: dict[str, Any], reason: str
@@ -926,7 +936,7 @@ class TuiApp:
             run_history += self._history[1:]
         self._status.state = StatusLineState.RUNNING
         self._feed.stream_start()
-        self._feed.activity_start("thinking")
+        self._activity("thinking")
         self._signals.emit(START)
         result = None
         cancelled = False
@@ -941,6 +951,7 @@ class TuiApp:
             self._feed.stream_end()
             self._signals.emit(STOP)
             self._status.state = StatusLineState.IDLE
+            self._status.activity = None
         if result is not None:
             if result.final_text:
                 self._last_response = result.final_text
@@ -978,7 +989,7 @@ class TuiApp:
         """A direct ``@agent`` submission: the subagent answers as a side
         query — the exchange is not persisted to the session."""
         self._status.state = StatusLineState.RUNNING
-        self._feed.activity_start(f"@{name} working")
+        self._activity(f"@{name} working")
         outcome: SubagentOutcome | None = None
         try:
             outcome = await run_subagent(
@@ -995,6 +1006,7 @@ class TuiApp:
             self._feed.info("turn cancelled")
         finally:
             self._status.state = StatusLineState.IDLE
+            self._status.activity = None
         if outcome is not None:
             self._feed.assistant_text(outcome.text)
             self._last_response = outcome.text
@@ -1012,7 +1024,7 @@ class TuiApp:
             self._history.append(message)
             self._store.append_message(self._session, message)
             self._feed.stream_start()
-            self._feed.activity_start("thinking")
+            self._activity("thinking")
             result = await self._runner.run(list(self._history), on_event=self._on_event)
             # The runner persisted everything; rebuild from disk like _run_turn.
             self._history = [{"role": "system", "content": self._runtime.system_prompt}]
@@ -1038,6 +1050,7 @@ class TuiApp:
             finally:
                 self._feed.stream_end()
                 self._status.state = StatusLineState.IDLE
+                self._status.activity = None
             if result.stop_reason == "done":
                 self._feed.info(f"loop done: plan complete after {result.iterations} iteration(s)")
             elif result.stop_reason == "max_iterations":
@@ -1071,7 +1084,7 @@ class TuiApp:
             self._feed.assistant_text(f"## {phase}\n\n{output}")
 
         self._status.state = StatusLineState.RUNNING
-        self._feed.activity_start("chain running")
+        self._activity("chain running")
         try:
             result = await run_chain(
                 factory,
@@ -1088,6 +1101,7 @@ class TuiApp:
             return
         finally:
             self._status.state = StatusLineState.IDLE
+            self._status.activity = None
         if result.final:
             self._last_response = result.final
 
@@ -1103,16 +1117,19 @@ class TuiApp:
         elif isinstance(event, ToolCall):
             self._status.context_used += estimate_tokens(event.arguments)
             self._feed.tool_call(event.name, " ".join(event.arguments.split()))
-            self._feed.activity_start(f"running {event.name}")
+            self._activity(f"running {event.name}")
         elif isinstance(event, ToolResult):
             self._status.context_used += estimate_tokens(event.content)
             self._feed.tool_result(event.name, event.content, event.is_error)
-            self._feed.activity_start("thinking")
+            self._activity("thinking")
         elif isinstance(event, Error):
             self._feed.error(event.message)
             self._spawn(self._notifier.error())
         elif isinstance(event, Retrying):
             self._feed.retrying(event.attempt, event.delay)
+        elif isinstance(event, LlmCall):
+            self._feed.llm_call(event.model, event.turn)
+            self._activity("thinking")
         elif isinstance(event, Done):
             self._feed.stream_end()
             self._spawn(self._notifier.task_finish())
@@ -1128,14 +1145,16 @@ class TuiApp:
         """
         if isinstance(event, ToolCall):
             self._feed.tool_call(f"{agent}/{event.name}", " ".join(event.arguments.split()))
-            self._feed.activity_start(f"@{agent} running {event.name}")
+            self._activity(f"@{agent} running {event.name}")
         elif isinstance(event, ToolResult):
             self._feed.tool_result(f"{agent}/{event.name}", event.content, event.is_error)
-            self._feed.activity_start(f"@{agent} working")
+            self._activity(f"@{agent} working")
         elif isinstance(event, Error):
             self._feed.error(f"{agent}: {event.message}")
         elif isinstance(event, Retrying):
             self._feed.retrying(event.attempt, event.delay)
+        elif isinstance(event, LlmCall):
+            self._feed.llm_call(f"{agent} · {event.model}", event.turn)
         elif isinstance(event, Done):
             self._feed.info(f"{agent} finished ({event.stop_reason}, {event.turns} turn(s))")
 

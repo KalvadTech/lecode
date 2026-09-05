@@ -13,6 +13,7 @@ from lecode.agent.runner import (
     AgentRunner,
     Done,
     Error,
+    LlmCall,
     Retrying,
     Token,
     ToolCall,
@@ -76,6 +77,23 @@ async def test_single_turn_done(tool_ctx):
     assert isinstance(events[-1], Done)
     # the tool specs are offered to the provider
     assert provider.requests[0]["tools"][0]["function"]["name"] == "echo"
+
+
+async def test_llm_call_event_per_round(tool_ctx):
+    script = [
+        {"tool_calls": [{"id": "c1", "name": "echo", "arguments": '{"text": "hi"}'}]},
+        {"text": "done"},
+    ]
+    runner, _ = make_runner(tool_ctx, script)
+    events, on_event = collect_events()
+
+    await runner.run([{"role": "user", "content": "echo hi"}], on_event)
+
+    calls = [e for e in events if isinstance(e, LlmCall)]
+    assert [(e.model, e.turn) for e in calls] == [(runner.model, 1), (runner.model, 2)]
+    # each LlmCall precedes the round's first Token/ToolCall event
+    first_call = events.index(calls[0])
+    assert isinstance(events[first_call + 1], ToolCall)
 
 
 async def test_tool_round_trip(tool_ctx):

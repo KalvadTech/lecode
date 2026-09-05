@@ -180,4 +180,4 @@ async def test_pierre_feedback_rendered_after_stats(tmp_path, monkeypatch):
     assert "◆ pierre" in rendered
     assert "Covers the request." in rendered
     # stats line first, then the review
-    assert rendered.index("this answer") < rendered.index("◆ pierre")
+    assert rendered.index("answer:") < rendered.index("◆ pierre")

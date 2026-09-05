@@ -69,6 +69,9 @@ class StatusState:
     queued: int = 0
     steered: int = 0
     spinner_frame: int = 0
+    #: What is running right now ("thinking", "running bash", …); shown with
+    #: the spinner instead of a printed activity line (which flickered).
+    activity: str | None = None
 
 
 def human_tokens(n: int) -> str:
@@ -101,6 +104,8 @@ def _state_segment(state: StatusState) -> tuple[str, str]:
     """Plain text and theme-color name for the trailing state segment."""
     if state.state is StatusLineState.RUNNING:
         text = SPINNER_FRAMES[state.spinner_frame % len(SPINNER_FRAMES)]
+        if state.activity:
+            text += f" {state.activity}…"
         color = "accent"
     elif state.state is StatusLineState.AWAITING_APPROVAL:
         text = "awaiting approval"

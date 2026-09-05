@@ -31,7 +31,8 @@ def make_feed(theme, collapse_thinking=True, force_terminal=False):
 def test_user_message(theme):
     feed, out = make_feed(theme)
     feed.user_message("fix the bug")
-    assert "> fix the bug" in out.getvalue()
+    # Verbatim echo with the prompt marker: no timestamp, no suffix.
+    assert out.getvalue().strip() == "> fix the bug"
 
 
 # -- logbook stamps ------------------------------------------------------------
@@ -39,7 +40,7 @@ def test_user_message(theme):
 
 def test_lines_carry_timestamps(theme):
     feed, out = make_feed(theme)
-    feed.user_message("hi")
+    feed.user_message("hi")  # verbatim: no timestamp on the input echo
     feed.tool_call("bash", "ls")
     feed.tool_result("bash", "ok")
     feed.info("note")
@@ -53,25 +54,35 @@ def test_lines_carry_timestamps(theme):
         session_cost_usd=0.002,
     )
     stamped = [ln for ln in out.getvalue().splitlines() if ln.startswith("[")]
-    # user, tool call, tool result, info, error, turn stats
-    assert len(stamped) == 6
+    # tool call, tool result, info, error, turn stats (not the user echo)
+    assert len(stamped) == 5
     assert all(len(ln) >= 10 and ln[1:3].isdigit() and ln[3] == ":" for ln in stamped)
 
 
 def test_metrics_suffix_on_action_lines(theme):
     feed, out = make_feed(theme)
     feed.metrics = lambda: (12_300, 200_000, 0.0412)
-    feed.user_message("hi")
+    feed.user_message("hi")  # verbatim: no metrics suffix on the input echo
     feed.tool_call("bash", "ls")
     feed.tool_result("bash", "ok")
     rendered = out.getvalue()
-    assert rendered.count("ctx 12.3k/200.0k · $0.0412") == 3
+    assert rendered.count("ctx 12.3k/200.0k · $0.0412") == 2
 
 
 def test_no_metrics_suffix_when_unbound(theme):
     feed, out = make_feed(theme)
     feed.user_message("hi")
     assert "ctx" not in out.getvalue()
+
+
+def test_llm_call_logged(theme):
+    feed, out = make_feed(theme)
+    feed.llm_call("openai/gpt-5", 2)
+    rendered = out.getvalue()
+    assert "→ openai/gpt-5 (round 2)" in rendered
+    # Logbook line: carries a timestamp.
+    line = next(ln for ln in rendered.splitlines() if "→ openai/gpt-5" in ln)
+    assert line.startswith("[") and line[1:3].isdigit() and line[3] == ":"
 
 
 def test_assistant_text_renders_markdown(theme):
@@ -198,14 +209,14 @@ def test_turn_stats_line(theme):
         elapsed_s=12.34,
     )
     rendered = out.getvalue()
+    assert "answer: ↑4.1k in · ↓0.9k out · $0.0062" in rendered
+    assert "total: $0.0314" in rendered
     assert "ctx 36.9k/204.8k (18%)" in rendered
-    assert "↑4.1k in" in rendered
-    assert "↓0.9k out" in rendered
-    assert "$0.0062 this answer" in rendered
-    assert "$0.0314 total" in rendered
     assert "3 tool calls" in rendered
     assert "2 rounds" in rendered
     assert "12.3s" in rendered
+    # this answer first, then the session total
+    assert rendered.index("answer:") < rendered.index("total:")
 
 
 def test_turn_stats_line_plain_answer_hides_tool_count(theme):

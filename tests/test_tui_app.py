@@ -137,7 +137,7 @@ async def test_submit_streams_answer(tmp_path, monkeypatch):
     await app._submit("hi")
     await app._turn_task
     rendered = out.getvalue()
-    assert "> hi" in rendered
+    assert rendered.startswith("> hi\n")
     assert "Hello world" in rendered
     assert provider.requests[0]["messages"][-1] == {"role": "user", "content": "hi"}
 
@@ -149,9 +149,7 @@ async def test_submit_prints_per_answer_stats_line(tmp_path, monkeypatch):
     await app._turn_task
     rendered = out.getvalue()
     assert "ctx 1.2k/" in rendered  # last call's prompt size over the model window
-    assert "↑1.2k in" in rendered
-    assert "↓42 out" in rendered
-    assert "this answer" in rendered
+    assert "answer: ↑1.2k in · ↓42 out" in rendered
     assert "1 round" in rendered
 
 

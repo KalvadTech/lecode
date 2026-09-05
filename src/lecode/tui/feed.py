@@ -12,10 +12,11 @@ one-line spinner (``⠋ thinking…``) shown while the model or a tool is
 working. It is drawn with ``\\r`` + erase-line and removed by the next real
 output, so it never persists in scrollback.
 
-Logbook style: every discrete line carries a ``[HH:MM:SS]`` timestamp, and
-action lines (user input, tool calls, tool results) end with the live
-``ctx used/window · $cost-so-far`` segment when a ``metrics`` callable is
-bound (the TUI binds it to the statusline state).
+Logbook style: every discrete line carries a ``[HH:MM:SS]`` timestamp — except
+the user-input echo, which prints verbatim — and action lines (tool calls,
+tool results) end with the live ``ctx used/window · $cost-so-far`` segment
+when a ``metrics`` callable is bound (the TUI binds it to the statusline
+state).
 """
 
 from __future__ import annotations
@@ -102,11 +103,9 @@ class Feed:
         )
 
     def user_message(self, text: str) -> None:
-        """Echo the user's input as ``> text`` in the accent color."""
+        """Echo the user's input as ``> text`` — verbatim, no timestamp/suffix."""
         self.activity_stop()
-        self._console.print(
-            Text(f"[{self._stamp()}] > {text}{self._suffix()}", style=self._theme.accent)
-        )
+        self._console.print(f"> {text}", markup=False, highlight=False)
 
     def assistant_text(self, markdown: str) -> None:
         """Render a completed assistant message as Markdown."""
@@ -156,6 +155,16 @@ class Feed:
                 )
             )
 
+    def llm_call(self, model: str, turn: int) -> None:
+        """Log one LLM invocation: ``→ model (round N)``."""
+        self.activity_stop()
+        self._console.print(
+            Text(
+                f"[{self._stamp()}] → {model} (round {turn}){self._suffix()}",
+                style=self._theme.muted,
+            )
+        )
+
     def tool_call(self, name: str, args_preview: str) -> None:
         """Render ``⚙ name(args_preview)``, truncated to ~120 chars."""
         self.activity_stop()
@@ -189,13 +198,14 @@ class Feed:
         turns: int = 0,
         elapsed_s: float = 0.0,
     ) -> None:
-        """Muted per-answer line: context fill, tokens in/out, price, activity."""
+        """Muted per-answer line: this answer first, then session totals."""
         self.activity_stop()
         _, pct = context_meter(context_used, context_window)
         parts = [
+            f"answer: ↑{human_tokens(input_tokens)} in · ↓{human_tokens(output_tokens)} out"
+            f" · {format_cost(cost_usd)}",
+            f"total: {format_cost(session_cost_usd)}",
             f"ctx {human_tokens(context_used)}/{human_tokens(context_window)} ({pct}%)",
-            f"↑{human_tokens(input_tokens)} in · ↓{human_tokens(output_tokens)} out",
-            f"{format_cost(cost_usd)} this answer · {format_cost(session_cost_usd)} total",
         ]
         activity = []
         if tool_calls:
