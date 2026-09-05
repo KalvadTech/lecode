@@ -85,17 +85,20 @@ async def test_unknown_model_keeps_configured_window(tmp_path, monkeypatch):
     assert app.status.context_window == config.agent.context_window
 
 
-def test_layout_has_separator_before_statusline(tmp_path, monkeypatch):
-    """A full-width rule splits the input box from the 3-line statusline."""
+def test_layout_is_chatbox_above_statusline(tmp_path, monkeypatch):
+    """The input is a framed chatbox directly above the 3-line statusline;
+    the frame's bottom border is the split between them."""
     from prompt_toolkit.layout.containers import Window
+    from prompt_toolkit.widgets import Frame
 
     app, _, _ = make_app(tmp_path, monkeypatch, [])
     with create_pipe_input() as inp:
         pt_app = app._build_app(input=inp, output=DummyOutput())
+    assert isinstance(app._chatbox, Frame) and app._chatbox.body is app._input_area
     children = pt_app.layout.container.children
-    assert isinstance(children[1], Window) and children[1].char == "─"
-    statusline = children[2]
-    assert isinstance(statusline, Window) and statusline.height == 3
+    # Frame unwraps to its internal container; the statusline stays last.
+    assert len(children) == 2
+    assert isinstance(children[1], Window) and children[1].height == 3
 
 
 async def test_resume_restores_status_usage(tmp_path, monkeypatch):

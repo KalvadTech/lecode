@@ -1,7 +1,7 @@
 """The interactive TUI application.
 
-prompt_toolkit owns a bottom-pinned multiline input with the fixed
-statusline as bottom toolbar (re-rendered on state change and on a 0.3s
+prompt_toolkit owns a bottom-pinned framed chatbox (multiline input) with
+the fixed statusline below it (re-rendered on state change and on a 0.3s
 spinner refresh while a turn runs). The transcript is the append-only Rich
 :class:`~lecode.tui.feed.Feed` — normal scrollback, no alternate screen, no
 mouse. One asyncio loop: submissions either start a turn task on the
@@ -29,7 +29,7 @@ from prompt_toolkit.layout.containers import HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.output import Output
 from prompt_toolkit.patch_stdout import patch_stdout
-from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.widgets import Frame, TextArea
 from rich.console import Console
 
 from lecode.agent.runner import (
@@ -235,6 +235,7 @@ class TuiApp:
             ]
         )
         self._input_area: TextArea | None = None
+        self._chatbox: Frame | None = None
 
     # -- public seams for slash-command handlers -------------------------------
 
@@ -601,10 +602,11 @@ class TuiApp:
             height=3,
             dont_extend_height=True,
         )
-        # A full-width rule splitting the input box from the statusline.
-        separator = Window(height=1, char="─", dont_extend_height=True)
+        # The chatbox: a framed input area directly above the statusline.
+        # Enter submits the text into the transcript above (see _enter).
+        self._chatbox = Frame(self._input_area, title="message")
         return Application(
-            layout=Layout(HSplit([self._input_area, separator, toolbar])),
+            layout=Layout(HSplit([self._chatbox, toolbar])),
             key_bindings=self._build_keybindings(),
             full_screen=False,
             mouse_support=False,
