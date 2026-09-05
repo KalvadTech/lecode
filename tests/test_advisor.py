@@ -392,12 +392,12 @@ async def test_handoff_end_to_end_via_pipe(tmp_path, monkeypatch):
     ]
     app, _, out = make_advisor_app(tmp_path, monkeypatch, script, mode="handoff")
     with create_pipe_input() as inp:
-        inp.send_text("pick a database\n")
+        inp.send_text("pick a database\r")
         task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
         await wait_for(lambda: "advisor asks: which db?" in out.getvalue())
-        inp.send_text("use sqlite\n")
+        inp.send_text("use sqlite\r")
         await wait_for(lambda: "done with sqlite" in out.getvalue())
-        inp.send_text("/quit\n")
+        inp.send_text("/quit\r")
         assert await task == 0
     rendered = out.getvalue()
     assert "Advisor (human): use sqlite" in rendered

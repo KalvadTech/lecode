@@ -257,12 +257,12 @@ async def test_pipe_approval_y_runs_asked_tool(tmp_path, monkeypatch):
     ]
     app, out = make_app(tmp_path, monkeypatch, script)
     with create_pipe_input() as inp:
-        inp.send_text("run it\n")
+        inp.send_text("run it\r")
         task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
         await wait_for(lambda: "allow bash 'echo approved-output'?" in out.getvalue())
         inp.send_text("y")
         await wait_for(lambda: "tool ran" in out.getvalue())  # turn fully done
-        inp.send_text("/quit\n")
+        inp.send_text("/quit\r")
         assert await task == 0
     rendered = out.getvalue()
     assert "approved-output" in rendered
@@ -276,12 +276,12 @@ async def test_pipe_approval_escape_denies(tmp_path, monkeypatch):
     ]
     app, out = make_app(tmp_path, monkeypatch, script)
     with create_pipe_input() as inp:
-        inp.send_text("run it\n")
+        inp.send_text("run it\r")
         task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
         await wait_for(lambda: "allow bash" in out.getvalue())
         inp.send_text("\x1b")
         await wait_for(lambda: "denied by user" in out.getvalue())
-        inp.send_text("/quit\n")
+        inp.send_text("/quit\r")
         assert await task == 0
     # the command string only ever appears in the tool-call echo and the ask;
     # strip the transient activity indicator's fragments (erase-line + spinner)

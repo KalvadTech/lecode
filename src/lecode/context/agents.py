@@ -14,6 +14,7 @@ from pickers), ``color``. The body is the agent's system prompt.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -264,7 +265,16 @@ def parse_mentions(text: str, registry: AgentRegistry) -> tuple[list[str], str]:
     candidates = sorted(registry.names(), key=len, reverse=True)
     found: list[str] = []
     kept: list[str] = []
-    for word in text.split():
+    # Split on whitespace but keep the separators: newlines and spacing in
+    # the user's message are significant (multiline chatbox input). A removed
+    # mention also drops one following space/tab run, so "@a, then @b x"
+    # cleans to "then x" — but a following newline is kept.
+    skip_space = False
+    for word in re.split(r"(\s+)", text):
+        if skip_space:
+            skip_space = False
+            if word.isspace() and "\n" not in word:
+                continue
         matched = None
         if word.startswith("@"):
             token = word[1:]
@@ -276,6 +286,7 @@ def parse_mentions(text: str, registry: AgentRegistry) -> tuple[list[str], str]:
                     break
         if matched is not None:
             found.append(matched)
+            skip_space = True
         else:
             kept.append(word)
-    return found, " ".join(kept)
+    return found, "".join(kept).strip(" \t")

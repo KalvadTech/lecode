@@ -74,6 +74,7 @@ WELCOME_TEXT = """\
 lecode — cheat sheet
 
   Enter            send · queue while the agent runs
+  Shift-Enter      newline (Ctrl-J works everywhere)
   Alt-Enter        steer (priority queue)
   Ctrl-C           cancel turn / clear input / quit
   Ctrl-D           delete char / quit on empty input

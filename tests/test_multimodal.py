@@ -216,6 +216,14 @@ def test_extract_attachment_refs_converts_media(tmp_path):
     assert store.list()[0].path.name == "img.png"
 
 
+def test_extract_attachment_refs_preserves_newlines_and_spacing(tmp_path):
+    _write(tmp_path, "img.png", PNG)
+    store = AttachmentStore()
+    text = extract_attachment_refs("first line\nsecond  line @img.png\nthird", tmp_path, store)
+    assert text == "first line\nsecond  line \nthird"
+    assert len(store) == 1
+
+
 def test_extract_attachment_refs_leaves_agents_and_missing(tmp_path):
     store = AttachmentStore()
     text = extract_attachment_refs("@plan check @missing.png", tmp_path, store)

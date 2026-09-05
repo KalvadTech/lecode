@@ -15,6 +15,7 @@ the next user message only, then clear.
 from __future__ import annotations
 
 import base64
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -248,7 +249,16 @@ def extract_attachment_refs(text: str, cwd: Path, store: AttachmentStore) -> str
     them); failed loads (e.g. over the cap) also stay as plain text.
     """
     kept: list[str] = []
-    for word in text.split():
+    # Split on whitespace but keep the separators: newlines and spacing in
+    # the user's message are significant (multiline chatbox input). A removed
+    # attachment token also drops one following space/tab run — but never a
+    # newline.
+    skip_space = False
+    for word in re.split(r"(\s+)", text):
+        if skip_space:
+            skip_space = False
+            if word.isspace() and "\n" not in word:
+                continue
         if word.startswith("@") and len(word) > 1:
             candidate = Path(word[1:])
             if not candidate.is_absolute():
@@ -256,8 +266,9 @@ def extract_attachment_refs(text: str, cwd: Path, store: AttachmentStore) -> str
             if candidate.is_file() and sniff(candidate) is not None:
                 try:
                     store.add(load_attachment(candidate))
+                    skip_space = True
                     continue
                 except (OSError, ValueError):
                     pass  # leave the token as plain text
         kept.append(word)
-    return " ".join(kept)
+    return "".join(kept).strip(" \t")  # trim edges left by removed tokens

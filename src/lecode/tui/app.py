@@ -23,7 +23,9 @@ from prompt_toolkit.completion import merge_completers
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.input import Input
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
@@ -117,6 +119,20 @@ SHELL_TIMEOUT_S = 120.0
 
 #: Exit code returned by :meth:`TuiApp.run` (interactive exits cleanly).
 EXIT_OK = 0
+
+
+def _register_shift_enter() -> None:
+    """Map the Shift+Enter escape sequences to Ctrl-J (newline).
+
+    prompt_toolkit 3.0.53 has no ShiftEnter key: the Kitty sequence
+    ``ESC [ 13 ; 2 u`` is unmapped and the modifyOtherKeys sequence
+    ``ESC [ 27 ; 2 ; 13 ~`` maps to c-m — i.e. it would *submit*. Both are
+    (re)mapped to c-j, which the chatbox binds to "insert newline". The
+    vt100 parser reads ``ANSI_SEQUENCES`` live, so runtime registration is
+    enough. Idempotent; the dependency is pinned, so this stays in sync.
+    """
+    ANSI_SEQUENCES.setdefault("\x1b[13;2u", Keys.ControlJ)
+    ANSI_SEQUENCES["\x1b[27;2;13~"] = Keys.ControlJ
 
 
 class TuiApp:
@@ -507,6 +523,13 @@ class TuiApp:
             event.current_buffer.reset()
             self._spawn(self._submit(text, steer=True))
 
+        @kb.add("c-j")
+        def _newline(event: Any) -> None:
+            # Ctrl-J — and Shift-Enter on terminals that report it (the
+            # kitty/modifyOtherKeys sequences are mapped to c-j in
+            # _register_shift_enter): insert a newline, never submit.
+            event.current_buffer.insert_text("\n")
+
         @kb.add("c-c")
         def _ctrl_c(event: Any) -> None:
             if self._approval.is_pending:
@@ -589,6 +612,7 @@ class TuiApp:
         return kb
 
     def _build_app(self, input: Input | None = None, output: Output | None = None) -> Application:
+        _register_shift_enter()
         draft = self._input_history.load_draft()
         self._input_area = TextArea(
             prompt="> ",

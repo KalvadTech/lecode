@@ -220,12 +220,12 @@ async def test_pipe_smoke_with_pickers(tmp_path, monkeypatch):
         console=Console(record=True, file=out, width=200),
     )
     with create_pipe_input() as inp:
-        inp.send_text("hello\n")
+        inp.send_text("hello\r")
         task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
         for _ in range(500):
             if "picker smoke answer" in out.getvalue():
                 break
             await asyncio.sleep(0.01)
-        inp.send_text("/quit\n")
+        inp.send_text("/quit\r")
         assert await task == 0
     assert "picker smoke answer" in out.getvalue()

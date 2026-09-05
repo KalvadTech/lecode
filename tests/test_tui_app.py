@@ -340,10 +340,10 @@ async def test_pipe_smoke_submit_answer_quit_totals(tmp_path, monkeypatch):
     script = [{"text": "streamed answer", "usage": {"input_tokens": 3, "output_tokens": 2}}]
     app, _, out = make_app(tmp_path, monkeypatch, script)
     with create_pipe_input() as inp:
-        inp.send_text("hello\n")
+        inp.send_text("hello\r")
         task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
         await wait_for(lambda: "streamed answer" in out.getvalue())
-        inp.send_text("/quit\n")
+        inp.send_text("/quit\r")
         code = await task
     assert code == 0
     assert "Session test-session: tokens 3 in / 2 out" in out.getvalue()
@@ -353,10 +353,10 @@ async def test_pipe_slash_command_echoed(tmp_path, monkeypatch):
     """A submitted slash command is echoed to the feed, like chat prompts."""
     app, _, out = make_app(tmp_path, monkeypatch, [])
     with create_pipe_input() as inp:
-        inp.send_text("/model\n")
+        inp.send_text("/model\r")
         task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
         await wait_for(lambda: "model:" in out.getvalue())
-        inp.send_text("/quit\n")
+        inp.send_text("/quit\r")
         code = await task
     assert code == 0
     assert "/model" in out.getvalue()  # the echo, not just the "model:" result
@@ -390,14 +390,31 @@ async def test_pipe_eof_exits_cleanly(tmp_path, monkeypatch):
 async def test_pipe_submission_recorded_in_history(tmp_path, monkeypatch):
     app, _, _ = make_app(tmp_path, monkeypatch, [{"text": "ok"}])
     with create_pipe_input() as inp:
-        inp.send_text("remember this\n")
+        inp.send_text("remember this\r")
         task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
         await wait_for(lambda: not app._turn_running() and app._turn_task is not None)
-        inp.send_text("/quit\n")
+        inp.send_text("/quit\r")
         assert await task == 0
     from lecode.tui.input import SessionHistory
 
     assert "remember this" in SessionHistory(app._store, app.session).load_history_strings()
+
+
+async def test_pipe_shift_enter_and_ctrl_j_insert_newline(tmp_path, monkeypatch):
+    """Shift-Enter (kitty sequence) and Ctrl-J insert a newline; Enter submits."""
+    script = [{"text": "first answer"}, {"text": "second answer"}]
+    app, provider, _ = make_app(tmp_path, monkeypatch, script)
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        inp.send_text("line one\x1b[13;2uline two\r")  # shift+enter, then enter
+        await wait_for(lambda: len(provider.requests) == 1)
+        inp.send_text("a\nb\r")  # ctrl-j, then enter
+        await wait_for(lambda: len(provider.requests) == 2)
+        inp.send_text("/quit\r")
+        assert await task == 0
+    contents = [r["messages"][-1]["content"] for r in provider.requests]
+    assert contents[0] == "line one\nline two"
+    assert contents[1] == "a\nb"
 
 
 async def test_pipe_draft_persisted_on_eof_exit(tmp_path, monkeypatch):
