@@ -106,6 +106,17 @@ class LlmResponse:
 
 
 @dataclass(frozen=True)
+class QueuedMessage:
+    """A queued user message was drained into the conversation mid-run.
+
+    The TUI echoes it into the logbook at this point — not at submit time —
+    so a queued message is printed exactly once, when the model sees it.
+    """
+
+    content: Any
+
+
+@dataclass(frozen=True)
 class Done:
     stop_reason: str
     turns: int
@@ -129,6 +140,7 @@ AgentEvent = (
     | Retrying
     | LlmCall
     | LlmResponse
+    | QueuedMessage
     | Done
     | Review
 )
@@ -245,7 +257,7 @@ class AgentRunner:
                     stop_reason = "max_turns"
                     break
                 if turns > 0:
-                    await self._drain_queues(history)
+                    await self._drain_queues(history, on_event)
                     if self.config.agent.turn_cooldown_ms > 0:
                         await asyncio.sleep(self.config.agent.turn_cooldown_ms / 1000)
 
@@ -491,10 +503,12 @@ class AgentRunner:
 
     # -- queues -------------------------------------------------------------------
 
-    async def _drain_queues(self, history: list[ChatMessage]) -> None:
+    async def _drain_queues(self, history: list[ChatMessage], on_event: OnEvent | None) -> None:
         """Drain the steer queue first (priority), then the input queue.
 
-        Drained items are appended to the history as user messages.
+        Drained items are appended to the history as user messages, with a
+        ``QueuedMessage`` event each so the TUI echoes them when the model
+        actually sees them.
         """
         for queue in (self.steer_queue, self.input_queue):
             if queue is None:
@@ -507,6 +521,7 @@ class AgentRunner:
                 message: ChatMessage = {"role": "user", "content": item}
                 history.append(message)
                 self._persist_message(message)
+                await self._emit(on_event, QueuedMessage(content=item))
 
     # -- usage / cost ---------------------------------------------------------------
 

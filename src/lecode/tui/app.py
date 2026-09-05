@@ -38,6 +38,7 @@ from lecode.agent.runner import (
     Error,
     LlmCall,
     LlmResponse,
+    QueuedMessage,
     Reasoning,
     Retrying,
     Review,
@@ -658,14 +659,14 @@ class TuiApp:
         return EXIT_OK
 
     async def _spinner_loop(self) -> None:
-        """Advance the spinner and refresh branch/statusline periodically."""
+        """Advance the spinner and refresh branch/statusline/queue title."""
         while True:
             await asyncio.sleep(SPINNER_INTERVAL_S)
             if self._status.state is StatusLineState.RUNNING:
                 self._status.spinner_frame += 1
             self._status.git = await self._git.get(self._cwd)
-            if self._app is not None:
-                self._app.invalidate()
+            # The runner drains the queues mid-turn; keep counts/title live.
+            self._sync_queue_status()
 
     # -- submissions ----------------------------------------------------------
 
@@ -703,7 +704,10 @@ class TuiApp:
             content = self._with_attachments(prepared)
             if content is None:
                 return  # modality error already rendered; attachments kept
-            self._feed.user_message(text + echo)
+            if not self._turn_running():
+                # Queued messages are listed in the chatbox instead of the
+                # transcript; they echo when the model actually sees them.
+                self._feed.user_message(text + echo)
             self._enqueue_or_start(content, steer=steer)
 
     def _with_attachments(self, text: str) -> MessageContent | None:
@@ -766,7 +770,8 @@ class TuiApp:
         if not rest.strip():
             self._feed.error(f"usage: .{name} <text>")
             return True
-        self._feed.user_message(text)
+        if not self._turn_running():
+            self._feed.user_message(text)
         self._enqueue_or_start(rest.strip(), steer=steer, overlay=body.strip())
         return True
 
@@ -924,6 +929,25 @@ class TuiApp:
     def _sync_queue_status(self) -> None:
         self._status.queued = self._input_queue.qsize()
         self._status.steered = self._steer_queue.qsize()
+        if self._chatbox is not None:
+            self._chatbox.title = self._chatbox_title()
+        self._invalidate()
+
+    @staticmethod
+    def _queue_label(message: MessageContent) -> str:
+        """First line of a queued message, shortened for the chatbox title."""
+        text = describe_content(message).splitlines()[0]
+        return text[:29] + "…" if len(text) > 30 else text
+
+    def _chatbox_title(self) -> str:
+        """``message`` at rest; pending prompts listed while a turn runs."""
+        steered, queued = self.queued_prompts()
+        parts = []
+        if queued:
+            parts.append("queue: " + ", ".join(self._queue_label(m) for m in queued))
+        if steered:
+            parts.append("steer: " + ", ".join(self._queue_label(m) for m in steered))
+        return "message" if not parts else "message · " + " · ".join(parts)
 
     async def _run_turn(self, text: MessageContent, *, overlay: str | None = None) -> None:
         message: dict[str, Any] = {"role": "user", "content": text}
@@ -1130,6 +1154,10 @@ class TuiApp:
             self._spawn(self._notifier.error())
         elif isinstance(event, Retrying):
             self._feed.retrying(event.attempt, event.delay)
+        elif isinstance(event, QueuedMessage):
+            # Echo a queued message when it actually joins the conversation.
+            self._feed.user_message(describe_content(event.content))
+            self._sync_queue_status()
         elif isinstance(event, LlmCall):
             self._feed.llm_call(event.model, event.turn)
             self._activity("thinking")

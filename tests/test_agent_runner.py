@@ -15,6 +15,7 @@ from lecode.agent.runner import (
     Error,
     LlmCall,
     LlmResponse,
+    QueuedMessage,
     Retrying,
     Token,
     ToolCall,
@@ -365,8 +366,9 @@ async def test_steer_queue_drained_before_input_queue(tool_ctx):
     steer.put_nowait("steer me")
     input_q.put_nowait("regular input")
     runner, provider = make_runner(tool_ctx, script, steer_queue=steer, input_queue=input_q)
+    events, on_event = collect_events()
 
-    result = await runner.run([{"role": "user", "content": "go"}])
+    result = await runner.run([{"role": "user", "content": "go"}], on_event)
     assert result.stop_reason == "done"
 
     # queues drain between turns: turn 1 saw only the original messages
@@ -374,3 +376,6 @@ async def test_steer_queue_drained_before_input_queue(tool_ctx):
     contents = [m["content"] for m in provider.requests[1]["messages"] if m["role"] == "user"]
     assert contents == ["go", "steer me", "regular input"]
     assert steer.empty() and input_q.empty()
+    # each drained message is reported, steer first
+    drained = [e.content for e in events if isinstance(e, QueuedMessage)]
+    assert drained == ["steer me", "regular input"]

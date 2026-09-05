@@ -183,6 +183,14 @@ async def test_queue_and_steer_while_running(tmp_path, monkeypatch):
     assert app._steer_queue.qsize() == 1
     assert app._status.queued == 1
     assert app._status.steered == 1
+    # queued messages are NOT printed while waiting — they are listed in the
+    # chatbox title instead
+    rendered = out.getvalue()
+    assert "> queued-msg" not in rendered
+    assert "> steer-msg" not in rendered
+    title = app._chatbox_title()
+    assert "queue: queued-msg" in title
+    assert "steer: steer-msg" in title
     provider.blocked = False
     provider.release.set()
     await wait_for(
@@ -194,7 +202,10 @@ async def test_queue_and_steer_while_running(tmp_path, monkeypatch):
         m["content"] for req in provider.requests for m in req["messages"] if m["role"] == "user"
     ]
     assert user_msgs.index("steer-msg") < user_msgs.index("queued-msg")
-    assert "> queued-msg" in rendered
+    # echoed exactly once, when the model actually saw the message
+    assert rendered.count("> queued-msg") == 1
+    assert rendered.count("> steer-msg") == 1
+    assert app._chatbox_title() == "message"  # drained: title back to rest
     assert app._status.queued == 0 and app._status.steered == 0
 
 
