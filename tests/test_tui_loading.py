@@ -320,7 +320,7 @@ def test_show_loading_screen_never_raises(env, monkeypatch):
 
 
 def test_interactive_startup_prints_loading_screen(env, monkeypatch, capsys):
-    """run_interactive shows the panel between the name prompt and the chat."""
+    """run_interactive prints the banner and step lines before the chat."""
     import lecode.cli as cli
 
     monkeypatch.setattr(cli, "prompt_session_name", _fake_name_prompt)
@@ -330,7 +330,11 @@ def test_interactive_startup_prints_loading_screen(env, monkeypatch, capsys):
     code = cli.run_interactive()
     assert code == 0
     out = capsys.readouterr().out
-    assert "lecode" in out and "provider" in out
+    # ASCII banner up front, then progressive step lines
+    assert "| | ___  ___ ___   __| | ___" in out
+    assert "by wowi42" in out
+    assert "config" in out and "provider" in out and "session" in out
+    assert out.index("| | ___") < out.index("provider")  # banner before the steps
 
 
 async def _fake_name_prompt(store):
@@ -354,3 +358,65 @@ def test_load_config_used_by_report(env):
     """The report consumes a real LoadedConfig from the loader."""
     loaded = load_config()  # auto-creates the default file
     assert loaded.sources, "first run should create and list the default config"
+
+
+# -- progressive rendering ------------------------------------------------------
+
+
+def _record_console():
+    out = io.StringIO()
+    return Console(file=out, force_terminal=False, no_color=True, width=100), out
+
+
+def test_progressive_banner_prints_immediately():
+    from lecode.tui.loading import LoadingProgress
+
+    console, out = _record_console()
+    LoadingProgress(console).banner()
+    text = out.getvalue()
+    assert "| | ___  ___ ___   __| | ___" in text
+    assert "by wowi42" in text
+
+
+def test_progressive_steps_append_in_order():
+    from lecode.tui.loading import LoadingProgress, LoadStep
+
+    console, out = _record_console()
+    progress = LoadingProgress(console)
+    progress.banner()
+    progress.step(LoadStep("config", "defaults (no config file)"))
+    progress.pending("models", "fetching live from openrouter…")
+    progress.step(LoadStep("models", "427 fetched live from the provider"))
+    text = out.getvalue()
+    assert "✓ config" in text
+    assert "… models" in text  # pending line shown while the fetch runs
+    assert text.index("… models") < text.index("427 fetched")
+    # banner comes before any step
+    assert text.index("| | ___") < text.index("✓ config")
+
+
+def test_progressive_step_multiline_detail_indented():
+    from lecode.tui.loading import LoadingProgress, LoadStep
+
+    console, out = _record_console()
+    LoadingProgress(console).step(LoadStep("provider", "openrouter · url\nmodel gpt · no key"))
+    lines = out.getvalue().splitlines()
+    assert lines[0].startswith(" ✓ provider")
+    assert lines[1].startswith(" " * 4) and "model gpt" in lines[1]
+
+
+def test_progressive_never_raises(monkeypatch):
+    import lecode.tui.loading as loading
+    from lecode.tui.loading import LoadingProgress, LoadStep
+
+    console, _ = _record_console()
+    progress = LoadingProgress(console)
+    monkeypatch.setattr(
+        loading, "print_banner", lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    progress.banner()  # no exception
+    monkeypatch.setattr(
+        loading, "print_step", lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    progress.step(LoadStep("config", "x"))  # no exception
+    progress.step(None)  # nothing to report: fine

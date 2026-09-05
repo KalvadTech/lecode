@@ -1,13 +1,16 @@
 """Startup loading screen.
 
-Printed to the normal scrollback right before the chat opens: one line per
-subsystem explaining exactly what was loaded (config files, provider,
-prompt, AGENTS.md context, skills, agents, memory, tools, permissions,
-hooks, LSP, MCP). Headless mode never shows it.
+Progressive: the ASCII banner prints the instant startup begins, then one
+line per subsystem is appended as it finishes loading (config files,
+session, provider, model catalog, prompt, AGENTS.md context, skills,
+agents, memory, tools, permissions, hooks, pierre, LSP, MCP). Slow steps
+(model fetch, MCP probe) get a ``…`` pending line first. Headless mode
+never shows it. The panel renderer is kept for snapshot-style rendering.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,8 +35,12 @@ if TYPE_CHECKING:
 OK = "ok"
 WARN = "warn"
 SKIP = "skip"
+PENDING = "pending"
 
-_MARKS = {OK: "✓", WARN: "!", SKIP: "–"}  # noqa: RUF001 — the en dash is the intended skip glyph
+_MARKS = {OK: "✓", WARN: "!", SKIP: "–", PENDING: "…"}  # noqa: RUF001
+
+#: Label column width for progressive lines (the longest label).
+LABEL_WIDTH = len("permissions")
 
 #: ASCII-art banner (figlet "standard") printed above the loading panel.
 _BANNER = r""" _                    _
@@ -68,6 +75,91 @@ def _join_names(names: list[str], cap: int = 6) -> str:
     return ", ".join(names[:cap]) + f" +{len(names) - cap} more"
 
 
+def session_step(session: Session, store: SessionStore, *, resumed: bool) -> LoadStep:
+    """The session line: name, and for resumes the message count."""
+    if resumed:
+        from lecode.session.stats import session_stats
+
+        stats = session_stats(store, session)
+        return LoadStep("session", f"{session.meta.name} — resumed, {stats.message_count} messages")
+    return LoadStep("session", f"{session.meta.name} — new session")
+
+
+def config_step(loaded: LoadedConfig, cwd: Path) -> LoadStep:
+    """Which config files were merged, plus a warning count."""
+    if loaded.sources:
+        detail = " + ".join(_rel(Path(s), cwd) for s in loaded.sources)
+    else:
+        detail = "defaults (no config file)"
+    status = WARN if loaded.warnings else OK
+    if loaded.warnings:
+        detail += f" — {len(loaded.warnings)} warning(s)"
+    return LoadStep("config", detail, status)
+
+
+def provider_step(config: Config, provider_spec: ProviderSpec, key_source: str) -> LoadStep:
+    """Provider, model, and where the key came from (never the key itself)."""
+    auth = {"none": "no API key", "cli": "key from --api-key"}.get(
+        key_source, f"key from {key_source}"
+    )
+    return LoadStep(
+        "provider",
+        f"{provider_spec.name} · {provider_spec.base_url}\nmodel {config.llm.model} · {auth}",
+    )
+
+
+def models_step(models_origin: str | None, models_count: int) -> LoadStep | None:
+    """Model-catalog provenance; ``None`` when no fetch was attempted."""
+    if models_origin == "live":
+        return LoadStep("models", f"{models_count} fetched live from the provider")
+    if models_origin is not None:
+        return LoadStep("models", "unavailable (fetch failed)", WARN)
+    return None
+
+
+def mcp_step(config: Config, mcp_servers: list[ServerStatus] | None = None) -> LoadStep:
+    """The MCP line: live per-server status when probed, else configuration."""
+    # with live statuses (the caller connected the servers first)
+    if mcp_servers is not None:
+        lines: list[str] = []
+        for s in mcp_servers:
+            if s.state == "connected":
+                lines.append(f"{s.name}: connected · {s.tools} tools")
+            elif s.state == "failed":
+                lines.append(f"{s.name}: failed — {s.error or 'connect error'}")
+            else:
+                lines.append(f"{s.name}: disabled")
+        exa_missing = (
+            config.mcp.enable_exa
+            and not os.environ.get("EXA_API_KEY")
+            and not any(s.name == "exa" for s in mcp_servers)
+        )
+        if exa_missing:
+            lines.append("exa: no EXA_API_KEY")
+        if not lines:
+            return LoadStep("mcp", "no servers", SKIP)
+        degraded = exa_missing or any(s.state == "failed" for s in mcp_servers)
+        return LoadStep("mcp", "\n".join(lines), WARN if degraded else OK)
+
+    # no live statuses (tests, headless): report the configuration only
+    mcp_bits: list[str] = []
+    mcp_status = OK
+    if config.mcp.enable_exa:
+        if os.environ.get("EXA_API_KEY"):
+            mcp_bits.append("exa")
+        else:
+            mcp_bits.append("exa (no EXA_API_KEY)")
+            mcp_status = WARN
+    if config.mcp.enable_context7:
+        mcp_bits.append("context7")
+    configured = [n for n, s in config.mcp.servers.items() if s.enabled]
+    if configured:
+        mcp_bits.append(_join_names(sorted(configured), cap=3))
+    if mcp_bits:
+        return LoadStep("mcp", " · ".join(mcp_bits), mcp_status)
+    return LoadStep("mcp", "no servers", SKIP)
+
+
 def build_load_report(
     *,
     config: Config,
@@ -89,42 +181,12 @@ def build_load_report(
 
     steps: list[LoadStep] = []
 
-    # session
-    if resumed:
-        from lecode.session.stats import session_stats
-
-        stats = session_stats(store, session)
-        detail = f"{session.meta.name} — resumed, {stats.message_count} messages"
-    else:
-        detail = f"{session.meta.name} — new session"
-    steps.append(LoadStep("session", detail))
-
-    # config files
-    if loaded.sources:
-        detail = " + ".join(_rel(Path(s), cwd) for s in loaded.sources)
-    else:
-        detail = "defaults (no config file)"
-    status = WARN if loaded.warnings else OK
-    if loaded.warnings:
-        detail += f" — {len(loaded.warnings)} warning(s)"
-    steps.append(LoadStep("config", detail, status))
-
-    # provider / model / auth (never print the key itself)
-    auth = {"none": "no API key", "cli": "key from --api-key"}.get(
-        key_source, f"key from {key_source}"
-    )
-    steps.append(
-        LoadStep(
-            "provider",
-            f"{provider_spec.name} · {provider_spec.base_url}\nmodel {config.llm.model} · {auth}",
-        )
-    )
-
-    # model catalog provenance (live fetch, else empty)
-    if models_origin == "live":
-        steps.append(LoadStep("models", f"{models_count} fetched live from the provider"))
-    elif models_origin is not None:
-        steps.append(LoadStep("models", "unavailable (fetch failed)", WARN))
+    steps.append(session_step(session, store, resumed=resumed))
+    steps.append(config_step(loaded, cwd))
+    steps.append(provider_step(config, provider_spec, key_source))
+    models = models_step(models_origin, models_count)
+    if models is not None:
+        steps.append(models)
 
     # system prompt
     sp = config.llm.system_prompt
@@ -209,50 +271,72 @@ def build_load_report(
         )
     )
 
-    # mcp — with live statuses when the caller connected the servers first
-    if mcp_servers is not None:
-        lines: list[str] = []
-        for s in mcp_servers:
-            if s.state == "connected":
-                lines.append(f"{s.name}: connected · {s.tools} tools")
-            elif s.state == "failed":
-                lines.append(f"{s.name}: failed — {s.error or 'connect error'}")
-            else:
-                lines.append(f"{s.name}: disabled")
-        exa_missing = (
-            config.mcp.enable_exa
-            and not os.environ.get("EXA_API_KEY")
-            and not any(s.name == "exa" for s in mcp_servers)
-        )
-        if exa_missing:
-            lines.append("exa: no EXA_API_KEY")
-        if not lines:
-            steps.append(LoadStep("mcp", "no servers", SKIP))
-        else:
-            degraded = exa_missing or any(s.state == "failed" for s in mcp_servers)
-            steps.append(LoadStep("mcp", "\n".join(lines), WARN if degraded else OK))
-        return steps
-
-    # no live statuses (tests, headless): report the configuration only
-    mcp_bits: list[str] = []
-    mcp_status = OK
-    if config.mcp.enable_exa:
-        if os.environ.get("EXA_API_KEY"):
-            mcp_bits.append("exa")
-        else:
-            mcp_bits.append("exa (no EXA_API_KEY)")
-            mcp_status = WARN
-    if config.mcp.enable_context7:
-        mcp_bits.append("context7")
-    configured = [n for n, s in config.mcp.servers.items() if s.enabled]
-    if configured:
-        mcp_bits.append(_join_names(sorted(configured), cap=3))
-    if mcp_bits:
-        steps.append(LoadStep("mcp", " · ".join(mcp_bits), mcp_status))
-    else:
-        steps.append(LoadStep("mcp", "no servers", SKIP))
-
+    steps.append(mcp_step(config, mcp_servers))
     return steps
+
+
+def print_banner(console: Console, theme: Theme) -> None:
+    """The ASCII-art banner + byline — printed immediately at startup."""
+    console.print(Text(_BANNER, style=theme.accent), justify="center")
+    console.print(Text(_BYLINE, style=theme.muted), justify="center")
+    console.print()
+
+
+def format_step(step: LoadStep, theme: Theme, width: int = LABEL_WIDTH) -> Text:
+    """One loading line: mark, padded label, detail (multi-line indented)."""
+    mark_style = {
+        OK: theme.success,
+        WARN: theme.warning,
+        SKIP: theme.muted,
+        PENDING: theme.muted,
+    }[step.status]
+    body = Text()
+    body.append(f" {_MARKS[step.status]} ", style=mark_style)
+    body.append(step.label.ljust(width), style=theme.accent)
+    body.append("  ")
+    lines = step.detail.split("\n")
+    body.append(lines[0], style=theme.muted if step.status in (SKIP, PENDING) else theme.text)
+    for extra in lines[1:]:
+        body.append("\n" + " " * (width + 4))
+        body.append(extra, style=theme.text)
+    return body
+
+
+def print_step(console: Console, theme: Theme, step: LoadStep) -> None:
+    """Print one progressive loading line."""
+    console.print(format_step(step, theme))
+
+
+class LoadingProgress:
+    """Progressive startup screen: banner first, then a line per subsystem
+    as it finishes loading. Informational only — nothing here may raise
+    into startup."""
+
+    def __init__(self, console: Console, theme: Theme | None = None) -> None:
+        from lecode.tui.themes import THEME
+
+        self._console = console
+        self._theme = theme or THEME
+
+    def banner(self) -> None:
+        """Print the ASCII art immediately."""
+        try:
+            print_banner(self._console, self._theme)
+        except Exception:
+            logging.getLogger(__name__).debug("loading banner failed", exc_info=True)
+
+    def step(self, step: LoadStep | None) -> None:
+        """Print one finished step (``None`` = nothing to report)."""
+        if step is None:
+            return
+        try:
+            print_step(self._console, self._theme, step)
+        except Exception:
+            logging.getLogger(__name__).debug("loading step failed", exc_info=True)
+
+    def pending(self, label: str, detail: str) -> None:
+        """Print a ``…`` line for a slow step that just started."""
+        self.step(LoadStep(label, detail, PENDING))
 
 
 def render_loading_screen(
@@ -264,27 +348,13 @@ def render_loading_screen(
     cwd: Path,
 ) -> None:
     """Render the banner and the loading panel: one status line per subsystem."""
-    console.print(Text(_BANNER, style=theme.accent), justify="center")
-    console.print(Text(_BYLINE, style=theme.muted), justify="center")
-    console.print()
+    print_banner(console, theme)
     body = Text()
     width = max(len(s.label) for s in steps)
     for i, step in enumerate(steps):
         if i:
             body.append("\n")
-        mark_style = {
-            OK: theme.success,
-            WARN: theme.warning,
-            SKIP: theme.muted,
-        }[step.status]
-        body.append(f" {_MARKS[step.status]} ", style=mark_style)
-        body.append(step.label.ljust(width), style=theme.accent)
-        body.append("  ")
-        lines = step.detail.split("\n")
-        body.append(lines[0], style=theme.muted if step.status == SKIP else theme.text)
-        for extra in lines[1:]:
-            body.append("\n" + " " * (width + 4), style=theme.text)
-            body.append(extra, style=theme.text)
+        body.append_text(format_step(step, theme, width))
     panel = Panel(
         body,
         title=f"[{theme.accent}]lecode[/{theme.accent}] — {session_name}",
