@@ -159,11 +159,24 @@ class Feed:
         """Log one LLM invocation: ``→ model (round N)``."""
         self.activity_stop()
         self._console.print(
-            Text(
-                f"[{self._stamp()}] → {model} (round {turn}){self._suffix()}",
-                style=self._theme.muted,
-            )
+            Text(f"[{self._stamp()}] → {model} (round {turn})", style=self._theme.muted)
         )
+
+    def llm_response(
+        self, model: str, turn: int, input_tokens: int, output_tokens: int, cost_usd: float
+    ) -> None:
+        """Log one finished LLM call: ``← model (round N) · ↑in · ↓out · $cost``."""
+        self.activity_stop()
+        # The streamed answer text has no trailing newline yet — close it first.
+        if self._stream_printed:
+            self._console.print()
+            self._stream_printed = False
+        line = (
+            f"[{self._stamp()}] ← {model} (round {turn})"
+            f" · ↑{human_tokens(input_tokens)} in · ↓{human_tokens(output_tokens)} out"
+            f" · {format_cost(cost_usd)}"
+        )
+        self._console.print(Text(line, style=self._theme.muted))
 
     def tool_call(self, name: str, args_preview: str) -> None:
         """Render ``⚙ name(args_preview)``, truncated to ~120 chars."""

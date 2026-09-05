@@ -37,6 +37,7 @@ from lecode.agent.runner import (
     Done,
     Error,
     LlmCall,
+    LlmResponse,
     Reasoning,
     Retrying,
     Review,
@@ -1130,6 +1131,14 @@ class TuiApp:
         elif isinstance(event, LlmCall):
             self._feed.llm_call(event.model, event.turn)
             self._activity("thinking")
+        elif isinstance(event, LlmResponse):
+            self._feed.llm_response(
+                event.model,
+                event.turn,
+                event.input_tokens,
+                event.output_tokens,
+                event.cost_usd,
+            )
         elif isinstance(event, Done):
             self._feed.stream_end()
             self._spawn(self._notifier.task_finish())
@@ -1155,6 +1164,14 @@ class TuiApp:
             self._feed.retrying(event.attempt, event.delay)
         elif isinstance(event, LlmCall):
             self._feed.llm_call(f"{agent} · {event.model}", event.turn)
+        elif isinstance(event, LlmResponse):
+            self._feed.llm_response(
+                f"{agent} · {event.model}",
+                event.turn,
+                event.input_tokens,
+                event.output_tokens,
+                event.cost_usd,
+            )
         elif isinstance(event, Done):
             self._feed.info(f"{agent} finished ({event.stop_reason}, {event.turns} turn(s))")
 

@@ -77,12 +77,35 @@ def test_no_metrics_suffix_when_unbound(theme):
 
 def test_llm_call_logged(theme):
     feed, out = make_feed(theme)
+    feed.metrics = lambda: (12_300, 200_000, 0.0412)
     feed.llm_call("openai/gpt-5", 2)
     rendered = out.getvalue()
     assert "→ openai/gpt-5 (round 2)" in rendered
+    # the call line is bare: no ctx/cost suffix (that belongs to the response)
+    assert "ctx" not in rendered and "$" not in rendered
     # Logbook line: carries a timestamp.
     line = next(ln for ln in rendered.splitlines() if "→ openai/gpt-5" in ln)
     assert line.startswith("[") and line[1:3].isdigit() and line[3] == ":"
+
+
+def test_llm_response_logged(theme):
+    feed, out = make_feed(theme)
+    feed.llm_response("openai/gpt-5", 2, 92_400, 15, 0.004)
+    rendered = out.getvalue()
+    assert "← openai/gpt-5 (round 2) · ↑92.4k in · ↓15 out · $0.0040" in rendered
+    line = next(ln for ln in rendered.splitlines() if "← openai/gpt-5" in ln)
+    assert line.startswith("[") and line[1:3].isdigit() and line[3] == ":"
+
+
+def test_llm_response_closes_streamed_line(theme):
+    feed, out = make_feed(theme)
+    feed.stream_start()
+    feed.stream_token("the answer")
+    feed.llm_response("m", 1, 10, 5, 0.001)  # must not append onto the answer line
+    feed.stream_end()
+    lines = out.getvalue().splitlines()
+    assert lines[0] == "the answer"
+    assert "← m (round 1)" in lines[1]
 
 
 def test_assistant_text_renders_markdown(theme):

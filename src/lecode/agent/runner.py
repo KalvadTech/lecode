@@ -95,6 +95,17 @@ class LlmCall:
 
 
 @dataclass(frozen=True)
+class LlmResponse:
+    """One model invocation finished — per-call usage for the logbook."""
+
+    model: str
+    turn: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+
+
+@dataclass(frozen=True)
 class Done:
     stop_reason: str
     turns: int
@@ -109,7 +120,18 @@ class Review:
 
 
 #: Everything the runner reports through ``on_event``.
-AgentEvent = Token | Reasoning | ToolCall | ToolResult | Error | Retrying | LlmCall | Done | Review
+AgentEvent = (
+    Token
+    | Reasoning
+    | ToolCall
+    | ToolResult
+    | Error
+    | Retrying
+    | LlmCall
+    | LlmResponse
+    | Done
+    | Review
+)
 
 #: on_event(event) — sync or async.
 OnEvent = Callable[[AgentEvent], Any]
@@ -233,6 +255,16 @@ class AgentRunner:
                 turns += 1
 
                 in_tok, out_tok, cost = self._turn_cost(completed)
+                await self._emit(
+                    on_event,
+                    LlmResponse(
+                        model=self.model,
+                        turn=turns,
+                        input_tokens=in_tok,
+                        output_tokens=out_tok,
+                        cost_usd=cost,
+                    ),
+                )
                 input_tokens += in_tok
                 output_tokens += out_tok
                 cost_usd += cost

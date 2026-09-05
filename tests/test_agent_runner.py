@@ -14,6 +14,7 @@ from lecode.agent.runner import (
     Done,
     Error,
     LlmCall,
+    LlmResponse,
     Retrying,
     Token,
     ToolCall,
@@ -81,8 +82,11 @@ async def test_single_turn_done(tool_ctx):
 
 async def test_llm_call_event_per_round(tool_ctx):
     script = [
-        {"tool_calls": [{"id": "c1", "name": "echo", "arguments": '{"text": "hi"}'}]},
-        {"text": "done"},
+        {
+            "tool_calls": [{"id": "c1", "name": "echo", "arguments": '{"text": "hi"}'}],
+            "usage": {"input_tokens": 30, "output_tokens": 4},
+        },
+        {"text": "done", "usage": {"input_tokens": 50, "output_tokens": 6}},
     ]
     runner, _ = make_runner(tool_ctx, script)
     events, on_event = collect_events()
@@ -91,9 +95,16 @@ async def test_llm_call_event_per_round(tool_ctx):
 
     calls = [e for e in events if isinstance(e, LlmCall)]
     assert [(e.model, e.turn) for e in calls] == [(runner.model, 1), (runner.model, 2)]
-    # each LlmCall precedes the round's first Token/ToolCall event
+    # each LlmCall precedes its LlmResponse, which precedes the round's tools
     first_call = events.index(calls[0])
-    assert isinstance(events[first_call + 1], ToolCall)
+    assert isinstance(events[first_call + 1], LlmResponse)
+    # each finished call logs its own usage
+    responses = [e for e in events if isinstance(e, LlmResponse)]
+    assert [(r.turn, r.input_tokens, r.output_tokens) for r in responses] == [
+        (1, 30, 4),
+        (2, 50, 6),
+    ]
+    assert all(r.cost_usd >= 0 for r in responses)
 
 
 async def test_tool_round_trip(tool_ctx):
