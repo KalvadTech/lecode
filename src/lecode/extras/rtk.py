@@ -19,13 +19,15 @@ from lecode.extras.proc import run_proc
 
 RTK_TIMEOUT_S = 5.0
 
-#: Resolved once at import: the rtk binary path, or None.
-RTK_PATH = shutil.which("rtk")
+
+def default_path() -> str | None:
+    """The rtk binary path, resolved per call (PATH may change after import)."""
+    return shutil.which("rtk")
 
 
 async def rewrite_command(command: str, *, rtk_path: str | None = None) -> str:
     """Rewrite ``command`` to its rtk-proxy equivalent; fail-open to the original."""
-    binary = rtk_path if rtk_path is not None else RTK_PATH
+    binary = rtk_path if rtk_path is not None else default_path()
     if binary is None or not command.strip():
         return command
     try:

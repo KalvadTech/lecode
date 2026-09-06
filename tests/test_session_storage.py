@@ -289,3 +289,13 @@ def test_delete_removes_lock_sidecar(store):
     assert s.path.with_suffix(".lock").is_file()
     store.delete(s.id)
     assert not s.path.with_suffix(".lock").exists()
+
+
+def test_lock_holder_reports_pid_while_held(store):
+    s = store.create("locked", cwd="/tmp/p")
+    assert store.lock_holder(s.id) is None  # no lock file yet
+    lock = store.acquire_lock(s)
+    assert lock is not None
+    assert store.lock_holder(s.id) == os.getpid()
+    lock.release()
+    assert store.lock_holder(s.id) is None

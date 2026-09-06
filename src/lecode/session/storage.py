@@ -191,6 +191,29 @@ class SessionStore:
             os.write(fd, str(os.getpid()).encode())
         return SessionLock(lock_path, fd)
 
+    def lock_holder(self, session_id: str) -> int | None:
+        """Pid of the live process holding this session's lock, or None if free.
+
+        None also on platforms without ``flock`` or when no lock file exists.
+        """
+        if fcntl is None:
+            return None
+        lock_path = self.sessions_dir / f"{session_id}.lock"
+        if not lock_path.is_file():
+            return None
+        fd = os.open(lock_path, os.O_RDWR)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                with contextlib.suppress(OSError, ValueError):
+                    return int(lock_path.read_text(encoding="utf-8").strip())
+                return -1  # locked but pid unreadable
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return None
+        finally:
+            os.close(fd)
+
     # -- appending ----------------------------------------------------------
 
     def _append(self, session: Session, record: Record) -> None:

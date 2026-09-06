@@ -71,7 +71,9 @@ async def pick_session(
         return None
     print(f"sessions in {cwd}:")
     for i, meta in enumerate(sessions, 1):
-        print(f"  {i}) {meta.name} · {meta.id[:8]} · {meta.created_at[:10]}")
+        pid = store.lock_holder(meta.id)
+        in_use = f" · in use (pid {pid})" if pid else ""
+        print(f"  {i}) {meta.name} · {meta.id[:8]} · {meta.created_at[:10]}{in_use}")
     prompt = session or PromptSession()
     while True:
         try:
@@ -79,11 +81,19 @@ async def pick_session(
         except (KeyboardInterrupt, EOFError):
             return None
         text = text.strip()
+        chosen: MetaRecord | None = None
         if not text:
-            return sessions[0]
-        if text.isdigit() and 1 <= int(text) <= len(sessions):
-            return sessions[int(text) - 1]
-        matches = [m for m in sessions if m.name == text or m.id.startswith(text)]
-        if len(matches) == 1:
-            return matches[0]
-        print("error: enter a list number, an exact name, or a unique id prefix")
+            chosen = sessions[0]
+        elif text.isdigit() and 1 <= int(text) <= len(sessions):
+            chosen = sessions[int(text) - 1]
+        else:
+            matches = [m for m in sessions if m.name == text or m.id.startswith(text)]
+            if len(matches) == 1:
+                chosen = matches[0]
+        if chosen is None:
+            print("error: enter a list number, an exact name, or a unique id prefix")
+            continue
+        if (pid := store.lock_holder(chosen.id)) is not None:
+            print(f"error: '{chosen.name}' is open in another lecode process (pid {pid})")
+            continue
+        return chosen

@@ -39,8 +39,8 @@ async def test_missing_binary_fails_open():
 
 
 async def test_none_binary_fails_open(monkeypatch):
-    # No rtk on PATH at all: module-level resolution found nothing.
-    monkeypatch.setattr(rtk, "RTK_PATH", None)
+    # No rtk on PATH at all: resolution finds nothing.
+    monkeypatch.setattr(rtk, "default_path", lambda: None)
     assert await rewrite_command("ls") == "ls"
 
 
@@ -54,6 +54,7 @@ async def test_empty_input_passthrough():
     assert await rewrite_command("   ") == "   "
 
 
-def test_module_level_path_resolution():
-    # RTK_PATH is resolved once at import; either present or None, never raises.
-    assert rtk.RTK_PATH is None or os.path.exists(rtk.RTK_PATH)
+def test_default_path_resolution():
+    # default_path() resolves rtk on PATH per call; present or None, never raises.
+    path = rtk.default_path()
+    assert path is None or os.path.exists(path)
