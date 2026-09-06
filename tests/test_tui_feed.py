@@ -269,45 +269,46 @@ def test_error_emits_ansi_when_terminal(theme, monkeypatch):
     assert "\x1b[" in rendered
 
 
-# -- transient activity indicator ------------------------------------------------
+# -- in-layout live region (stream sink) -----------------------------------------
 
 
-def test_activity_line_shown(theme):
+def test_sink_receives_tokens_and_flush_prints_whole(theme):
     feed, out = make_feed(theme)
-    feed.activity_start("thinking")
-    assert "thinking…" in out.getvalue()
-
-
-def test_activity_erased_by_next_output(theme):
-    feed, out = make_feed(theme)
-    feed.activity_start("thinking")
+    sunk: list[str] = []
+    cleared: list[bool] = []
+    feed.stream_sink = sunk.append
+    feed.stream_clear = lambda: cleared.append(True)
     feed.stream_start()
-    feed.stream_token("hello")
-    text = out.getvalue()
-    assert "\x1b[K" in text  # erase-line emitted
-    assert text.rstrip().endswith("hello")
+    feed.stream_token("Hello, ")
+    feed.stream_token("world")
+    assert sunk == ["Hello, ", "world"]
+    assert out.getvalue() == ""  # nothing in the scrollback while streaming
+    feed.stream_end()
+    assert cleared == [True]
+    assert "Hello, world" in out.getvalue()  # flushed whole at stream end
 
 
-def test_activity_tick_cycles_frames(theme):
+def test_sink_stream_closed_by_llm_response(theme):
     feed, out = make_feed(theme)
-    feed.activity_start("thinking")
-    feed.activity_tick()
-    feed.activity_tick()
-    text = out.getvalue()
-    assert text.count("thinking…") == 3  # initial draw + two ticks
+    feed.stream_sink = lambda text: None
+    feed.stream_clear = lambda: None
+    feed.stream_start()
+    feed.stream_token("the answer")
+    feed.llm_response("m", 1, 10, 5, 0.001)
+    feed.stream_end()
+    lines = out.getvalue().splitlines()
+    assert lines[0] == "the answer"
+    assert "← m (round 1)" in lines[1]
 
 
-def test_activity_stop_idempotent(theme):
+def test_sink_flush_is_idempotent(theme):
     feed, out = make_feed(theme)
-    feed.activity_stop()  # nothing shown: no-op, no crash
-    feed.activity_start("running bash")
-    feed.activity_stop()
-    feed.activity_stop()
-    assert out.getvalue().count("running bash…") == 1
-
-
-def test_tool_call_erases_activity(theme):
-    feed, out = make_feed(theme)
-    feed.activity_start("thinking")
-    feed.tool_call("bash", "ls")
-    assert "⚙ bash(ls)" in out.getvalue()
+    cleared: list[bool] = []
+    feed.stream_sink = lambda text: None
+    feed.stream_clear = lambda: cleared.append(True)
+    feed.stream_start()
+    feed.stream_token("once")
+    feed.llm_response("m", 1, 10, 5, 0.001)
+    feed.stream_end()  # must not flush twice
+    assert cleared == [True]
+    assert out.getvalue().count("once") == 1

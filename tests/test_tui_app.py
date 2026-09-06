@@ -87,8 +87,9 @@ async def test_unknown_model_keeps_configured_window(tmp_path, monkeypatch):
 
 def test_layout_is_chatbox_above_statusline(tmp_path, monkeypatch):
     """The input is a framed chatbox directly above the 3-line statusline;
-    the frame's bottom border is the split between them."""
-    from prompt_toolkit.layout.containers import Window
+    the frame's bottom border is the split between them. A conditional live
+    region for streamed text sits above the chatbox."""
+    from prompt_toolkit.layout.containers import ConditionalContainer, Window
     from prompt_toolkit.widgets import Frame
 
     app, _, _ = make_app(tmp_path, monkeypatch, [])
@@ -97,8 +98,10 @@ def test_layout_is_chatbox_above_statusline(tmp_path, monkeypatch):
     assert isinstance(app._chatbox, Frame) and app._chatbox.body is app._input_area
     children = pt_app.layout.container.children
     # Frame unwraps to its internal container; the statusline stays last.
-    assert len(children) == 2
-    assert isinstance(children[1], Window) and children[1].height == 3
+    assert len(children) == 3
+    assert isinstance(children[0], ConditionalContainer)  # live stream region
+    assert isinstance(children[2], Window) and children[2].height == 3
+    assert app._live_buffer is not None
 
 
 async def test_resume_restores_status_usage(tmp_path, monkeypatch):

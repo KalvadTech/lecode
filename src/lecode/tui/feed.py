@@ -1,16 +1,18 @@
 """Append-only output feed over a Rich ``Console``.
 
 Normal scrollback only: no alternate screen, no ``Live`` regions that
-repaint history. Streaming tokens print raw as they arrive (no markup, no
-re-wrapping); reasoning tokens accumulate separately and render once at
+repaint history. Everything printed here is newline-terminated complete
+lines — prompt_toolkit's ``patch_stdout`` erase/redraw cycle overwrites any
+partial (unterminated) line, so partial text must never reach the console.
+
+Live streaming therefore goes to an in-layout region instead: when the TUI
+binds ``stream_sink``/``stream_clear``, content tokens accumulate in
+``_stream_parts`` and are mirrored to the sink (a window above the input);
+the full text is flushed into the scrollback as one complete print at
+stream end. Reasoning tokens accumulate separately and render once at
 stream end — as a muted one-liner when ``collapse_thinking`` is on, else as
 a full muted panel. All output goes through the injected console so tests
 can record with ``Console(record=True, file=StringIO())``.
-
-The one exception to append-only is the *activity indicator*: a transient
-one-line spinner (``⠋ thinking…``) shown while the model or a tool is
-working. It is drawn with ``\\r`` + erase-line and removed by the next real
-output, so it never persists in scrollback.
 
 Logbook style: every discrete line carries a ``[HH:MM:SS]`` timestamp — except
 the user-input echo, which prints verbatim — and action lines (tool calls,
@@ -29,7 +31,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
-from lecode.tui.statusline import SPINNER_FRAMES, context_meter, format_cost, human_tokens
+from lecode.tui.statusline import context_meter, format_cost, human_tokens
 from lecode.tui.themes import Theme
 
 #: Max length of a rendered tool-call line.
@@ -51,12 +53,14 @@ class Feed:
         self._collapse_thinking = collapse_thinking
         self._streaming = False
         self._stream_printed = False
+        self._stream_parts: list[str] = []
         self._thinking_parts: list[str] = []
-        #: Transient activity line: label + spinner frame; erased by real output.
-        self._activity_label: str | None = None
-        self._activity_frame = 0
         #: Live context/cost source for the logbook suffix (None = no suffix).
         self.metrics: MetricsFn | None = None
+        #: When bound (the TUI), content tokens are mirrored to an in-layout
+        #: live region and flushed to the scrollback only once complete.
+        self.stream_sink: Callable[[str], None] | None = None
+        self.stream_clear: Callable[[], None] | None = None
 
     # -- logbook stamp ---------------------------------------------------------
 
@@ -71,69 +75,66 @@ class Feed:
         used, window, cost = self.metrics()
         return f" · ctx {human_tokens(used)}/{human_tokens(window)} · {format_cost(cost)}"
 
-    # -- transient activity indicator -------------------------------------------
-
-    def activity_start(self, label: str) -> None:
-        """Show ``<spinner> <label>…`` on a transient line (model/tool working)."""
-        self._activity_label = label
-        self._activity_frame = 0
-        self._draw_activity()
-
-    def activity_tick(self) -> None:
-        """Advance the spinner; called by the app's periodic refresh."""
-        if self._activity_label is not None:
-            self._activity_frame += 1
-            self._draw_activity()
-
-    def activity_stop(self) -> None:
-        """Erase the activity line, if shown."""
-        if self._activity_label is None:
-            return
-        self._activity_label = None
-        self._console.print("\r\x1b[K", end="", markup=False, highlight=False)
-
-    def _draw_activity(self) -> None:
-        frame = SPINNER_FRAMES[self._activity_frame % len(SPINNER_FRAMES)]
-        self._console.print(
-            f"\r\x1b[K{frame} {self._activity_label}…",
-            end="",
-            style=self._theme.muted,
-            markup=False,
-            highlight=False,
-        )
+    # -- transient activity -----------------------------------------------------
+    # No printed activity line: the statusline carries the spinner + activity
+    # label. (A scrollback-level spinner used partial-line redraws, which
+    # clobbered streamed output under patch_stdout.)
 
     def user_message(self, text: str) -> None:
         """Echo the user's input as ``> text`` — verbatim, no timestamp/suffix."""
-        self.activity_stop()
         self._console.print(f"> {text}", markup=False, highlight=False)
 
     def assistant_text(self, markdown: str) -> None:
         """Render a completed assistant message as Markdown."""
-        self.activity_stop()
         self._console.print(Markdown(markdown))
 
     def stream_start(self) -> None:
         """Begin a streaming assistant turn."""
         self._streaming = True
         self._stream_printed = False
+        self._stream_parts = []
         self._thinking_parts = []
 
     def stream_token(self, text: str, *, thinking: bool = False) -> None:
-        """Print a content token raw; accumulate reasoning tokens for stream end."""
+        """Handle one content/reasoning token.
+
+        Reasoning accumulates for stream end. Content accumulates too; with a
+        bound sink it is mirrored live to the in-layout region, otherwise it
+        prints raw immediately (non-TUI use, where no app redraws can eat it).
+        """
         if thinking:
             self._thinking_parts.append(text)
             return
-        self.activity_stop()
-        self._console.print(text, end="", markup=False, highlight=False, soft_wrap=True)
-        self._stream_printed = True
+        if self.stream_sink is not None:
+            self._stream_parts.append(text)
+            self.stream_sink(text)
+            self._stream_printed = True
+        else:
+            self._console.print(text, end="", markup=False, highlight=False, soft_wrap=True)
+            self._stream_printed = True
+
+    def _flush_stream(self) -> None:
+        """Close the open stream: print the accumulated text as one whole print.
+
+        With a sink, the live region is cleared first and the full text lands
+        in the scrollback newline-terminated (safe under patch_stdout).
+        """
+        if not self._stream_printed:
+            return
+        if self.stream_sink is not None:
+            full = "".join(self._stream_parts)
+            self._stream_parts = []
+            if self.stream_clear is not None:
+                self.stream_clear()
+            self._console.print(full, markup=False, highlight=False, soft_wrap=True)
+        else:
+            self._console.print()
+        self._stream_printed = False
 
     def stream_end(self) -> None:
         """Close the streamed line and flush any accumulated thinking."""
         self._streaming = False
-        self.activity_stop()
-        if self._stream_printed:
-            self._console.print()
-            self._stream_printed = False
+        self._flush_stream()
         if not self._thinking_parts:
             return
         full = "".join(self._thinking_parts)
@@ -157,7 +158,6 @@ class Feed:
 
     def llm_call(self, model: str, turn: int) -> None:
         """Log one LLM invocation: ``→ model (round N)``."""
-        self.activity_stop()
         self._console.print(
             Text(f"[{self._stamp()}] → {model} (round {turn})", style=self._theme.muted)
         )
@@ -166,11 +166,8 @@ class Feed:
         self, model: str, turn: int, input_tokens: int, output_tokens: int, cost_usd: float
     ) -> None:
         """Log one finished LLM call: ``← model (round N) · ↑in · ↓out · $cost``."""
-        self.activity_stop()
         # The streamed answer text has no trailing newline yet — close it first.
-        if self._stream_printed:
-            self._console.print()
-            self._stream_printed = False
+        self._flush_stream()
         line = (
             f"[{self._stamp()}] ← {model} (round {turn})"
             f" · ↑{human_tokens(input_tokens)} in · ↓{human_tokens(output_tokens)} out"
@@ -180,7 +177,6 @@ class Feed:
 
     def tool_call(self, name: str, args_preview: str) -> None:
         """Render ``⚙ name(args_preview)``, truncated to ~120 chars."""
-        self.activity_stop()
         line = f"[{self._stamp()}] ⚙ {name}({args_preview})"
         if len(line) > TOOL_CALL_MAX_LEN:
             line = line[: TOOL_CALL_MAX_LEN - 1] + "…"
@@ -188,7 +184,6 @@ class Feed:
 
     def tool_result(self, name: str, content: str, is_error: bool = False) -> None:
         """Render a tool result head with ``… (N more lines)`` elision."""
-        self.activity_stop()
         lines = content.splitlines()
         shown = lines[:TOOL_RESULT_HEAD_LINES]
         if len(lines) > TOOL_RESULT_HEAD_LINES:
@@ -212,7 +207,6 @@ class Feed:
         elapsed_s: float = 0.0,
     ) -> None:
         """Muted per-answer line: this answer first, then session totals."""
-        self.activity_stop()
         _, pct = context_meter(context_used, context_window)
         parts = [
             f"answer: ↑{human_tokens(input_tokens)} in · ↓{human_tokens(output_tokens)} out"
@@ -234,18 +228,15 @@ class Feed:
 
     def review(self, model: str, feedback: str) -> None:
         """Pierre-mode feedback: a labelled block after the stats line."""
-        self.activity_stop()
         self._console.print(Text(f"[{self._stamp()}] ◆ pierre ({model})", style=self._theme.accent))
         self._console.print(Text(feedback, style=self._theme.text))
 
     def error(self, msg: str) -> None:
         """Render an error one-liner."""
-        self.activity_stop()
         self._console.print(Text(f"[{self._stamp()}] ✗ {msg}", style=self._theme.error))
 
     def info(self, msg: str) -> None:
         """Render an informational one-liner."""
-        self.activity_stop()
         lines = msg.splitlines()
         if lines:
             lines[0] = f"[{self._stamp()}] {lines[0]}"
@@ -253,12 +244,10 @@ class Feed:
 
     def permission(self, msg: str) -> None:
         """Render a permission-prompt one-liner."""
-        self.activity_stop()
         self._console.print(Text(f"[{self._stamp()}] {msg}", style=self._theme.permission))
 
     def retrying(self, attempt: int, delay_s: float) -> None:
         """Render a retry notice one-liner."""
-        self.activity_stop()
         self._console.print(
             Text(
                 f"[{self._stamp()}] retrying (attempt {attempt}) in {delay_s:.1f}s…",

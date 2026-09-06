@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit import Application
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import merge_completers
+from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.input import Input
@@ -27,8 +29,9 @@ from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.layout.containers import HSplit, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.output import Output
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.widgets import Frame, TextArea
@@ -152,9 +155,17 @@ class TuiApp:
         self._runtime = runtime
         self._store = store
         self._session = session
+        #: flock on the session's .lock sidecar — held while attached.
         self._theme = THEME
         self._console = console or Console(no_color=config.ui.no_color)
         self._feed = Feed(self._console, self._theme, collapse_thinking=config.ui.collapse_thinking)
+        #: In-layout live region for streamed answer text (see feed.py: partial
+        #: lines printed through patch_stdout get eaten by app redraws, so the
+        #: stream renders inside the layout and is flushed whole at stream end).
+        self._live_text = ""
+        self._live_buffer: Buffer | None = None
+        self._feed.stream_sink = self._live_write
+        self._feed.stream_clear = self._live_clear
 
         self._cwd = Path(runtime.ctx.cwd)
         self._agent_name = session.meta.agent or "build"
@@ -462,6 +473,23 @@ class TuiApp:
             self._console.print(text, end="")
         return ANSI(capture.get())
 
+    def _live_write(self, text: str) -> None:
+        """Feed stream sink: append one token to the in-layout live region."""
+        self._live_text += text
+        if self._live_buffer is not None:
+            self._live_buffer.set_document(
+                Document(self._live_text, cursor_position=len(self._live_text)),
+                bypass_readonly=True,
+            )
+        self._invalidate()
+
+    def _live_clear(self) -> None:
+        """Feed stream clear: hide the live region (text flushed to scrollback)."""
+        self._live_text = ""
+        if self._live_buffer is not None:
+            self._live_buffer.set_document(Document("", 0), bypass_readonly=True)
+        self._invalidate()
+
     def _spawn(self, coro: Any) -> None:
         """Track a fire-and-forget submit task, surfacing any exception."""
         task: asyncio.Task[None] = asyncio.ensure_future(coro)
@@ -621,17 +649,30 @@ class TuiApp:
             focusable=True,
             history=self._input_history,
             completer=self._completer,
+            dont_extend_height=True,
         )
         toolbar = Window(
             content=FormattedTextControl(self._toolbar),
             height=3,
             dont_extend_height=True,
         )
+        # Live region above the chatbox: the in-progress streamed answer.
+        # Visible only while text is streaming; the window follows the buffer
+        # cursor, so it always shows the tail. Height grows with content up
+        # to a cap, keeping the app small when idle.
+        self._live_buffer = Buffer(read_only=True)
+        live_window = Window(
+            BufferControl(self._live_buffer, focusable=False),
+            wrap_lines=True,
+            dont_extend_height=True,
+            height=Dimension(min=1, max=10),
+        )
+        live_area = ConditionalContainer(live_window, Condition(lambda: bool(self._live_text)))
         # The chatbox: a framed input area directly above the statusline.
         # Enter submits the text into the transcript above (see _enter).
         self._chatbox = Frame(self._input_area, title="message")
         return Application(
-            layout=Layout(HSplit([self._chatbox, toolbar])),
+            layout=Layout(HSplit([live_area, self._chatbox, toolbar])),
             key_bindings=self._build_keybindings(),
             full_screen=False,
             mouse_support=False,
