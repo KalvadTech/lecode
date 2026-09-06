@@ -56,16 +56,18 @@ async def test_truncation_and_overflow_file(tool_ctx, tmp_path):
     assert len(result.content) < MAX_OUTPUT_BYTES + 500
 
 
-async def test_rtk_compaction_applied(tool_ctx, tmp_path, monkeypatch):
+async def test_rtk_rewrite_applied(tool_ctx, tmp_path, monkeypatch):
+    # Fake rtk: `rtk rewrite "echo hello"` → "echo HELLO" (the rewritten
+    # command is what actually runs).
     fake = tmp_path / "rtk"
-    fake.write_text("#!/bin/sh\ncat | tr 'a-z' 'A-Z'\n")
+    fake.write_text("#!/bin/sh\nprintf '%s' \"echo HELLO\"\n")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setattr(rtk, "RTK_PATH", str(fake))
     result = await bash.make_tool().run({"command": "echo hello"}, tool_ctx)
     assert "HELLO" in result.content
 
 
-async def test_rtk_failure_fails_open(tool_ctx, tmp_path, monkeypatch):
+async def test_rtk_no_equivalent_runs_original(tool_ctx, tmp_path, monkeypatch):
     fake = tmp_path / "rtk"
     fake.write_text("#!/bin/sh\nexit 1\n")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)

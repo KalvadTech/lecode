@@ -1,9 +1,11 @@
-"""The ``bash`` tool: shell commands with timeouts, truncation, rtk compaction.
+"""The ``bash`` tool: shell commands with timeouts and truncation.
 
-Runs via ``/bin/sh -c`` with stderr merged into stdout. Output over the cap
-is truncated head/tail and the full text is saved to
-``<config_dir>/overflow/<uuid>.log`` with a pointer line; the truncated text
-is then compacted through ``rtk rewrite`` (fail-open).
+Commands are first passed through ``rtk rewrite``, which swaps supported
+commands for their token-optimized rtk proxies (``git status`` → ``rtk git
+status``); the original command runs unchanged when rtk has no equivalent
+(fail-open). Runs via ``/bin/sh -c`` with stderr merged into stdout. Output
+over the cap is truncated head/tail and the full text is saved to
+``<config_dir>/overflow/<uuid>.log`` with a pointer line.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import uuid
 from pathlib import Path
 
 from lecode.agent.tools.base import Tool, ToolContext, ToolResult
-from lecode.extras.rtk import compact_output
+from lecode.extras.rtk import rewrite_command
 
 DEFAULT_TIMEOUT_S = 120.0
 MAX_TIMEOUT_S = 600.0
@@ -100,8 +102,9 @@ class BashTool(Tool):
         super().__init__(
             name="bash",
             description=(
-                "Run a shell command (/bin/sh -c). Output is truncated head/tail "
-                "(full output saved to a file) and compacted via rtk when available."
+                "Run a shell command (/bin/sh -c). Supported commands are "
+                "rewritten to token-optimized rtk proxies when available; "
+                "output is truncated head/tail (full output saved to a file)."
             ),
             parameters={
                 "type": "object",
@@ -127,6 +130,7 @@ class BashTool(Tool):
         timeout = min(MAX_TIMEOUT_S, float(args.get("timeout") or DEFAULT_TIMEOUT_S))
         idle = float(args.get("idle_timeout") or ctx.config.agent.tool_idle_timeout_s)
 
+        command = await rewrite_command(command)
         try:
             output, exit_code, timed_out, idle_killed = await _run_shell(
                 command, ctx.cwd, timeout, idle, MAX_OUTPUT_BYTES
@@ -143,7 +147,6 @@ class BashTool(Tool):
                 + f"\n… [output truncated; full output saved to {full_path}] …\n"
                 + text[-half:]
             )
-        text = await compact_output(text)
 
         notes: list[str] = []
         if timed_out:

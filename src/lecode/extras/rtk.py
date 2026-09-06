@@ -1,8 +1,14 @@
-"""rtk output compaction for the bash tool.
+"""rtk command rewriting for the bash tool.
 
-``rtk rewrite`` compacts noisy command output (stdin → stdout). Every failure
-mode — binary missing, non-zero exit, timeout — is fail-open: the original
-text is returned unchanged.
+``rtk rewrite <command>`` maps a shell command to its token-optimized rtk
+proxy (``ls -la`` → ``rtk ls -la``, ``git status`` → ``rtk git status``,
+``pytest`` → ``rtk pytest`` …). The rewritten string is printed on stdout —
+without trailing newline — when an equivalent exists; stdout stays empty
+otherwise. The exit code is not meaningful across rtk versions (0.46 exits
+3 on a rewrite, 1 on no-equivalent), so success is "non-empty stdout".
+
+Every failure mode — binary missing, empty stdout, timeout — is fail-open:
+the original command is returned unchanged.
 """
 
 from __future__ import annotations
@@ -17,15 +23,16 @@ RTK_TIMEOUT_S = 5.0
 RTK_PATH = shutil.which("rtk")
 
 
-async def compact_output(text: str, *, rtk_path: str | None = None) -> str:
-    """Run ``rtk rewrite`` on ``text``; fail-open to the original on any error."""
+async def rewrite_command(command: str, *, rtk_path: str | None = None) -> str:
+    """Rewrite ``command`` to its rtk-proxy equivalent; fail-open to the original."""
     binary = rtk_path if rtk_path is not None else RTK_PATH
-    if binary is None or not text:
-        return text
+    if binary is None or not command.strip():
+        return command
     try:
-        result = await run_proc([binary, "rewrite"], input=text, timeout=RTK_TIMEOUT_S)
+        result = await run_proc([binary, "rewrite", command], timeout=RTK_TIMEOUT_S)
     except OSError:
-        return text
-    if result.timed_out or result.exit_code != 0 or not result.stdout.strip():
-        return text
-    return result.stdout
+        return command
+    if result.timed_out:
+        return command
+    rewritten = result.stdout.strip()
+    return rewritten or command
