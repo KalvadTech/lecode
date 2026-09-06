@@ -8,10 +8,16 @@ Replay semantics: a tombstone hides the suffix that existed when it was
 written — records with ``up_to_seq < seq < tombstone.seq`` — so messages
 appended after an undo stay visible. A later ``redo`` event cancels a
 tombstone, making its range visible again.
+
+Attach locking: a live process holds an ``flock`` on the sidecar
+``<id>.lock`` (see :meth:`SessionStore.acquire_lock`), so a second lecode
+cannot attach to the same session. The lock dies with the process — no
+stale-lock cleanup is ever needed.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import uuid
 from dataclasses import dataclass
@@ -28,6 +34,11 @@ from lecode.session.model import (
     parse_record,
 )
 
+try:
+    import fcntl
+except ImportError:  # Windows: best-effort, attach locking disabled
+    fcntl = None  # type: ignore[assignment]
+
 
 class SessionNotFoundError(KeyError):
     """No session matched the reference."""
@@ -40,6 +51,35 @@ class AmbiguousSessionError(KeyError):
         self.ref = ref
         self.matches = matches
         super().__init__(f"ambiguous session '{ref}', matches: {', '.join(matches)}")
+
+
+class SessionInUseError(Exception):
+    """The session is already attached to a live lecode process."""
+
+    def __init__(self, name: str, holder_pid: int | None = None) -> None:
+        self.name = name
+        self.holder_pid = holder_pid
+        detail = f" (pid {holder_pid})" if holder_pid is not None else ""
+        super().__init__(f"session '{name}' is already open in another lecode process{detail}")
+
+
+class SessionLock:
+    """An ``flock`` held on the session's ``.lock`` sidecar file.
+
+    The lock is released by closing the fd, and automatically if the process
+    dies. The file itself is never unlinked on release — a new opener must
+    lock the same inode the holder has locked.
+    """
+
+    def __init__(self, path: Path, fd: int) -> None:
+        self.path = path
+        self._fd: int | None = fd
+
+    def release(self) -> None:
+        if self._fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(self._fd)
+            self._fd = None
 
 
 def _now() -> str:
@@ -125,6 +165,31 @@ class SessionStore:
         if renames and (new_name := renames[-1].data.get("name")):
             meta = meta.model_copy(update={"name": str(new_name)})
         return Session(meta=meta, path=path, next_seq=_next_seq(records))
+
+    def acquire_lock(self, session: Session) -> SessionLock | None:
+        """Lock the session against a second live lecode process.
+
+        Returns the held lock (keep it for the process's attachment lifetime),
+        or ``None`` on platforms without ``flock``. Raises
+        :class:`SessionInUseError` when another process holds the lock.
+        """
+        if fcntl is None:
+            return None
+        lock_path = session.path.with_suffix(".lock")
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            holder_pid: int | None = None
+            with contextlib.suppress(OSError, ValueError):
+                holder_pid = int(lock_path.read_text(encoding="utf-8").strip())
+            os.close(fd)
+            raise SessionInUseError(session.name, holder_pid) from None
+        # Record our pid for the contention message other processes show.
+        with contextlib.suppress(OSError):
+            os.ftruncate(fd, 0)
+            os.write(fd, str(os.getpid()).encode())
+        return SessionLock(lock_path, fd)
 
     # -- appending ----------------------------------------------------------
 
@@ -215,6 +280,7 @@ class SessionStore:
         if not path.is_file():
             raise SessionNotFoundError(session_id)
         path.unlink()
+        path.with_suffix(".lock").unlink(missing_ok=True)
 
     def resolve(self, ref: str | None, cwd: Path | str | None = None) -> MetaRecord:
         """Resolve a reference by id, unique id prefix, exact name, or recency.

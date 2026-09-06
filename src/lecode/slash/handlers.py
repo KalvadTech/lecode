@@ -139,8 +139,8 @@ async def cmd_new(app: TuiApp, args: list[str]) -> None:
         if name is None:
             return
     session = app.store.create(name, app.runtime.ctx.cwd, model=app.config.llm.model)
-    app.switch_session(session)
-    app.feed.info(f"new session: {session.name}")
+    if app.switch_session(session):
+        app.feed.info(f"new session: {session.name}")
 
 
 async def cmd_clear(app: TuiApp, args: list[str]) -> None:
@@ -172,8 +172,8 @@ async def cmd_resume(app: TuiApp, args: list[str]) -> None:
             app.feed.info("already in this session")
             return
         session = app.store.open(meta.id)
-        app.switch_session(session)
-        app.feed.info(f"resumed session: {session.name}")
+        if app.switch_session(session):
+            app.feed.info(f"resumed session: {session.name}")
         return
     sessions = app.store.list_sessions(cwd)
     if not sessions:
@@ -336,8 +336,8 @@ async def cmd_handoff(app: TuiApp, args: list[str]) -> None:
     except ValueError as e:
         app.feed.error(str(e))
         return
-    app.switch_session(session)
-    app.feed.info(f"handed off to: {session.name}")
+    if app.switch_session(session):
+        app.feed.info(f"handed off to: {session.name}")
 
 
 async def cmd_compact(app: TuiApp, args: list[str]) -> None:

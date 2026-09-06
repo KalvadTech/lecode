@@ -49,6 +49,7 @@ from lecode.providers.types import ChatMessage
 from lecode.session.naming import auto_name
 from lecode.session.storage import (
     AmbiguousSessionError,
+    SessionInUseError,
     SessionNotFoundError,
     SessionStore,
 )
@@ -665,6 +666,14 @@ def run_interactive(
             return EXIT_OK
         session = store.create(name, cwd, model=config.llm.model)
 
+    # One live lecode per session: refuse to attach when another process
+    # holds the session lock (fail fast, before any network startup work).
+    try:
+        session_lock = store.acquire_lock(session)
+    except SessionInUseError as e:
+        typer.echo(f"error: {e}", err=True)
+        return EXIT_STARTUP
+
     resumed = resume is not None or continue_last
     progress.step(session_step(session, store, resumed=resumed))
 
@@ -745,7 +754,16 @@ def run_interactive(
     progress.step(mcp_step(config, mcp_status))
     console.print()
 
-    tui = TuiApp(config, runtime, client, session, store, console=console, catalog=models.catalog)
+    tui = TuiApp(
+        config,
+        runtime,
+        client,
+        session,
+        store,
+        console=console,
+        catalog=models.catalog,
+        session_lock=session_lock,
+    )
     if wt_info is not None and wt_manager is not None:
         tui.attach_worktree(wt_manager, wt_info, original_cwd)
     try:

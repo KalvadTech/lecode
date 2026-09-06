@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
 from lecode.session import (
     AmbiguousSessionError,
+    SessionInUseError,
     SessionNotFoundError,
     SessionStore,
 )
@@ -254,3 +256,36 @@ def test_import_rejects_non_session_file(store, tmp_path):
     bad.write_text('{"type": "message", "seq": 1, "ts": "t", "role": "user", "message": {}}\n')
     with pytest.raises(ValueError, match="meta"):
         store.import_session(bad)
+
+
+# -- attach locking -------------------------------------------------------------
+
+
+def test_lock_blocks_second_attach(store):
+    s = store.create("locked", cwd="/tmp/p")
+    lock = store.acquire_lock(s)
+    assert lock is not None
+    with pytest.raises(SessionInUseError) as exc_info:
+        store.acquire_lock(store.open(s.id))
+    assert exc_info.value.holder_pid == os.getpid()
+    assert "locked" in str(exc_info.value)
+
+
+def test_lock_release_allows_reattach(store):
+    s = store.create("locked", cwd="/tmp/p")
+    lock = store.acquire_lock(s)
+    assert lock is not None
+    lock.release()
+    again = store.acquire_lock(store.open(s.id))
+    assert again is not None
+    again.release()
+
+
+def test_delete_removes_lock_sidecar(store):
+    s = store.create("locked", cwd="/tmp/p")
+    lock = store.acquire_lock(s)
+    assert lock is not None
+    lock.release()
+    assert s.path.with_suffix(".lock").is_file()
+    store.delete(s.id)
+    assert not s.path.with_suffix(".lock").exists()

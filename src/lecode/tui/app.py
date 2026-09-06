@@ -109,7 +109,7 @@ from lecode.tui.themes import THEME
 if TYPE_CHECKING:
     from lecode.agent.builder import Runtime
     from lecode.config.models import Config
-    from lecode.session.storage import Session, SessionStore
+    from lecode.session.storage import Session, SessionLock, SessionStore
 
 #: Max pending messages in each of the input and steer queues.
 QUEUE_LIMIT = 5
@@ -150,12 +150,14 @@ class TuiApp:
         store: SessionStore,
         console: Console | None = None,
         catalog: Any | None = None,
+        session_lock: SessionLock | None = None,
     ) -> None:
         self._config = config
         self._runtime = runtime
         self._store = store
         self._session = session
         #: flock on the session's .lock sidecar — held while attached.
+        self._session_lock = session_lock
         self._theme = THEME
         self._console = console or Console(no_color=config.ui.no_color)
         self._feed = Feed(self._console, self._theme, collapse_thinking=config.ui.collapse_thinking)
@@ -340,8 +342,24 @@ class TuiApp:
         else:
             self._feed.error("clipboard unavailable")
 
-    def switch_session(self, session: Session) -> None:
-        """Point the app (runner, checker, history, statusline) at ``session``."""
+    def switch_session(self, session: Session) -> bool:
+        """Point the app (runner, checker, history, statusline) at ``session``.
+
+        Acquires the new session's attach lock first; if another live lecode
+        process holds it, reports the contention and keeps the current
+        session. Returns whether the switch happened.
+        """
+        from lecode.session.storage import SessionInUseError
+
+        try:
+            new_lock = self._store.acquire_lock(session)
+        except SessionInUseError as e:
+            self._feed.error(str(e))
+            return False
+        old_lock = self._session_lock
+        self._session_lock = new_lock
+        if old_lock is not None:
+            old_lock.release()
         self._session = session
         self._runner.session = session
         self._runtime.ctx.session = session
@@ -366,6 +384,7 @@ class TuiApp:
         self._status.session_name = session.name
         self._status.agent = self._agent_name
         self._invalidate()
+        return True
 
     def _reload_history(self) -> None:
         """Rebuild the in-memory history from the session file."""
@@ -720,6 +739,9 @@ class TuiApp:
             if self._input_area is not None and self._input_area.text.strip():
                 self._input_history.save_draft(self._input_area.text)
             self._app = None
+            if self._session_lock is not None:
+                self._session_lock.release()
+                self._session_lock = None
         self.print_totals()
         return EXIT_OK
 

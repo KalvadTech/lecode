@@ -623,3 +623,31 @@ async def test_estimate_tokens():
     assert estimate_tokens("") == 1
     assert estimate_tokens("abcd") == 1
     assert estimate_tokens("x" * 400) == 100
+
+
+async def test_switch_session_refused_when_locked(tmp_path, monkeypatch):
+    """A session attached to another live process cannot be switched into."""
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    other = app._store.create("elsewhere", tmp_path, model="m")
+    lock = app._store.acquire_lock(other)  # simulates the other lecode process
+    assert lock is not None
+    current = app.session
+    assert app.switch_session(other) is False
+    assert app.session is current  # unchanged
+    assert "already open in another lecode process" in out.getvalue()
+    lock.release()
+    assert app.switch_session(other) is True  # free again after release
+
+
+def test_cli_resume_locked_session_fails(cli_env, monkeypatch):
+    from lecode.session.storage import SessionStore as _Store
+
+    store = _Store()
+    session = store.create("busy", cli_env)
+    lock = store.acquire_lock(session)
+    assert lock is not None
+    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt(None))
+    result = runner.invoke(cli_app, ["-r", "busy"])
+    assert result.exit_code == 2
+    assert "already open in another lecode process" in result.output
+    assert FakeTui.instances == []
