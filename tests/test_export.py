@@ -103,6 +103,19 @@ def test_html_header_stats(tmp_path, monkeypatch):
     assert "$0.0020" in document
 
 
+def test_html_uses_kalvad_palette(tmp_path, monkeypatch):
+    """The standalone HTML follows the app's Kalvad palette (purple on dark)."""
+    store, session = make_session(tmp_path, monkeypatch)
+    populate(store, session)
+    document = export_html(session, store).read_text(encoding="utf-8")
+    # Theme colors from lecode.tui.themes (accent / text / muted / thinking).
+    for color in ("#a78bfa", "#ece7f7", "#8a80a3", "#6e6392"):
+        assert color in document
+    # No leftover GitHub-dark palette.
+    for color in ("#0d1117", "#1f6feb", "#238636"):
+        assert color not in document
+
+
 def test_html_escapes_content(tmp_path, monkeypatch):
     store, session = make_session(tmp_path, monkeypatch)
     store.append_message(session, {"role": "user", "content": "<script>alert(1)</script>"})
