@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -551,10 +552,21 @@ def run_chain_mode(
     return EXIT_OK
 
 
-async def _run_tui(tui: TuiApp, provider: Any) -> int:
+async def _run_tui(
+    tui: TuiApp,
+    provider: Any,
+    background: Callable[[], Coroutine[Any, Any, None]] | None = None,
+) -> int:
+    """Run the TUI; ``background`` (e.g. the model-catalog fetch) starts with
+    it and is cancelled if the user quits first."""
+    bg = asyncio.ensure_future(background()) if background is not None else None
     try:
         return await tui.run()
     finally:
+        if bg is not None:
+            if not bg.done():
+                bg.cancel()
+            await asyncio.gather(bg, return_exceptions=True)
         aclose = getattr(provider, "aclose", None)
         if aclose is not None:
             await aclose()
@@ -591,8 +603,6 @@ def run_interactive(
         LoadingProgress,
         build_load_report,
         config_step,
-        mcp_step,
-        models_step,
         provider_step,
         session_step,
     )
@@ -687,8 +697,9 @@ def run_interactive(
     progress.step(provider_step(config, spec, key_source))
 
     # Build the runtime immediately — the two slow, network-bound steps (live
-    # model catalog, MCP probe) run concurrently afterwards. The catalog is
-    # bound late onto ctx: modality checks read it at tool-call time.
+    # model catalog, MCP connect) are deferred to background tasks once the
+    # chat is open. The catalog is bound late onto ctx: modality checks read
+    # it at tool-call time.
     runtime = build_runtime(
         config,
         cwd,
@@ -722,36 +733,18 @@ def run_interactive(
         # The loading screen is informational; it must never break startup.
         pass
 
-    # Probe MCP servers up front so the loading screen can report live
-    # per-server status. The probe connects on this throwaway loop with a
-    # scratch registry, then shuts down: MCP sessions are loop-bound, so the
-    # TUI re-attaches for real on its own loop (ctx.extras["mcp"] popped).
-    from lecode.agent.tools.base import ToolRegistry
-    from lecode.extras.mcp_client import MCP_EXTRA, attach_mcp
-
-    async def _probe_mcp() -> list:
-        probe = await attach_mcp(ToolRegistry(), runtime.ctx)
-        try:
-            return probe.status()
-        finally:
-            await probe.shutdown()
-            runtime.ctx.extras.pop(MCP_EXTRA, None)
-
-    async def _load_slow() -> tuple[LoadedCatalog, list]:
-        # fetch_catalog manages its own event loop internally — run it in a
-        # thread so it can overlap with the MCP probe on this loop.
-        models_f = asyncio.to_thread(fetch_catalog, config, api_key)
-        return await asyncio.gather(models_f, _probe_mcp())
-
-    progress.pending("models", f"fetching live from {spec.name}…")
-    progress.pending("mcp", "probing servers…")
-    try:
-        models, mcp_status = asyncio.run(_load_slow())
-    except KeyboardInterrupt:
-        return EXIT_OK
-    runtime.ctx.catalog = models.catalog
-    progress.step(models_step(models.origin, models.remote_count))
-    progress.step(mcp_step(config, mcp_status))
+    # The chat opens immediately: the model-catalog fetch runs as a
+    # background task alongside the TUI (bound late via set_catalog), and
+    # MCP servers attach in the background inside TuiApp.run — both report
+    # into the feed when they land. Headless/loop paths still block on the
+    # fetch, as they print no feed.
+    progress.pending("models", f"fetching live from {spec.name} in the background…")
+    if (
+        config.mcp.enable_exa
+        or config.mcp.enable_context7
+        or any(s.enabled for s in config.mcp.servers.values())
+    ):
+        progress.pending("mcp", "connecting in the background…")
     console.print()
 
     tui = TuiApp(
@@ -761,13 +754,20 @@ def run_interactive(
         session,
         store,
         console=console,
-        catalog=models.catalog,
+        catalog=Catalog.default(),
         session_lock=session_lock,
     )
     if wt_info is not None and wt_manager is not None:
         tui.attach_worktree(wt_manager, wt_info, original_cwd)
+
+    async def _background_models() -> None:
+        # fetch_catalog manages its own event loop internally — run it in a
+        # thread so it never blocks the TUI loop.
+        models = await asyncio.to_thread(fetch_catalog, config, api_key)
+        tui.set_catalog(models.catalog, origin=models.origin, count=models.remote_count)
+
     try:
-        code = asyncio.run(_run_tui(tui, client))
+        code = asyncio.run(_run_tui(tui, client, background=_background_models))
     except KeyboardInterrupt:
         shutdown_telemetry()
         return EXIT_OK

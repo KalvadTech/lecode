@@ -103,6 +103,8 @@ class LlmResponse:
     input_tokens: int
     output_tokens: int
     cost_usd: float
+    #: Characters sent in this call's prompt — calibrates live token estimates.
+    prompt_chars: int = 0
 
 
 @dataclass(frozen=True)
@@ -147,6 +149,21 @@ AgentEvent = (
 
 #: on_event(event) — sync or async.
 OnEvent = Callable[[AgentEvent], Any]
+
+
+def _prompt_chars(history: list[dict[str, Any]]) -> int:
+    """Text characters in the prompt about to be sent (system + history)."""
+    total = 0
+    for message in history:
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    total += len(str(part.get("text", "")))
+    return total
+
 
 #: System nudge injected when a turn comes back with no text and no tool calls.
 EMPTY_NUDGE = (
@@ -226,7 +243,7 @@ class AgentRunner:
         self._catalog: Catalog | None = catalog
         #: Partially collected turn, for cancellation-safe persistence.
         self._partial: CompletedMessage | None = None
-        # Advisor seam: the advisor tool reaches the provider through ctx.
+        # Subagent seam: child runners reach the provider through ctx.
         self.ctx.extras["provider"] = provider
 
     async def run(
@@ -236,7 +253,7 @@ class AgentRunner:
     ) -> RunResult:
         """Run the loop from ``messages`` until done, empty, or max turns."""
         history: list[ChatMessage] = list(messages)
-        # Advisor seam: the live conversation, visible to the advisor tool.
+        # The live conversation, visible through ctx (subagents, hooks).
         self.ctx.extras["conversation"] = history
         input_tokens = 0
         output_tokens = 0
@@ -262,6 +279,7 @@ class AgentRunner:
                         await asyncio.sleep(self.config.agent.turn_cooldown_ms / 1000)
 
                 self._partial = None
+                prompt_chars = _prompt_chars(history)
                 await self._emit(on_event, LlmCall(model=self.model, turn=turns + 1))
                 completed = await self._stream_turn(history, on_event)
                 turns += 1
@@ -275,6 +293,7 @@ class AgentRunner:
                         input_tokens=in_tok,
                         output_tokens=out_tok,
                         cost_usd=cost,
+                        prompt_chars=prompt_chars,
                     ),
                 )
                 input_tokens += in_tok

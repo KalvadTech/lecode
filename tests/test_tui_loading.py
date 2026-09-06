@@ -346,8 +346,44 @@ class _FakeTui:
         pass
 
 
-async def _fake_run_tui(tui, client):
+async def _fake_run_tui(tui, client, background=None):
     return 0
+
+
+def test_catalog_fetch_runs_in_background(env, monkeypatch):
+    """The chat opens before the model-catalog fetch finishes; the fetched
+    catalog is bound late via set_catalog."""
+    import lecode.cli as cli
+    from lecode.providers.catalog import Catalog
+    from lecode.providers.live import LoadedCatalog
+
+    events: list[str] = []
+    monkeypatch.setattr(cli, "prompt_session_name", _fake_name_prompt)
+    monkeypatch.setattr(cli, "build_provider", lambda config, api_key=None: object())
+
+    class FakeTui:
+        def __init__(self, *args, **kwargs):
+            events.append("tui-created")
+            self.catalog = kwargs.get("catalog")
+
+        def set_catalog(self, catalog, *, origin, count):
+            events.append(f"catalog-bound:{origin}:{count}")
+
+    async def fake_run_tui(tui, client, background=None):
+        events.append("chat-open")
+        assert tui.catalog is not None and not tui.catalog._entries  # empty default
+        await background()
+        return 0
+
+    def slow_fetch(config, api_key=None):
+        events.append("fetch-done")
+        return LoadedCatalog(Catalog.default(), "live", 427)
+
+    monkeypatch.setattr(cli, "TuiApp", FakeTui)
+    monkeypatch.setattr(cli, "_run_tui", fake_run_tui)
+    monkeypatch.setattr(cli, "fetch_catalog", slow_fetch)
+    assert cli.run_interactive() == 0
+    assert events == ["tui-created", "chat-open", "fetch-done", "catalog-bound:live:427"]
 
 
 def _step(steps, label):

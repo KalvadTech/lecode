@@ -148,6 +148,24 @@ async def test_submit_streams_answer(tmp_path, monkeypatch):
     assert provider.requests[0]["messages"][-1] == {"role": "user", "content": "hi"}
 
 
+def test_set_catalog_binds_late(tmp_path, monkeypatch):
+    """The background catalog fetch lands after the chat opened: runner, ctx,
+    and the statusline context window all rebind, and the feed announces it."""
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    fresh = sample_catalog()
+    app.set_catalog(fresh, origin="live", count=42)
+    assert app._catalog is fresh
+    assert app._runner._catalog is fresh
+    assert app.runtime.ctx.catalog is fresh
+    assert "models: 42 fetched live" in out.getvalue()
+
+
+def test_set_catalog_failed_fetch(tmp_path, monkeypatch):
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    app.set_catalog(sample_catalog(), origin="empty", count=0)
+    assert "models: catalog unavailable" in out.getvalue()
+
+
 async def test_submit_prints_per_answer_stats_line(tmp_path, monkeypatch):
     script = [{"text": "done", "usage": {"input_tokens": 1234, "output_tokens": 42}}]
     app, _, out = make_app(tmp_path, monkeypatch, script)
@@ -623,6 +641,18 @@ async def test_estimate_tokens():
     assert estimate_tokens("") == 1
     assert estimate_tokens("abcd") == 1
     assert estimate_tokens("x" * 400) == 100
+
+
+async def test_char_per_token_calibrates_from_usage(tmp_path, monkeypatch):
+    """Real prompt usage moves the live estimate off the 4.0 default."""
+    script = [{"text": "done", "usage": {"input_tokens": 5000, "output_tokens": 10}}]
+    app, _, _ = make_app(tmp_path, monkeypatch, script)
+    assert app._char_per_token == 4.0
+    await app._submit("hi")
+    await app._turn_task
+    # chars/5000 tokens is a small ratio, clamped to 2.0; EMA: (4+2)/2 = 3.0
+    assert app._char_per_token == 3.0
+    assert app._estimate("x" * 300) == 100
 
 
 async def test_switch_session_refused_when_locked(tmp_path, monkeypatch):

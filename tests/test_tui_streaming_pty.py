@@ -1,4 +1,4 @@
-"""Regression test: streamed answers must survive app redraws on a real tty.
+"""Regression tests: the live feed must survive redraws on a real tty.
 
 Runs the full TuiApp against a pseudo-terminal with a live pyte terminal
 emulator on the other end (answering cursor-position requests with the true
@@ -18,7 +18,9 @@ import struct
 import sys
 import termios
 import threading
+from collections.abc import Callable, Coroutine
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -31,7 +33,7 @@ from rich.console import Console  # noqa: E402
 from tests.fakes import FakeProvider, sample_catalog  # noqa: E402
 
 from lecode.agent.builder import build_runtime  # noqa: E402
-from lecode.config.models import Config  # noqa: E402
+from lecode.config.models import Config, PermissionRule  # noqa: E402
 from lecode.session.storage import SessionStore  # noqa: E402
 from lecode.tui.app import TuiApp  # noqa: E402
 
@@ -45,32 +47,65 @@ pytestmark = pytest.mark.skipif(
 class SlowProvider(FakeProvider):
     """FakeProvider that streams slowly, like a real model."""
 
+    def __init__(self, script: list[dict[str, Any]], *, delay: float = 0.3) -> None:
+        super().__init__(script)
+        self._delay = delay
+
     async def _stream(self, entry):  # type: ignore[override]
         for event in [e async for e in super()._stream(entry)]:
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(self._delay)
             yield event
 
 
-async def _drive(master: int, screen: pyte.HistoryScreen) -> list[str]:
-    """Send a prompt, wait for the answer round to finish, then quit."""
+def _screen_lines(screen: pyte.HistoryScreen) -> list[str]:
+    # History entries are pyte line buffers (position → Char), not strings.
+    def render(line) -> str:
+        if isinstance(line, str):
+            return line.rstrip()
+        if not line:
+            return ""
+        return "".join(line[i].data for i in range(max(line) + 1)).rstrip()
 
-    def lines() -> list[str]:
-        return [ln.rstrip() for ln in screen.history.top] + [
-            screen.display[i].rstrip() for i in range(ROWS)
-        ]
+    return [render(ln) for ln in screen.history.top] + [
+        screen.display[i].rstrip() for i in range(ROWS)
+    ]
 
-    await asyncio.sleep(0.8)
-    os.write(master, b"what is the capital of France?\r")
-    deadline = asyncio.get_running_loop().time() + 15
+
+async def _wait_for(lines: Callable[[], list[str]], needle: str, timeout: float = 15) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
-        if any("answer:" in ln for ln in lines()):
-            break
+        if any(needle in ln for ln in lines()):
+            return
         await asyncio.sleep(0.1)
-    os.write(master, b"/quit\r")
-    return lines()
+    raise AssertionError(f"timed out waiting for {needle!r}:\n" + "\n".join(lines()))
 
 
-async def _run_pty_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+Driver = Callable[[int, "pyte.HistoryScreen"], Coroutine[Any, Any, list[str]]]
+
+
+def _prompt_then_quit(prompt: str) -> Driver:
+    """Driver: send ``prompt``, wait for the turn stats line, then /quit."""
+
+    async def drive(master: int, screen: pyte.HistoryScreen) -> list[str]:
+        lines = lambda: _screen_lines(screen)  # noqa: E731
+        await asyncio.sleep(0.8)
+        os.write(master, prompt.encode() + b"\r")
+        await _wait_for(lines, "answer:")
+        os.write(master, b"/quit\r")
+        return lines()
+
+    return drive
+
+
+async def _run_pty_app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: list[dict[str, Any]],
+    driver: Driver,
+    *,
+    configure: Callable[[Config], None] | None = None,
+    delay: float = 0.3,
+) -> list[str]:
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
@@ -106,18 +141,12 @@ async def _run_pty_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[
     try:
         config = Config()
         config.notifications.enabled = False
+        if configure is not None:
+            configure(config)
         store = SessionStore()
         session = store.create("pty-test", tmp_path, model=config.llm.model)
         runtime = build_runtime(config, tmp_path, session=session, store=store)
-        provider = SlowProvider(
-            [
-                {
-                    "reasoning": ["thinking..."],
-                    "text": ["Par", "is."],
-                    "usage": {"input_tokens": 10, "output_tokens": 2},
-                }
-            ]
-        )
+        provider = SlowProvider(script, delay=delay)
         console = Console(force_terminal=True, width=COLS)
         app = TuiApp(
             config,
@@ -143,9 +172,9 @@ async def _run_pty_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[
         session_pt._output = out
         try:
             task = asyncio.ensure_future(app.run(input=inp, output=out))
-            driver = asyncio.ensure_future(_drive(master, screen))
-            await asyncio.wait_for(task, timeout=20)
-            return await driver
+            driven = asyncio.ensure_future(driver(master, screen))
+            await asyncio.wait_for(task, timeout=30)
+            return await driven
         finally:
             session_pt._output = saved_output
     finally:
@@ -156,7 +185,16 @@ async def _run_pty_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[
 
 async def test_streamed_answer_survives_redraws(tmp_path, monkeypatch):
     """The answer must be on screen/scrollback intact after the turn ends."""
-    lines = await _run_pty_app(tmp_path, monkeypatch)
+    script = [
+        {
+            "reasoning": ["thinking..."],
+            "text": ["Par", "is."],
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+        }
+    ]
+    lines = await _run_pty_app(
+        tmp_path, monkeypatch, script, _prompt_then_quit("what is the capital of France?")
+    )
     visible = [ln for ln in lines if ln.strip()]
     dump = "\n".join(visible)
     assert any(ln == "Paris." for ln in visible), (
@@ -165,3 +203,66 @@ async def test_streamed_answer_survives_redraws(tmp_path, monkeypatch):
     arrow = [i for i, ln in enumerate(visible) if "→" in ln and "round 1" in ln]
     assert arrow, "no LLM-call line found:\n" + dump
     assert visible[arrow[0] + 1] == "Paris."  # no eaten-line gap after the call line
+
+
+async def test_long_answer_survives_intact(tmp_path, monkeypatch):
+    """A multi-paragraph streamed answer: every line lands, none eaten/duplicated."""
+    markers = [f"MARKER{i:02d}" for i in range(30)]
+    chunks = [m + "\n\n" for m in markers]  # blank line: separate paragraphs
+    script = [{"text": chunks, "usage": {"input_tokens": 10, "output_tokens": 60}}]
+    lines = await _run_pty_app(
+        tmp_path, monkeypatch, script, _prompt_then_quit("long answer please"), delay=0.02
+    )
+    dump = "\n".join(lines)
+    for marker in markers:
+        assert dump.count(marker) == 1, f"{marker} missing or duplicated:\n{dump}"
+
+
+async def test_tool_round_then_answer(tmp_path, monkeypatch):
+    """A tool call round followed by a final answer: all of it on screen."""
+    script = [
+        {
+            "tool_calls": [{"name": "bash", "arguments": '{"command": "echo pty-tool-out"}'}],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        },
+        {"text": ["all done here"], "usage": {"input_tokens": 20, "output_tokens": 3}},
+    ]
+    lines = await _run_pty_app(
+        tmp_path, monkeypatch, script, _prompt_then_quit("run something"), delay=0.05
+    )
+    dump = "\n".join(lines)
+    assert "bash" in dump and "pty-tool-out" in dump, "tool call/result missing:\n" + dump
+    assert "all done here" in dump, "final answer missing:\n" + dump
+
+
+async def test_permission_prompt_approves_tool(tmp_path, monkeypatch):
+    """An ask rule prompts inline; pressing y runs the tool and shows output."""
+
+    def configure(config: Config) -> None:
+        config.permissions.rules.ask["bash"] = [PermissionRule(pattern="*")]
+
+    script = [
+        {
+            "tool_calls": [{"name": "bash", "arguments": '{"command": "echo pty-approved-out"}'}],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        },
+        {"text": ["approved done"], "usage": {"input_tokens": 20, "output_tokens": 3}},
+    ]
+
+    async def drive(master: int, screen: pyte.HistoryScreen) -> list[str]:
+        lines = lambda: _screen_lines(screen)  # noqa: E731
+        await asyncio.sleep(0.8)
+        os.write(master, b"run it\r")
+        await _wait_for(lines, "allow bash")
+        os.write(master, b"y")
+        await _wait_for(lines, "answer:")
+        os.write(master, b"/quit\r")
+        return lines()
+
+    lines = await _run_pty_app(
+        tmp_path, monkeypatch, script, drive, configure=configure, delay=0.05
+    )
+    dump = "\n".join(lines)
+    assert "allow bash" in dump, "approval prompt never shown:\n" + dump
+    assert "pty-approved-out" in dump, "approved tool output missing:\n" + dump
+    assert "approved done" in dump, "final answer missing:\n" + dump

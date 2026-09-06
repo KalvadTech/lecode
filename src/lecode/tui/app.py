@@ -101,7 +101,6 @@ from lecode.tui.statusline import (
     CachedGitInfo,
     StatusLineState,
     StatusState,
-    estimate_tokens,
     render_statusline,
 )
 from lecode.tui.themes import THEME
@@ -180,14 +179,14 @@ class TuiApp:
         self._approval = ApprovalPrompt()
         self._notifier = Notifier(config.notifications)
         self._last_response = ""
-        #: Pending advisor-handoff answer (the next Enter resolves it).
-        self._handoff_future: asyncio.Future[str | None] | None = None
         #: Active worktree isolation (``/worktree``, ``--worktree``).
         self._worktree: Any | None = None  # WorktreeInfo
         self._worktree_manager: Any | None = None  # WorktreeManager
         self._original_cwd: Path | None = None
         #: Background plan-loop task (``/loop``); while it runs, prompts refuse.
         self._loop_task: asyncio.Task[None] | None = None
+        #: Background MCP attach (started by run; reported into the feed).
+        self._mcp_task: asyncio.Task[None] | None = None
         #: Unix-socket status signals (``[signals]``); inert when disabled.
         self._signals = StatusEmitter(config.signals, session=session.name)
 
@@ -224,6 +223,8 @@ class TuiApp:
             context_window=config.agent.context_window,
         )
         self._git = CachedGitInfo()
+        #: Chars-per-token ratio, calibrated per model from real usage (EMA).
+        self._char_per_token = 4.0
         self._history: list[dict[str, Any]] = [{"role": "system", "content": runtime.system_prompt}]
         self._history += store.load_for_model(session)
         # Restore context/cost/token lines from the session's history (resume).
@@ -373,10 +374,6 @@ class TuiApp:
             checker = checker.for_agent(agent.overlay)
         self._runtime.ctx.permission_checker = checker
         self._last_response = ""
-        # Per-session advisor budget resets with the session.
-        advisor = self._runtime.registry.get("advisor")
-        if advisor is not None and hasattr(advisor, "reset_uses"):
-            advisor.reset_uses()
         self._reload_history()  # also refreshes the statusline usage lines
         self._input_history.rebind(session)
         if self._input_area is not None:
@@ -417,10 +414,6 @@ class TuiApp:
     def add_note(self, note: str) -> None:
         """``/btw``: stash a side note prepended to the next submission."""
         self._pending_notes.append(note)
-
-    def add_catalog_model(self, entry: Any) -> None:
-        """``/models-add``: merge a custom entry into the in-memory catalog."""
-        self._catalog = self.catalog.merge([entry])
 
     def set_cwd(self, path: Path) -> None:
         """Repoint ctx, permission checker, completers and statusline at ``path``.
@@ -547,13 +540,6 @@ class TuiApp:
         def _enter(event: Any) -> None:
             if self._approval.is_pending:
                 return  # y/a/n/ESC only while an approval is pending
-            if self._handoff_future is not None and not self._handoff_future.done():
-                text = event.current_buffer.text.strip()
-                if text:
-                    event.current_buffer.append_to_history()
-                event.current_buffer.reset()
-                self._handoff_future.set_result(text or None)
-                return
             text = event.current_buffer.text
             if text.strip():
                 event.current_buffer.append_to_history()
@@ -581,9 +567,6 @@ class TuiApp:
         def _ctrl_c(event: Any) -> None:
             if self._approval.is_pending:
                 self._approval.resolve(Deny())
-                return
-            if self._handoff_future is not None and not self._handoff_future.done():
-                self._handoff_future.set_result(None)  # decline the handoff
                 return
             if self.cancel_turn():
                 return
@@ -707,11 +690,10 @@ class TuiApp:
         self._status.git = await self._git.get(self._cwd)
         self._app = self._build_app(input=input, output=output)
         self._runtime.ctx.approval_callback = self._request_approval
-        self._runtime.ctx.extras["advisor_handoff"] = self._request_advisor_handoff
-        # MCP attach normally happens here, on this loop (the cli's up-front
-        # attach is only a probe for the loading screen and is shut down).
+        # MCP attaches in the background so the chat opens immediately;
+        # per-server status lands in the feed when the connect finishes.
         if self._runtime.ctx.extras.get(MCP_EXTRA) is None:
-            await attach_mcp(self._runtime.registry, self._runtime.ctx)
+            self._mcp_task = asyncio.ensure_future(self._attach_mcp())
         self._file_lister.prefetch()
         self._spinner_task = asyncio.ensure_future(self._spinner_loop())
         try:
@@ -724,12 +706,12 @@ class TuiApp:
             self._spinner_task.cancel()
             self._approval.cancel()
             self._runtime.ctx.approval_callback = None
-            self._runtime.ctx.extras.pop("advisor_handoff", None)
-            if self._handoff_future is not None and not self._handoff_future.done():
-                self._handoff_future.set_result(None)
             self.cancel_turn()
             if self._turn_task is not None:
                 await asyncio.gather(self._turn_task, return_exceptions=True)
+            if self._mcp_task is not None:
+                await asyncio.gather(self._mcp_task, return_exceptions=True)
+                self._mcp_task = None
             lsp = self._runtime.ctx.extras.get("lsp")
             if lsp is not None:
                 await lsp.shutdown()
@@ -744,6 +726,33 @@ class TuiApp:
                 self._session_lock = None
         self.print_totals()
         return EXIT_OK
+
+    async def _attach_mcp(self) -> None:
+        """Background MCP connect; per-server status reported into the feed."""
+        manager = await attach_mcp(self._runtime.registry, self._runtime.ctx)
+        for status in manager.status():
+            if status.state == "connected":
+                self._feed.info(f"mcp {status.name}: connected · {status.tools} tools")
+            elif status.state == "failed":
+                self._feed.info(f"mcp {status.name}: failed — {status.error or 'connect error'}")
+
+    def set_catalog(self, catalog: Any, *, origin: str, count: int) -> None:
+        """Bind the live-fetched model catalog after the chat has opened.
+
+        The catalog is fetched in the background at startup so the loading
+        screen is not gated on the network; everything reads it late.
+        """
+        self._catalog = catalog
+        self._runner._catalog = catalog
+        self._runtime.ctx.catalog = catalog
+        with contextlib.suppress(Exception):  # unknown model — keep the default
+            self._status.context_window = catalog.get(self._config.llm.model).context_window
+        if origin == "live":
+            self._feed.info(f"models: {count} fetched live from the provider")
+        else:
+            self._feed.info("models: catalog unavailable (fetch failed)")
+        if self._app is not None:
+            self._app.invalidate()
 
     async def _spinner_loop(self) -> None:
         """Advance the spinner and refresh branch/statusline/queue title."""
@@ -960,27 +969,6 @@ class TuiApp:
             self._status.state = StatusLineState.RUNNING
             self._invalidate()
 
-    # -- inline advisor handoff ----------------------------------------------
-
-    async def _request_advisor_handoff(self, question: str, focus: str | None) -> str | None:
-        """``ctx.extras['advisor_handoff']``: show the advisor's question and
-        await the next Enter as the human's guidance (Ctrl-C declines)."""
-        line = f"advisor asks: {question}"
-        if focus:
-            line += f" (focus: {focus})"
-        self._feed.permission(line)
-        self._feed.info("type your guidance, Enter to send — Ctrl-C declines")
-        self._handoff_future = asyncio.get_running_loop().create_future()
-        self._status.state = StatusLineState.AWAITING_APPROVAL
-        self._invalidate()
-        try:
-            return await self._handoff_future
-        finally:
-            self._handoff_future = None
-            if self._status.state is StatusLineState.AWAITING_APPROVAL:
-                self._status.state = StatusLineState.RUNNING
-            self._invalidate()
-
     # -- turns ------------------------------------------------------------------
 
     def _turn_running(self) -> bool:
@@ -1041,7 +1029,7 @@ class TuiApp:
         self._history.append(message)
         self._store.append_message(self._session, message)
         # Live context growth: the submitted message joins the next prompt.
-        self._status.context_used += estimate_tokens(describe_content(text))
+        self._status.context_used += self._estimate(describe_content(text))
         run_history = self._history
         if overlay is not None:
             # Persona overlay: an extra system message for this turn only —
@@ -1219,21 +1207,25 @@ class TuiApp:
         if result.final:
             self._last_response = result.final
 
+    def _estimate(self, text: str) -> int:
+        """Live token estimate, calibrated per model by real prompt usage."""
+        return max(1, int(len(text) / self._char_per_token))
+
     def _on_event(self, event: Any) -> None:
         """Runner event → feed rendering (+ statusline state)."""
         if isinstance(event, Token):
             # Live context growth: streamed output becomes next round's input.
-            self._status.context_used += estimate_tokens(event.text)
+            self._status.context_used += self._estimate(event.text)
             self._feed.stream_token(event.text)
         elif isinstance(event, Reasoning):
-            self._status.context_used += estimate_tokens(event.text)
+            self._status.context_used += self._estimate(event.text)
             self._feed.stream_token(event.text, thinking=True)
         elif isinstance(event, ToolCall):
-            self._status.context_used += estimate_tokens(event.arguments)
+            self._status.context_used += self._estimate(event.arguments)
             self._feed.tool_call(event.name, " ".join(event.arguments.split()))
             self._activity(f"running {event.name}")
         elif isinstance(event, ToolResult):
-            self._status.context_used += estimate_tokens(event.content)
+            self._status.context_used += self._estimate(event.content)
             self._feed.tool_result(event.name, event.content, event.is_error)
             self._activity("thinking")
         elif isinstance(event, Error):
@@ -1249,6 +1241,10 @@ class TuiApp:
             self._feed.llm_call(event.model, event.turn)
             self._activity("thinking")
         elif isinstance(event, LlmResponse):
+            if event.input_tokens > 0 and event.prompt_chars > 0:
+                # Calibrate the live estimate: EMA of chars/token, clamped.
+                ratio = min(max(event.prompt_chars / event.input_tokens, 2.0), 8.0)
+                self._char_per_token = 0.5 * self._char_per_token + 0.5 * ratio
             self._feed.llm_response(
                 event.model,
                 event.turn,
