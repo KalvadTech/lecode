@@ -129,7 +129,6 @@ async def test_child_uses_agent_prompt_and_lean_registry(tmp_path, monkeypatch):
     assert request["messages"][1] == {"role": "user", "content": "scan"}
     tool_names = {t["function"]["name"] for t in request["tools"]}
     assert "task" not in tool_names  # no recursion
-    assert "advisor" not in tool_names
     assert {"read", "grep", "list_dir"} <= tool_names
 
 

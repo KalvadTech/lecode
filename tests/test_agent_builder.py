@@ -21,7 +21,6 @@ def test_default_runtime(cwd):
     runtime = build_runtime(Config(), cwd)
     expected = [
         *(t.name for t in core_tools()),
-        "advisor",
         "lsp_diagnostics",
         "memory_edit",
         "memory_read",

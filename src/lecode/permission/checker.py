@@ -82,7 +82,6 @@ READ_TOOLS = frozenset(
         "lsp_diagnostics",
         "memory_read",
         "memory_search",
-        "advisor",  # a model call, not a mutation — read-class in every mode
         "task",  # dispatches a subagent; its own calls are gated individually
     }
 )

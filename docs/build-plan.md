@@ -8,8 +8,8 @@ screen), talks to **OpenRouter** and any **generic OpenAI-compatible API** (loca
 servers included), executes tools under a rich permission system, persists sessions, and
 supports power features: subagents, MCP servers (with Exa and context7 auto-configured),
 git worktrees, skills, custom user-defined agents, LSP diagnostics, persistent memory,
-an advisor model, multimodal input, lifecycle hooks, session export, loop mode, prompt
-chaining.
+a post-task reviewer model, multimodal input, lifecycle hooks, session export, loop
+mode, prompt chaining.
 
 **Mandatory session naming**: every interactive start asks for a session name up front,
 before the chat opens — the prompt cannot be skipped or left empty (Ctrl-C/Ctrl-D
@@ -73,10 +73,8 @@ DuckDuckGo web tools (Exa MCP instead), anonymous sessions.
   cap), daily logs, project scratchpad checklists, named notes; four tools
   (`memory_write/edit/read/search`, regex keyword search); compaction summaries flushed
   to the daily log; atomic writes + `.bak` backups; `/memory` commands
-- **Advisor**: a second "expert" model the agent calls mid-task for strategic guidance
-  (`advisor` tool, own system prompt, context truncated to a KB budget, max-uses
-  counter); human-handoff mode routes advisor calls to the user; `/advisor
-  on|off|handoff|model|max-uses|context-limit`
+- **Pierre mode**: a post-task reviewer — a second model compares the user's request
+  with the finished result and reports whether it delivered; `/pierre on|off|model`
 - **Multimodal input**: image/audio/PDF attachments via `/add` and the `@` picker
   (20 MB cap), sent as OpenAI-compatible content parts where the selected model
   supports them
@@ -144,8 +142,8 @@ portal.
   `[tools]`, `[ui]` (theme, thinking collapse, welcome shortcuts, hidden models),
   `[permissions]`, `[notifications]`, `[mcp]` (`enable_exa` default true,
   `enable_context7` default false, server table), `[lsp]` (server overrides),
-  `[memory]`, `[advisor]`, `[hooks]` (event → handler commands), plus permission rule
-  tables, colors, named model presets, custom provider definitions (name → base_url +
+  `[memory]`, `[pierre]`, `[hooks]` (event → handler commands), plus permission rule
+  tables, colors, custom provider definitions (name → base_url +
   api_key_env + headers).
 - **Providers**: OpenRouter (first-class preset: model catalog refresh, pricing,
   app-identity headers, caching) + generic OpenAI-compatible endpoints (Ollama, LM
@@ -163,7 +161,7 @@ portal.
   whitespace-normalized search/replace and CRC-anchored line addressing), `bash`
   (timeout, truncation, idle timeout, `rtk` output compaction), `grep` (regex + glob +
   context; implemented over `rg`), `find_files` (glob; implemented over `fd`); plus
-  `list_dir`, `todo_write`, `lsp_diagnostics`, `advisor`, the four `memory_*` tools;
+  `list_dir`, `todo_write`, `lsp_diagnostics`, the four `memory_*` tools;
   MCP-provided web search/fetch via Exa.
 - **Custom agents**: built-in primaries `build` (full access) and `plan` (read-only +
   ask), cycled with Tab and shown in the statusline; user agents from markdown files
@@ -193,11 +191,8 @@ portal.
   `memory_read` / `memory_search` (regex keyword search); compaction summaries appended
   to the daily log; atomic writes with `.bak` backups; `/memory show|edit|search|log`
   commands.
-- **Advisor**: `advisor` tool — the agent asks a (usually stronger) second model for
-  strategic guidance mid-task; conversation context truncated head/tail to a configured
-  KB budget; max-uses counter per session; `handoff` mode routes the advisor call to
-  the human inline instead of a model; `/advisor on|off|handoff|model|max-uses|
-  context-limit`.
+- **Pierre mode**: after every completed task, a second model compares the request
+  with the result and gives feedback in the feed; `/pierre on|off|model`.
 - **Multimodal input**: `/add` and `@` accept image/audio/PDF files (20 MB cap);
   attachments sent as OpenAI-compatible `image_url` / document content parts; a clear
   error when the selected model lacks the modality; attachment list shown in the feed.
@@ -229,17 +224,17 @@ portal.
   queued prompts (Enter while running) + steer queue (Alt+Enter, priority, 5+5 limits);
   streaming markdown feed with syntax highlighting; collapsible thinking blocks;
   **fixed statusline** (session name · agent · model · git branch · context meter ·
-  tokens · cost · state); braille spinner; inline permission prompt (y/a/n/ESC) and
-  inline advisor-handoff prompt; 17+ JSON themes (`/theme`); OSC 8 hyperlinks;
+  tokens · cost · state); braille spinner; inline permission prompt (y/a/n/ESC);
+  17+ JSON themes (`/theme`); OSC 8 hyperlinks;
   clipboard (OSC 52 / pbcopy / xclip), `/copy`; audio notifications; `--no-color`.
 - **Slash commands** (~50): `/new /clear /resume /session /undo /redo /rewind /retry
-  /rename /history /quit /exit /handoff /compact /compress /model /models /models-add
-  /provider /thinking /reasoning /permissions /mode /toggle /theme /themes /prompt
+  /rename /history /quit /exit /handoff /compact /compress /model /models
+  /thinking /reasoning /permissions /mode /toggle /theme /themes /prompt
   /editsys /add /drop /drop-all /init /help /welcome
   /tutor /review /btw /queue /copy /export /import /share /loop /worktree /wt-exit
-  /wt-merge /mcp /model-subagent /models-subagent /notifications /memory /advisor
-  /hooks /agents` + skill-registered commands. Prefixes: `!cmd`, `!!cmd`, `.prompt`,
-  `@file`, `@agent`.
+  /wt-merge /mcp /model-subagent /models-subagent /notifications /memory /pierre
+  /doctor /hooks /agents` + skill-registered commands. Prefixes: `!cmd`, `!!cmd`,
+  `.prompt`, `@file`, `@agent`.
 - **Headless**: `-p [prompt]` (inline or stdin), tools auto-approved, final response to
   stdout, exit codes 0/1/2/3, auto-generated session name; `--loop` iterative mode
   against a plan file with optional per-iteration command and max iterations.
@@ -287,7 +282,7 @@ lecode/
 │   ├── agent/
 │   │   ├── runner.py         # asyncio multi-turn streaming loop
 │   │   ├── builder.py        # prompt assembly (minimal|rich), tool/skill/agent wiring
-│   │   └── tools/            # core tools (rg/fd/rtk backed) + task + advisor +
+│   │   └── tools/            # core tools (rg/fd/rtk backed) + task +
 │   │                         # memory_* + MCP bridge
 │   ├── lsp/                  # async JSON-RPC client, server registry, manager,
 │   │                         # lsp_diagnostics tool
@@ -322,7 +317,7 @@ lecode/
 
 - One `asyncio` loop; components communicate over `asyncio.Queue`s with a small event
   taxonomy (`Token / Reasoning / ToolCall / ToolResult / Error / Retrying / Done`, user
-  input, permission ask/reply, advisor-handoff ask/reply). TUI never calls providers;
+  input, permission ask/reply). TUI never calls providers;
   runner never renders.
 - Startup sequence (interactive): dependency check → config load → `--setup` if
   unconfigured → **session-name prompt** (loop until non-empty; Ctrl-C/Ctrl-D exits
@@ -332,8 +327,8 @@ lecode/
   steer queue is a second priority input queue drained first between turns.
 - One streaming client implementation (OpenAI Chat Completions with SSE via
   `httpx.AsyncClient.stream()` + line iteration); OpenRouter behavior is a thin preset
-  layer over it (headers, catalog/pricing fetch, routing params). The advisor and
-  subagents reuse the same client with different model/prompt params.
+  layer over it (headers, catalog/pricing fetch, routing params). Subagents and the
+  pierre reviewer reuse the same client with different model/prompt params.
 - External binaries: one shared async subprocess wrapper
   (`asyncio.create_subprocess_exec`, timeout, output caps) used by `grep` (rg),
   `find_files` (fd), `bash` (rtk), and the hook handlers. Presence verified once at
@@ -360,8 +355,8 @@ lecode/
   `uv run python -m pytest`; `respx` for HTTP-level mocking. CI runners install
   fd/ripgrep/rtk (or a shim for rtk) before the suite runs.
 - **Fake provider**: scripted streaming responder (text chunks, tool calls, errors) with
-  request/history capture — headless end-to-end tests of the full agent loop. The
-  advisor and subagents run against the same fake.
+  request/history capture — headless end-to-end tests of the full agent loop. Pierre
+  and subagents run against the same fake.
 - **Provider contract tests**: SSE decode, tool-call round-trips, multimodal payload
   shaping, retry classification, OpenRouter headers/catalog handling, error mapping,
   keyless local endpoints.
@@ -412,8 +407,8 @@ lecode/
    collapse, pickers (incl. session picker with delete), the fixed statusline, spinner,
    themes, inline permission prompt, clipboard, `/copy`, notifications, attachment
    display.
-9. **Slash commands + advisor + multimodal** — full command registry; advisor tool with
-   handoff mode and `/advisor`; multimodal `/add` + `@` attachments with capability
+9. **Slash commands + pierre + multimodal** — full command registry; pierre post-task
+   review (`/pierre`); multimodal `/add` + `@` attachments with capability
    checks.
 10. **Power features** — in order: subagents, prompt chaining, export/import/share,
     git worktrees, loop mode, status signals, LSP integration (registry, manager,
@@ -426,7 +421,7 @@ lecode/
 
 ## Sizing
 
-Roughly 19–26k LOC of Python (memory ~1k, hooks ~1.2k, advisor ~0.4k, multimodal ~0.3k,
+Roughly 19–26k LOC of Python (memory ~1k, hooks ~1.2k, pierre ~0.2k, multimodal ~0.3k,
 custom agents ~0.8k, LSP ~0.8k on top of the ~14–19k base). Phases 2–5 are the critical
 path to a usable agent; phase 8 is the largest single chunk; MCP + LSP (phase 10) are
 the biggest extras.
@@ -442,5 +437,5 @@ the biggest extras.
 - End of phase 8: interactive start requires a session name (empty rejected, duplicate
   suffixed, abort leaves no session file); `-p` skips the prompt.
 - End of phase 11: clean-machine `uv tool install` → `--setup` → one real coding task
-  completed (including one hook firing, one advisor call, one image attachment); suite
+  completed (including one hook firing, one pierre review, one image attachment); suite
   green in CI.

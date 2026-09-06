@@ -25,10 +25,7 @@ from lecode.multimodal import describe_content, format_size, load_attachment
 from lecode.providers import resolve_provider
 from lecode.providers.catalog import (
     AmbiguousModelError,
-    Modalities,
-    ModelInfo,
     ModelNotFoundError,
-    Pricing,
 )
 from lecode.session.handoff import handoff as handoff_session
 from lecode.session.naming import unique_name, validate_name
@@ -182,7 +179,9 @@ async def cmd_resume(app: TuiApp, args: list[str]) -> None:
     lines = []
     for index, meta in enumerate(sessions, 1):
         marker = " (current)" if meta.id == app.session.id else ""
-        lines.append(f"{index}. {meta.name}{marker} — {meta.id} — {meta.created_at}")
+        pid = app.store.lock_holder(meta.id)
+        in_use = f" — in use (pid {pid})" if pid else ""
+        lines.append(f"{index}. {meta.name}{marker} — {meta.id} — {meta.created_at}{in_use}")
     lines.append("")
     lines.append("switch: /resume <name-or-id> · delete: /resume --delete <name-or-id>")
     app.feed.info("\n".join(lines))
@@ -200,6 +199,9 @@ def _delete_session(app: TuiApp, args: list[str]) -> None:
         return
     if meta.id == app.session.id:
         app.feed.error("cannot delete the current session")
+        return
+    if (pid := app.store.lock_holder(meta.id)) is not None:
+        app.feed.error(f"session '{meta.name}' is open in another lecode process (pid {pid})")
         return
     app.store.delete(meta.id)
     app.feed.info(f"deleted session: {meta.name}")
@@ -423,30 +425,6 @@ async def cmd_models(app: TuiApp, args: list[str]) -> None:
     app.feed.info("\n".join(lines) or "(no models)")
 
 
-async def cmd_models_add(app: TuiApp, args: list[str]) -> None:
-    """``/models-add <id>``: register a custom model for this run."""
-    if not args:
-        app.feed.error("usage: /models-add <model-id>")
-        return
-    model_id = args[0]
-    try:
-        existing = app.catalog.get(model_id)
-    except (ModelNotFoundError, AmbiguousModelError):
-        existing = None
-    if existing is not None and existing.id == model_id:
-        app.feed.info(f"already known: {model_id}")
-        return
-    entry = ModelInfo(
-        id=model_id,
-        name=model_id,
-        context_window=app.config.agent.context_window,
-        pricing=Pricing(prompt=0.0, completion=0.0),
-        modalities=Modalities(input=["text"], output=["text"]),
-    )
-    app.add_catalog_model(entry)
-    app.feed.info(f"added model: {model_id} — switch with /model {model_id}")
-
-
 async def cmd_model_subagent(app: TuiApp, args: list[str]) -> None:
     """``/model-subagent [model]``: show or set the subagent model override
     (session-scoped, in-memory); ``default`` resets to inheriting the main
@@ -490,25 +468,6 @@ async def cmd_models_subagent(app: TuiApp, args: list[str]) -> None:
     lines.append("")
     lines.append("set: /model-subagent <model> · reset: /model-subagent default")
     app.feed.info("\n".join(lines))
-
-
-async def cmd_provider(app: TuiApp, args: list[str]) -> None:
-    """``/provider``: the resolved provider (name, endpoint, auth, TLS)."""
-    try:
-        spec = resolve_provider(app.config)
-    except ValueError as e:
-        app.feed.error(str(e))
-        return
-    app.feed.info(
-        "\n".join(
-            [
-                f"provider: {spec.name}",
-                f"base url: {spec.base_url}",
-                f"model: {app.config.llm.model}",
-                f"auth: {spec.auth_policy} · tls verify: {spec.tls_verify}",
-            ]
-        )
-    )
 
 
 async def cmd_thinking(app: TuiApp, args: list[str]) -> None:
@@ -562,55 +521,6 @@ async def cmd_toggle(app: TuiApp, args: list[str]) -> None:
     app.feed.info(f"permission mode: {mode}")
 
 
-# -- advisor ----------------------------------------------------------------------
-
-
-async def cmd_advisor(app: TuiApp, args: list[str]) -> None:
-    """``/advisor``: status, or tune the advisor (session-scoped, in-memory)."""
-    cfg = app.config.advisor
-    if not args:
-        tool = app.runtime.registry.get("advisor")
-        uses = getattr(tool, "uses", 0)
-        app.feed.info(
-            f"advisor: {'on' if cfg.enabled else 'off'} · mode: {cfg.mode} · "
-            f"model: {cfg.model or app.config.llm.model} · "
-            f"uses: {uses}/{cfg.max_uses} · context limit: {cfg.context_limit_kb} KB"
-        )
-        return
-    sub = args[0]
-    if sub == "on":
-        cfg.enabled = True
-        app.feed.info("advisor: on")
-    elif sub == "off":
-        cfg.enabled = False
-        app.feed.info("advisor: off")
-    elif sub == "handoff":
-        cfg.mode = "model" if cfg.mode == "handoff" else "handoff"
-        app.feed.info(f"advisor mode: {cfg.mode}")
-    elif sub == "model":
-        if len(args) < 2:
-            app.feed.error("usage: /advisor model <model-id>")
-            return
-        cfg.model = " ".join(args[1:])
-        app.feed.info(f"advisor model: {cfg.model}")
-    elif sub == "max-uses":
-        if len(args) < 2 or not args[1].isdigit() or int(args[1]) < 1:
-            app.feed.error("usage: /advisor max-uses <n> (positive integer)")
-            return
-        cfg.max_uses = int(args[1])
-        app.feed.info(f"advisor max uses: {cfg.max_uses}")
-    elif sub == "context-limit":
-        if len(args) < 2 or not args[1].isdigit() or int(args[1]) < 1:
-            app.feed.error("usage: /advisor context-limit <kb> (positive integer)")
-            return
-        cfg.context_limit_kb = int(args[1])
-        app.feed.info(f"advisor context limit: {cfg.context_limit_kb} KB")
-    else:
-        app.feed.error(
-            "usage: /advisor [on|off|handoff|model <id>|max-uses <n>|context-limit <kb>]"
-        )
-
-
 # -- pierre ---------------------------------------------------------------------
 
 
@@ -660,6 +570,140 @@ async def cmd_hooks(app: TuiApp, args: list[str]) -> None:
         app.feed.info("no hooks configured")
         return
     lines = [f"{row['event']}: {row['command']} (timeout {row['timeout_s']}s)" for row in rows]
+    app.feed.info("\n".join(lines))
+
+
+async def cmd_doctor(app: TuiApp, args: list[str]) -> None:
+    """``/doctor``: health check — binaries, config, provider, connectivity,
+    and every subsystem, with a pass/warn/fail mark per line."""
+    import asyncio
+    import shutil
+
+    from lecode.auth import AuthError, resolve_api_key
+    from lecode.config.loader import load_config
+    from lecode.deps import REQUIRED_BINARIES
+
+    config = app.config
+    lines: list[str] = []
+    issues = 0
+
+    def report(status: str, text: str) -> None:
+        nonlocal issues
+        mark = {"ok": "✓", "warn": "!", "fail": "✗", "skip": "–"}[status]  # noqa: RUF001
+        if status in ("warn", "fail"):
+            issues += 1
+        lines.append(f"{mark} {text}")
+
+    # external binaries (hard dependencies)
+    for name, hint in REQUIRED_BINARIES.items():
+        path = shutil.which(name)
+        if path:
+            report("ok", f"{name}: {path}")
+        else:
+            report("fail", f"{name}: MISSING — install: {hint}")
+
+    # config files (fresh load: picks up edits since startup)
+    try:
+        loaded = load_config(app.runtime.ctx.cwd)
+    except Exception as e:
+        report("fail", f"config: failed to load — {e}")
+    else:
+        sources = ", ".join(str(s) for s in loaded.sources) or "defaults (no config file)"
+        report("ok", f"config: {sources}")
+        for warning in loaded.warnings:
+            report("warn", f"config warning: {warning}")
+
+    # provider + API key (never prints the key)
+    try:
+        spec = resolve_provider(config)
+        key = resolve_api_key(spec.name, config)
+        auth = "no API key" if key.source == "none" else f"key from {key.source}"
+        status = "warn" if key.source == "none" and config.llm.auth_policy != "none" else "ok"
+        report(status, f"provider: {spec.name} · {spec.base_url} · {auth}")
+    except (AuthError, ValueError) as e:
+        report("fail", f"provider: {e}")
+
+    # model + catalog
+    model = config.llm.model
+    try:
+        info = app.catalog.get(model)
+    except (ModelNotFoundError, AmbiguousModelError):
+        report("warn", f"model: {model} — not in the catalog (pricing/ctx unknown)")
+    else:
+        report(
+            "ok",
+            f"model: {info.id} — ctx {human_tokens(info.context_window)}"
+            f" · ${info.pricing.prompt}/M in · ${info.pricing.completion}/M out",
+        )
+
+    # connectivity: one live /models fetch (also validates the key)
+    app.feed.info("doctor: probing the provider…")
+    from lecode.cli import fetch_catalog  # deferred: cli imports the TUI
+
+    fetched = await asyncio.to_thread(fetch_catalog, config)
+    if fetched.origin == "live":
+        report("ok", f"connectivity: reachable — {fetched.remote_count} models listed")
+    else:
+        report("fail", "connectivity: catalog fetch failed (network/auth/base URL?)")
+
+    # MCP servers
+    manager = app.runtime.ctx.extras.get("mcp")
+    statuses = manager.status() if manager is not None else []
+    if statuses:
+        for s in statuses:
+            if s.state == "connected":
+                report("ok", f"mcp {s.name}: connected · {s.tools} tools")
+            elif s.state == "failed":
+                report("warn", f"mcp {s.name}: failed — {s.error or 'connect error'}")
+            else:
+                report("skip", f"mcp {s.name}: disabled")
+    else:
+        report("skip", "mcp: no servers configured")
+
+    # session file
+    stats = session_stats(app.store, app.session)
+    size = app.session.path.stat().st_size if app.session.path.exists() else 0
+    report(
+        "ok",
+        f"session: {app.session.path} — {format_size(size)}, {stats.message_count} messages",
+    )
+
+    # persistent memory
+    if config.memory.enabled:
+        root = memory_root(app.runtime.ctx.cwd)
+        long_term = root / "MEMORY.md"
+        detail = f"{root}"
+        if long_term.is_file():
+            detail += f" · MEMORY.md {format_size(long_term.stat().st_size)}"
+        else:
+            detail += " · MEMORY.md absent"
+        report("ok", f"memory: {detail}")
+    else:
+        report("skip", "memory: disabled")
+
+    # hooks, lsp, telemetry
+    rows = hooks_status(config)
+    report("ok", f"hooks: {len(rows)} handler(s)") if rows else report("skip", "hooks: none")
+    report("ok", "lsp: enabled") if config.lsp.enabled else report("skip", "lsp: disabled")
+    telemetry = config.telemetry
+    if telemetry.enabled:
+        bits = []
+        bits.append("sentry" if telemetry.sentry_dsn else "no sentry DSN")
+        bits.append(
+            f"otlp {telemetry.otlp_endpoint}" if telemetry.otlp_endpoint else "no OTLP endpoint"
+        )
+        status = "ok" if telemetry.sentry_dsn or telemetry.otlp_endpoint else "warn"
+        report(status, f"telemetry: enabled · {' · '.join(bits)}")
+    else:
+        report("skip", "telemetry: disabled")
+
+    # permissions + tools
+    checker = app.runtime.ctx.permission_checker
+    tools = len(app.runtime.registry.names())
+    report("ok", f"permissions: {checker.mode} · tools: {tools}")
+
+    lines.append("")
+    lines.append("doctor: all good" if issues == 0 else f"doctor: {issues} issue(s) — see above")
     app.feed.info("\n".join(lines))
 
 
@@ -1215,13 +1259,10 @@ CATEGORIES: list[tuple[str, list[str]]] = [
         [
             "model",
             "models",
-            "models-add",
             "model-subagent",
             "models-subagent",
-            "provider",
             "thinking",
             "reasoning",
-            "advisor",
         ],
     ),
     ("Permissions", ["permissions", "mode", "toggle"]),
@@ -1275,10 +1316,8 @@ _HANDLERS = {
     "compact": cmd_compact,
     "model": cmd_model,
     "models": cmd_models,
-    "models-add": cmd_models_add,
     "model-subagent": cmd_model_subagent,
     "models-subagent": cmd_models_subagent,
-    "provider": cmd_provider,
     "thinking": cmd_thinking,
     "reasoning": cmd_thinking,
     "permissions": cmd_permissions,
@@ -1292,7 +1331,6 @@ _HANDLERS = {
     "copy": cmd_copy,
     "help": cmd_help,
     "welcome": cmd_welcome,
-    "advisor": cmd_advisor,
     "pierre": cmd_pierre,
     "add": cmd_add,
     "drop": cmd_drop,
@@ -1313,6 +1351,7 @@ _HANDLERS = {
     "prompt": cmd_prompt,
     "compress": cmd_compact,
     "editsys": cmd_editsys,
+    "doctor": cmd_doctor,
 }
 
 #: Usage hints shown by ``/help <name>``.
@@ -1323,7 +1362,6 @@ ARG_HINTS = {
     "rename": "<name>",
     "handoff": "[name]",
     "model": "[model]",
-    "models-add": "<model-id>",
     "model-subagent": "[model]",
     "thinking": "[none|low|medium|high]",
     "reasoning": "[none|low|medium|high]",
@@ -1332,7 +1370,6 @@ ARG_HINTS = {
     "memory": "[show|edit|search|log|notes]",
     "btw": "<text>",
     "help": "[command]",
-    "advisor": "[on|off|handoff|model <id>|max-uses <n>|context-limit <kb>]",
     "add": "<path>…",
     "drop": "[n|name]",
     "export": "[path]",

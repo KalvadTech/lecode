@@ -111,7 +111,7 @@ kind = "glob"   # "glob" (default) or "regex"
 
 Last match wins within a table; deny rules are unbypassable (even in `yolo`),
 and `ask` rules still prompt. Read-class tools (`read`, `grep`, `find_files`,
-`list_dir`, `lsp_diagnostics`, `memory_read`, `memory_search`, `advisor`,
+`list_dir`, `lsp_diagnostics`, `memory_read`, `memory_search`,
 `task`, and Exa/context7/grep.app MCP tools) are the only tools allowed in
 `readonly`. A 3rd identical consecutive call escalates Allow → Ask, the 4th
 is denied (doom-loop guard).
@@ -176,16 +176,6 @@ trouble never blocks the agent.
 
 See [memory.md](memory.md).
 
-## `[advisor]`
-
-| field | default | meaning |
-|---|---|---|
-| `enabled` | `false` | the advisor tool + `/advisor` |
-| `model` | unset | advisor model id (defaults to the main model) |
-| `max_uses` | `5` | per-session call budget |
-| `context_limit_kb` | `32` | conversation context sent along |
-| `mode` | `"model"` | `model` \| `handoff` (ask the human inline) |
-
 ## `[pierre]`
 
 Post-task reviewer: after every completed task, a second model compares the
@@ -210,10 +200,8 @@ Events: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`,
 `SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentEnd`. Hooks can only
 narrow permission verdicts. See [hooks.md](hooks.md).
 
-## `[model_presets]`, `[custom_providers]`
+## `[custom_providers]`
 
-- `[model_presets]` — `alias = "model-id"` shortcuts added to `/models`
-  (`/models-add` writes here).
 - `[custom_providers.<name>]` — extra OpenRouter-compatible providers:
 
 ```toml

@@ -8,7 +8,7 @@ from lecode.config.models import Config
 from lecode.permission import Decision
 from lecode.slash.catalog import BUILTIN_COMMANDS
 
-# -- /model /models /models-add /provider ------------------------------------------
+# -- /model /models ------------------------------------------------------------------
 
 
 async def test_model_shows_current(tmp_path, monkeypatch):
@@ -67,24 +67,6 @@ async def test_models_respects_hidden_models(tmp_path, monkeypatch):
     rendered = out.getvalue()
     assert "x-ai/grok-4" not in rendered
     assert "openai/gpt-5" in rendered
-
-
-async def test_models_add_then_switch(tmp_path, monkeypatch):
-    app, _, out = make_app(tmp_path, monkeypatch, [])
-    await app.handle_command("/models-add local/my-finetune")
-    assert "added model: local/my-finetune" in out.getvalue()
-    await app.handle_command("/model local/my-finetune")
-    assert app.config.llm.model == "local/my-finetune"
-    await app.handle_command("/models-add local/my-finetune")
-    assert "already known: local/my-finetune" in out.getvalue()
-
-
-async def test_provider_shows_resolved_info(tmp_path, monkeypatch):
-    app, _, out = make_app(tmp_path, monkeypatch, [])
-    await app.handle_command("/provider")
-    rendered = out.getvalue()
-    assert "provider: openrouter" in rendered
-    assert "base url: https://openrouter.ai/api/v1" in rendered
 
 
 # -- /thinking /reasoning -------------------------------------------------------------

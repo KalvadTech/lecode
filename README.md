@@ -150,8 +150,6 @@ non-tty `--setup`) · `3` max turns / max loop iterations.
 - **Hooks** — shell commands on lifecycle events (`PreToolUse`,
   `PostToolUse`, `Stop`, …) that return verdicts; they can only narrow
   permissions. `--hooks-test` dry-runs the pipeline.
-- **Advisor** — a second, stronger model the agent consults mid-task for
-  strategy, with a per-session budget — or routed to *you* in handoff mode.
 - **Pierre mode** — when enabled, a second model reviews every finished
   task: it compares your request with the agent's result and tells you
   plainly whether it delivered. `/pierre on|off|model`.

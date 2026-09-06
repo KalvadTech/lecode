@@ -57,7 +57,7 @@ class ToolContext:
     approval_callback: Any | None = None
     read_paths: set[str] = field(default_factory=set)  # files read (edit guard)
     todos: list[dict[str, Any]] = field(default_factory=list)  # todo_write state
-    extras: dict[str, Any] = field(default_factory=dict)  # advisor/memory/MCP later
+    extras: dict[str, Any] = field(default_factory=dict)  # memory/MCP/subagent seams
     #: Live model catalog (modality checks, pricing); ``None`` → empty, fail-open.
     catalog: Any | None = None  # lecode.providers.catalog.Catalog
 

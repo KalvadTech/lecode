@@ -1,7 +1,7 @@
 """Subagent dispatch: run a child agent loop and hand back its final text.
 
 A subagent gets a lean tool registry (everything the parent has except
-``task`` and ``advisor`` — no recursion, no second opinion), a permission
+``task`` — no recursion), a permission
 checker narrowed by the agent's overlay, fresh todos, and its own
 conversation. The parent's provider is reused (``ctx.extras["provider"]``,
 installed by the runner); progress is reported through the
@@ -38,8 +38,8 @@ SUBAGENT_TIMEOUT_S = 300.0
 #: Cap on the final text handed back to the parent (chars).
 SUBAGENT_RESPONSE_CAP = 32 * 1024
 
-#: Tools never handed to a subagent (no recursion, no advisor).
-CHILD_EXCLUDED_TOOLS = frozenset({"task", "advisor"})
+#: Tools never handed to a subagent (no recursion).
+CHILD_EXCLUDED_TOOLS = frozenset({"task"})
 
 #: ``ctx.extras`` keys the subagent machinery reads.
 PROVIDER_EXTRA = "provider"
@@ -73,7 +73,7 @@ class SubagentOutcome:
 
 
 def child_registry(parent: ToolRegistry) -> ToolRegistry:
-    """The parent's tools minus recursion/advisor (hook wrappers ride along)."""
+    """The parent's tools minus recursion (hook wrappers ride along)."""
     tools = [parent.get(name) for name in parent.names() if name not in CHILD_EXCLUDED_TOOLS]
     return ToolRegistry([tool for tool in tools if tool is not None])
 
@@ -128,7 +128,7 @@ async def run_subagent(
     if agent.overlay is not None:
         checker = checker.for_agent(agent.overlay)
     # Fresh extras: the child runner installs its own "conversation" key —
-    # sharing the parent's dict would clobber the parent's advisor seam.
+    # sharing the parent's dict would clobber the parent's seam.
     # read_paths stays shared so child reads feed the parent's edit guard.
     extras: dict[str, Any] = {PROVIDER_EXTRA: provider}
     for key in (HOOKS_EXTRA, MEMORY_EXTRA):

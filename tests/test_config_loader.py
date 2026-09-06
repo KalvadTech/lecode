@@ -47,8 +47,6 @@ def test_defaults_validate_from_empty():
     assert config.mcp.enable_exa is True
     assert config.mcp.enable_context7 is False
     assert config.memory.max_bytes == 32768
-    assert config.advisor.enabled is False
-    assert config.advisor.mode == "model"
     assert config.telemetry.enabled is False
     assert config.telemetry.sentry_dsn is None
     assert config.telemetry.otlp_endpoint is None

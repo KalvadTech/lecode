@@ -72,9 +72,7 @@ def clean_home(tmp_path):
 
 
 async def test_wizard_happy_path_writes_config(cfg_dir, clean_home):
-    session = FakeSession(
-        ["1", "sk-or-test-key", "1", "", "n"]
-    )  # provider, key, model, notifications (default), advisor
+    session = FakeSession(["1", "sk-or-test-key", "1", ""])  # provider, key, model, notif
     path = await run_wizard(session, home=clean_home)
     assert path == cfg_dir / "config.toml"
     raw = tomllib.loads(path.read_text())
@@ -83,17 +81,16 @@ async def test_wizard_happy_path_writes_config(cfg_dir, clean_home):
     assert raw["llm"]["api_key"] == "sk-or-test-key"
     assert "ui" not in raw
     assert raw["notifications"]["enabled"] is True  # empty answer → default yes
-    assert "advisor" not in raw
 
 
 async def test_wizard_config_file_is_owner_only(cfg_dir, clean_home):
-    await run_wizard(FakeSession(["1", "sk-or-key", "1", "y", "n"]), home=clean_home)
+    await run_wizard(FakeSession(["1", "sk-or-key", "1", "y"]), home=clean_home)
     mode = stat.S_IMODE((cfg_dir / "config.toml").stat().st_mode)
     assert mode == 0o600
 
 
 async def test_wizard_custom_provider_asks_base_url(cfg_dir, clean_home):
-    session = FakeSession(["custom", "https://llm.local/v1", "local-key", "2", "n", "n"])
+    session = FakeSession(["custom", "https://llm.local/v1", "local-key", "2", "n"])
     await run_wizard(session, home=clean_home)
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
     assert raw["llm"]["provider"] == "custom"
@@ -102,7 +99,7 @@ async def test_wizard_custom_provider_asks_base_url(cfg_dir, clean_home):
 
 
 async def test_wizard_base_url_validated(cfg_dir, clean_home):
-    session = FakeSession(["2", "ftp://nope", "https://ok.example/v1", "", "1", "", "n"])
+    session = FakeSession(["2", "ftp://nope", "https://ok.example/v1", "", "1", ""])
     await run_wizard(session, home=clean_home)
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
     assert raw["llm"]["base_url"] == "https://ok.example/v1"
@@ -110,20 +107,14 @@ async def test_wizard_base_url_validated(cfg_dir, clean_home):
 
 
 async def test_wizard_key_required_loops_until_nonempty(cfg_dir, clean_home):
-    session = FakeSession(["openrouter", "", "", "sk-live", "1", "", "n"])
+    session = FakeSession(["openrouter", "", "", "sk-live", "1", ""])
     await run_wizard(session, home=clean_home)
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
     assert raw["llm"]["api_key"] == "sk-live"
 
 
-async def test_wizard_advisor_opt_in(cfg_dir, clean_home):
-    await run_wizard(FakeSession(["1", "sk-or-key", "1", "", "y"]), home=clean_home)
-    raw = tomllib.loads((cfg_dir / "config.toml").read_text())
-    assert raw["advisor"] == {"enabled": True, "model": "deepseek/deepseek-v4-flash-0731"}
-
-
 async def test_wizard_notifications_off(cfg_dir, clean_home):
-    await run_wizard(FakeSession(["1", "sk-or-key", "1", "n", "n"]), home=clean_home)
+    await run_wizard(FakeSession(["1", "sk-or-key", "1", "n"]), home=clean_home)
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
     assert raw["notifications"]["enabled"] is False
 
@@ -136,7 +127,6 @@ def test_build_config_minimal_shape():
             "api_key": "k",
             "model": "openai/gpt-5-mini",
             "notifications": True,
-            "advisor": False,
         }
     )
     assert raw == {
@@ -393,8 +383,8 @@ async def test_wizard_import_step_prefills_answers(cfg_dir, tmp_path, capsys):
         {"defaultProvider": "openrouter", "defaultModel": "z-ai/glm-4.7"},
     )
     _write(home / ".pi" / "agent" / "auth.json", {"openrouter": {"key": "sk-or-imported"}})
-    # import pick, provider (default), key (default), model (default), notif, advisor
-    session = FakeSession(["1", "", "", "", "", "n"])
+    # import pick, provider (default), key (default), model (default), notif
+    session = FakeSession(["1", "", "", "", ""])
     answers = await gather_answers(session, home=home)
     out = capsys.readouterr().out
     assert "imported from pi" in out

@@ -207,18 +207,6 @@ class MemoryConfig(BaseModel):
     max_bytes: int = 32768
 
 
-class AdvisorConfig(BaseModel):
-    """``[advisor]`` — second-opinion model."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    enabled: bool = False
-    model: str | None = None
-    max_uses: int = 5
-    context_limit_kb: int = 32
-    mode: Literal["model", "handoff"] = "model"
-
-
 class PierreConfig(BaseModel):
     """``[pierre]`` — post-task reviewer: a second model compares the request
     with the result and gives feedback after every completed task."""
@@ -282,9 +270,7 @@ class Config(BaseModel):
     mcp: McpConfig = Field(default_factory=McpConfig)
     lsp: LspConfig = Field(default_factory=LspConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
-    advisor: AdvisorConfig = Field(default_factory=AdvisorConfig)
     pierre: PierreConfig = Field(default_factory=PierreConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     hooks: dict[str, list[str]] = Field(default_factory=dict)
-    model_presets: dict[str, str] = Field(default_factory=dict)
     custom_providers: dict[str, CustomProvider] = Field(default_factory=dict)

@@ -2,7 +2,7 @@
 
 Steps: import (pi / opencode / skip, only when a source config exists) →
 provider (openrouter / custom base-url) → API key → default model →
-notifications → advisor opt-in. Imported values prefill their questions.
+notifications. Imported values prefill their questions.
 Writes TOML to ``<config_dir>/config.toml`` with **0600 permissions** because
 it contains the API key (documented in the README; an env var stays the
 cleaner option).
@@ -288,8 +288,6 @@ def build_config(answers: dict[str, Any]) -> dict[str, Any]:
         "llm": llm,
         "notifications": {"enabled": answers["notifications"]},
     }
-    if answers["advisor"]:
-        config["advisor"] = {"enabled": True, "model": answers["model"]}
     return config
 
 
@@ -368,16 +366,12 @@ async def gather_answers(session: PromptSession, home: Path | None = None) -> di
             if not model:
                 print("error: a model id is required")
     notifications = await _ask_yes_no(session, "Audio notifications?", default=True)
-    advisor = await _ask_yes_no(
-        session, "Enable the advisor (second-opinion model)?", default=False
-    )
     return {
         "provider": provider,
         "base_url": base_url,
         "api_key": api_key,
         "model": model,
         "notifications": notifications,
-        "advisor": advisor,
     }
 
 

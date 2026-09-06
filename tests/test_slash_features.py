@@ -170,3 +170,75 @@ async def test_editsys_unchanged_is_noop(tmp_path, monkeypatch):
     assert app.runtime.system_prompt == original
     assert app.config.llm.system_prompt.custom is None
     assert "unchanged" in out.getvalue()
+
+
+# -- /doctor ---------------------------------------------------------------------------
+
+
+def _patch_doctor_provider(monkeypatch, origin="live", count=2):
+    """Patch the deferred fetch_catalog import used by /doctor."""
+    from tests.fakes import sample_catalog
+
+    import lecode.cli as cli
+    from lecode.providers.live import LoadedCatalog
+
+    monkeypatch.setattr(
+        cli,
+        "fetch_catalog",
+        lambda config, api_key=None: LoadedCatalog(sample_catalog(), origin, count),
+    )
+
+
+async def test_doctor_all_sections(tmp_path, monkeypatch):
+    """Every section renders with a mark; a healthy setup ends in 'all good'."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    _patch_doctor_provider(monkeypatch)
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    await app.handle_command("/doctor")
+    rendered = out.getvalue()
+    for needle in (
+        "fd:",
+        "rg:",
+        "rtk:",
+        "config:",
+        "provider:",
+        "model:",
+        "connectivity: reachable — 2 models",
+        "mcp:",
+        "session:",
+        "memory:",
+        "hooks:",
+        "lsp:",
+        "telemetry:",
+        "permissions:",
+        "tools:",
+    ):
+        assert needle in rendered, f"missing {needle!r}:\n{rendered}"
+    # no API key in the test env → one warning, not "all good"
+    assert "doctor: 1 issue(s)" in rendered
+
+
+async def test_doctor_missing_binary_fails(tmp_path, monkeypatch):
+    import shutil
+
+    _patch_doctor_provider(monkeypatch)
+    real_which = shutil.which
+
+    def which(name, path=None):
+        return None if name == "fd" else real_which(name, path=path)
+
+    monkeypatch.setattr(shutil, "which", which)
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    await app.handle_command("/doctor")
+    rendered = out.getvalue()
+    assert "✗ fd: MISSING" in rendered
+    assert "install:" in rendered
+
+
+async def test_doctor_unreachable_provider(tmp_path, monkeypatch):
+    _patch_doctor_provider(monkeypatch, origin="empty", count=0)
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    await app.handle_command("/doctor")
+    rendered = out.getvalue()
+    assert "✗ connectivity: catalog fetch failed" in rendered

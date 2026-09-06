@@ -236,7 +236,7 @@ class ChatClient:
         model: str,
         **kwargs: Any,
     ) -> CompletedMessage:
-        """Non-streaming helper (advisor/summarization): collects a stream."""
+        """Non-streaming helper (pierre/summarization): collects a stream."""
         return await collect(self.stream_chat(messages, model, **kwargs))
 
     async def list_models(self) -> list[dict[str, Any]]:

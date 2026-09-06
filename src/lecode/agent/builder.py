@@ -88,12 +88,9 @@ def build_runtime(
     )
 
     tools = core_tools()
-    # The advisor and task tools are always registered; a disabled advisor
-    # reports how to enable, and task needs no configuration at all.
-    from lecode.agent.tools import advisor as advisor_tool
+    # The task tool is always registered; it needs no configuration at all.
     from lecode.agent.tools import task as task_tool
 
-    tools.append(advisor_tool.make_tool())
     tools.append(task_tool.make_tool())
     if config.memory.enabled:
         memory_store = MemoryStore(memory_root(cwd), max_bytes=config.memory.max_bytes)

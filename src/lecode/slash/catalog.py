@@ -26,8 +26,6 @@ BUILTIN_COMMANDS: list[tuple[str, str]] = [
     ("compress", "Compress tool outputs in context"),
     ("model", "Switch the model"),
     ("models", "List available models"),
-    ("models-add", "Add a model preset"),
-    ("provider", "Switch the provider"),
     ("thinking", "Set thinking level"),
     ("reasoning", "Toggle reasoning display"),
     ("permissions", "Show permission rules"),
@@ -59,8 +57,8 @@ BUILTIN_COMMANDS: list[tuple[str, str]] = [
     ("models-subagent", "List subagent models"),
     ("notifications", "Configure audio notifications"),
     ("memory", "Inspect/edit persistent memory"),
-    ("advisor", "Ask the advisor model"),
     ("pierre", "Post-task review by a second model"),
     ("hooks", "Show configured hooks"),
     ("agents", "List agents"),
+    ("doctor", "Health check: config, deps, provider, connectivity"),
 ]

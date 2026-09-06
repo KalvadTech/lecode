@@ -1,7 +1,7 @@
 """The ``task`` tool: dispatch a subagent on a self-contained prompt.
 
-The subagent runs a child agent loop with a lean tool registry (no ``task``
-/ ``advisor``) under the agent's permission overlay; its final text is the
+The subagent runs a child agent loop with a lean tool registry (no ``task``)
+under the agent's permission overlay; its final text is the
 tool result. Calls are concurrency-safe — parallel ``task`` calls in one
 turn run their children in parallel.
 
