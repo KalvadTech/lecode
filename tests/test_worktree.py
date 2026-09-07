@@ -1,7 +1,8 @@
 """Tests for git worktree isolation: the manager, the commands, --worktree.
 
 All git operations happen in throwaway repos under tmp_path; commits use
-``-c user.email/name`` flags so no global git config is needed.
+``-c user.email/name`` flags and repos get a local identity so no global
+git config is needed.
 """
 
 from __future__ import annotations
@@ -37,6 +38,8 @@ async def make_repo(path):
     """A git repo at ``path`` with one commit on ``main``."""
     path.mkdir(parents=True, exist_ok=True)
     await git(path, "init", "-b", "main")
+    await git(path, "config", "user.email", "t@example.com")
+    await git(path, "config", "user.name", "test")
     (path / "file.txt").write_text("base\n", encoding="utf-8")
     await git(path, "add", ".")
     await git(path, *_COMMIT, "-m", "init")
@@ -51,6 +54,8 @@ def git_sync(cwd, *args):
 def make_repo_sync(path):
     path.mkdir(parents=True, exist_ok=True)
     git_sync(path, "init", "-b", "main")
+    git_sync(path, "config", "user.email", "t@example.com")
+    git_sync(path, "config", "user.name", "test")
     (path / "file.txt").write_text("base\n", encoding="utf-8")
     git_sync(path, "add", ".")
     git_sync(path, *_COMMIT, "-m", "init")
