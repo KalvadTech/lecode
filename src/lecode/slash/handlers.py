@@ -534,8 +534,17 @@ async def cmd_pierre(app: TuiApp, args: list[str]) -> None:
         return
     sub = args[0]
     if sub == "on":
+        if not cfg.model:
+            app.feed.error("pierre: no reviewer model set — pick one: /pierre model <id>")
+            return
+        if cfg.model == app.config.llm.model:
+            app.feed.error(
+                f"pierre: the reviewer must differ from the main model ({cfg.model})"
+                " — pick another: /pierre model <id>"
+            )
+            return
         cfg.enabled = True
-        app.feed.info("pierre: on — every finished task gets reviewed")
+        app.feed.info(f"pierre: on — every finished task gets reviewed by {cfg.model}")
     elif sub == "off":
         cfg.enabled = False
         app.feed.info("pierre: off")

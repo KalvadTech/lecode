@@ -184,7 +184,7 @@ request with the result and gives feedback in the feed.
 | field | default | meaning |
 |---|---|---|
 | `enabled` | `false` | review every finished task + `/pierre` |
-| `model` | unset | reviewer model id (defaults to the main model) |
+| `model` | unset | reviewer model id; `/pierre on` requires one, different from the main model |
 
 ## `[hooks]`
 

@@ -156,15 +156,30 @@ async def test_pierre_command_status_on_off_model(tmp_path, monkeypatch):
     app, _, out = make_app(tmp_path, monkeypatch, [])
     await app.handle_command("/pierre")
     assert "pierre: off" in out.getvalue()
-    await app.handle_command("/pierre on")
-    assert app.config.pierre.enabled is True
     await app.handle_command("/pierre model z-ai/glm-5.2")
     assert app.config.pierre.model == "z-ai/glm-5.2"
+    await app.handle_command("/pierre on")
+    assert app.config.pierre.enabled is True
     await app.handle_command("/pierre")
     text = out.getvalue()
     assert "pierre: on" in text and "z-ai/glm-5.2" in text
     await app.handle_command("/pierre off")
     assert app.config.pierre.enabled is False
+
+
+async def test_pierre_on_refused_without_model(tmp_path, monkeypatch):
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    await app.handle_command("/pierre on")
+    assert app.config.pierre.enabled is False
+    assert "/pierre model <id>" in out.getvalue()
+
+
+async def test_pierre_on_refused_when_reviewer_is_main_model(tmp_path, monkeypatch):
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    app.config.pierre.model = app.config.llm.model
+    await app.handle_command("/pierre on")
+    assert app.config.pierre.enabled is False
+    assert "must differ from the main model" in out.getvalue()
 
 
 async def test_pierre_feedback_rendered_after_stats(tmp_path, monkeypatch):
