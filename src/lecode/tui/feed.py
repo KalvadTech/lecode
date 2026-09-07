@@ -183,13 +183,16 @@ class Feed:
         self._console.print(Text(line + self._suffix(), style=self._theme.tool))
 
     def tool_result(self, name: str, content: str, is_error: bool = False) -> None:
-        """Render a tool result head with ``… (N more lines)`` elision."""
+        """Render a tool result head with ``… (N more lines)`` elision.
+
+        The timestamp/metrics marker goes on its own line after the output,
+        so multi-line output reads top-down and the bookkeeping lands last.
+        """
         lines = content.splitlines()
         shown = lines[:TOOL_RESULT_HEAD_LINES]
         if len(lines) > TOOL_RESULT_HEAD_LINES:
             shown.append(f"… ({len(lines) - TOOL_RESULT_HEAD_LINES} more lines)")
-        if shown:
-            shown[0] = f"[{self._stamp()}] {shown[0]}{self._suffix()}"
+        shown.append(f"[{self._stamp()}]{self._suffix()}")
         style = self._theme.error if is_error else self._theme.muted
         self._console.print(Text("\n".join(shown), style=style))
 

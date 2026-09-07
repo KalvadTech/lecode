@@ -53,10 +53,13 @@ def test_lines_carry_timestamps(theme):
         cost_usd=0.001,
         session_cost_usd=0.002,
     )
-    stamped = [ln for ln in out.getvalue().splitlines() if ln.startswith("[")]
-    # tool call, tool result, info, error, turn stats (not the user echo)
+    lines = out.getvalue().splitlines()
+    stamped = [ln for ln in lines if ln.startswith("[")]
+    # tool call, tool result marker, info, error, turn stats (not the user echo)
     assert len(stamped) == 5
     assert all(len(ln) >= 10 and ln[1:3].isdigit() and ln[3] == ":" for ln in stamped)
+    # the tool result marker is its own line after the output
+    assert lines[lines.index("ok") + 1].startswith("[")
 
 
 def test_metrics_suffix_on_action_lines(theme):
