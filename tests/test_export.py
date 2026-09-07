@@ -149,7 +149,7 @@ def test_default_out_path(tmp_path, monkeypatch):
     store, session = make_session(tmp_path, monkeypatch)
     populate(store, session)
     path = export_html(session, store)
-    assert path == tmp_path / "demo.html"
+    assert path == tmp_path / "cfg" / "exports" / "demo.html"
     assert path.is_file()
 
 
@@ -200,7 +200,7 @@ async def test_export_command_writes_file(tmp_path, monkeypatch):
     await app._submit("hello")
     await app._turn_task
     await app.handle_command("/export")
-    path = tmp_path / "test-session.html"
+    path = tmp_path / "cfg" / "exports" / "test-session.html"
     assert path.is_file()
     assert "exported:" in out.getvalue()
     assert "hello" in path.read_text(encoding="utf-8")

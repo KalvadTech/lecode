@@ -108,8 +108,9 @@ def _render_message(message: dict[str, Any]) -> str:
 def export_html(session: Session, store: SessionStore, out_path: Path | str | None = None) -> Path:
     """Write the session as a standalone HTML file; returns the path.
 
-    Default output: ``<session cwd>/<session-name>.html``.
+    Default output: ``<config_dir>/exports/<session-name>.html``.
     """
+    from lecode.config.loader import config_dir
     stats = session_stats(store, session)
     body = "\n".join(_render_message(r.message) for r in store.load_messages(session))
     document = _template().safe_substitute(
@@ -129,7 +130,7 @@ def export_html(session: Session, store: SessionStore, out_path: Path | str | No
     path = (
         Path(out_path)
         if out_path is not None
-        else Path(session.meta.cwd) / f"{_safe_filename(session.name)}.html"
+        else config_dir() / "exports" / f"{_safe_filename(session.name)}.html"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(document, encoding="utf-8")
