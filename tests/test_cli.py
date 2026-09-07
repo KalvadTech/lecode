@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from typer.testing import CliRunner
 
 from lecode import __version__
@@ -27,7 +29,8 @@ def test_help_flag_short():
     for flag in ("-h", "--help"):
         result = runner.invoke(app, [flag])
         assert result.exit_code == EXIT_OK
-        assert "Usage: lecode" in result.output
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert "Usage: lecode" in plain
 
 
 def test_startup_fails_when_binaries_missing(monkeypatch):
