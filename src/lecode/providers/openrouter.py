@@ -17,7 +17,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 #: App-identity headers sent on every OpenRouter request.
 APP_HEADERS: dict[str, str] = {
-    "HTTP-Referer": "https://github.com/wowi42/lecode",
+    "HTTP-Referer": "https://github.com/KalvadTech/lecode",
     "X-Title": "lecode",
 }
 

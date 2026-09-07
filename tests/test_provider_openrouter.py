@@ -35,7 +35,7 @@ async def test_app_identity_headers_sent():
     async with openrouter_client(api_key="sk-or-test") as client:
         await collect(client.stream_chat([{"role": "user", "content": "hi"}], model="m"))
     headers = route.calls.last.request.headers
-    assert headers["HTTP-Referer"] == "https://github.com/wowi42/lecode"
+    assert headers["HTTP-Referer"] == "https://github.com/KalvadTech/lecode"
     assert headers["X-Title"] == "lecode"
     assert headers["Authorization"] == "Bearer sk-or-test"
 

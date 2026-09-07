@@ -74,7 +74,7 @@ Targets macOS and Linux; Windows is best-effort.
 ## Install
 
 ```sh
-uv tool install --force git+https://github.com/wowi42/lecode
+uv tool install --force git+https://github.com/KalvadTech/lecode
 ```
 
 (If the `lecode` name is ever taken on PyPI, the package is also published
