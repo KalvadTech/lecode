@@ -111,6 +111,7 @@ def export_html(session: Session, store: SessionStore, out_path: Path | str | No
     Default output: ``<config_dir>/exports/<session-name>.html``.
     """
     from lecode.config.loader import config_dir
+
     stats = session_stats(store, session)
     body = "\n".join(_render_message(r.message) for r in store.load_messages(session))
     document = _template().safe_substitute(
