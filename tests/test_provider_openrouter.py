@@ -55,6 +55,7 @@ async def test_fetch_remote_catalog_maps_fields():
             {
                 "id": "openai/gpt-5",
                 "name": "OpenAI: GPT-5",
+                "created": 1750000000,
                 "context_length": 400000,
                 "pricing": {"prompt": "0.00000125", "completion": "0.00001"},
                 "architecture": {
@@ -86,6 +87,7 @@ async def test_fetch_remote_catalog_maps_fields():
 
     gpt5 = entries[0]
     assert gpt5.name == "OpenAI: GPT-5"
+    assert gpt5.created == 1750000000
     assert gpt5.context_window == 400000
     assert gpt5.max_output == 128000
     # per-token -> per-million conversion
@@ -97,6 +99,7 @@ async def test_fetch_remote_catalog_maps_fields():
 
     sparse = entries[1]
     assert sparse.name == "some/text-only"
+    assert sparse.created is None
     assert sparse.pricing.prompt == 0.0
     assert sparse.modalities.input == ["text"]
     assert sparse.supports_tools is True

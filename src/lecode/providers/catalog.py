@@ -33,6 +33,8 @@ class ModelInfo(BaseModel):
     modalities: Modalities
     supports_tools: bool = True
     supports_reasoning: bool = False
+    #: Release date as a unix timestamp (OpenRouter's ``created``); None if unknown.
+    created: int | None = None
 
 
 class ModelNotFoundError(KeyError):

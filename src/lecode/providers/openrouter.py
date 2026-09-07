@@ -72,6 +72,10 @@ def map_remote_model(item: dict[str, Any]) -> ModelInfo | None:
     architecture = item.get("architecture") or {}
     supported = item.get("supported_parameters") or []
     top_provider = item.get("top_provider") or {}
+    try:
+        created = int(item["created"]) if item.get("created") else None
+    except (TypeError, ValueError):
+        created = None
     return ModelInfo(
         id=model_id,
         name=item.get("name") or model_id,
@@ -87,6 +91,7 @@ def map_remote_model(item: dict[str, Any]) -> ModelInfo | None:
         ),
         supports_tools="tools" in supported if supported else True,
         supports_reasoning="reasoning" in supported,
+        created=created,
     )
 
 

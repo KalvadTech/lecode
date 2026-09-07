@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import stat
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -183,6 +184,21 @@ def _import_summary(answers: dict[str, str]) -> str:
     return " · ".join(parts)
 
 
+#: The model menu only lists models released in the last 3 months.
+_MODEL_MENU_MAX_AGE_S = 90 * 24 * 60 * 60
+
+
+def _recent_models(details: dict[str, ModelInfo]) -> dict[str, ModelInfo]:
+    """Models released in the last 3 months; unknown release dates are kept.
+
+    Falls back to the full list when nothing qualifies, so a stale or
+    dateless catalog never dead-ends the menu.
+    """
+    cutoff = time.time() - _MODEL_MENU_MAX_AGE_S
+    recent = {k: v for k, v in details.items() if v.created is None or v.created >= cutoff}
+    return recent or details
+
+
 def _model_detail(model_id: str, details: dict[str, ModelInfo]) -> str:
     """Menu annotation for a model pick: context size and per-million pricing."""
     info = details.get(model_id)
@@ -345,13 +361,19 @@ async def gather_answers(session: PromptSession, home: Path | None = None) -> di
     model_default = imported.get("model")
     details = await _live_model_details(provider, base_url, api_key)
     if details:
-        # The full provider list, sorted, annotated with ctx size and pricing.
-        model_choices = sorted(details)
-        if model_default and model_default not in details:
+        # The provider list, sorted, annotated with ctx size and pricing.
+        recent = _recent_models(details)
+        if len(recent) < len(details):
+            print(
+                f"showing only models from the last 3 months ({len(recent)} of "
+                f"{len(details)}) — the full list is at https://openrouter.ai/models"
+            )
+        model_choices = sorted(recent)
+        if model_default and model_default not in recent:
             model_choices.insert(0, model_default)
         model = await _ask_choice(
             session,
-            f"Default model ({len(details)} from the provider):",
+            f"Default model ({len(recent)} from the provider):",
             model_choices,
             describe=lambda m: _model_detail(m, details),
             default=model_default,

@@ -151,6 +151,76 @@ async def test_model_menu_accepts_a_unique_substring(cfg_dir, clean_home):
     assert answers["model"] == "z-ai/glm-5.2"
 
 
+async def test_model_menu_filters_to_recent_models(cfg_dir, clean_home, monkeypatch, capsys):
+    """Only models from the last 3 months are listed, with a pointer to the rest."""
+    import time
+
+    from lecode.providers.catalog import Modalities, ModelInfo, Pricing
+
+    now = int(time.time())
+
+    def entry(model_id, created):
+        return ModelInfo(
+            id=model_id,
+            name=model_id,
+            context_window=128_000,
+            pricing=Pricing(prompt=0.0, completion=0.0),
+            modalities=Modalities(input=["text"], output=["text"]),
+            created=created,
+        )
+
+    entries = {
+        "a-new/model": entry("a-new/model", now - 10 * 24 * 3600),
+        "old/model": entry("old/model", now - 200 * 24 * 3600),
+        "nodate/model": entry("nodate/model", None),
+    }
+
+    async def fake(provider: str, base_url: str, api_key: str):
+        return entries
+
+    monkeypatch.setattr(setup_wizard, "_live_model_details", fake)
+    session = FakeSession(["1", "sk-or-key", "1", "n"])
+    answers = await gather_answers(session, home=clean_home)
+    menu = capsys.readouterr().out
+    assert "a-new/model" in menu
+    assert "nodate/model" in menu  # unknown release date: kept
+    assert "old/model" not in menu
+    assert "https://openrouter.ai/models" in menu
+    assert answers["model"] == "a-new/model"  # sorted first among the recent
+
+
+async def test_model_menu_keeps_full_list_when_nothing_is_recent(
+    cfg_dir, clean_home, monkeypatch, capsys
+):
+    """A catalog of only old models must not dead-end the menu."""
+    import time
+
+    from lecode.providers.catalog import Modalities, ModelInfo, Pricing
+
+    old = int(time.time()) - 200 * 24 * 3600
+    entries = {
+        "old/model": ModelInfo(
+            id="old/model",
+            name="old/model",
+            context_window=128_000,
+            pricing=Pricing(prompt=0.0, completion=0.0),
+            modalities=Modalities(input=["text"], output=["text"]),
+            created=old,
+        )
+    }
+
+    async def fake(provider: str, base_url: str, api_key: str):
+        return entries
+
+    monkeypatch.setattr(setup_wizard, "_live_model_details", fake)
+    session = FakeSession(["1", "sk-or-key", "1", "n"])
+    answers = await gather_answers(session, home=clean_home)
+    menu = capsys.readouterr().out
+    assert "old/model" in menu
+    assert "openrouter.ai/models" not in menu
+    assert answers["model"] == "old/model"
+
+
 async def test_model_step_falls_back_to_free_text(cfg_dir, clean_home, monkeypatch):
     """When the provider list can't be fetched, the model id is typed."""
 
