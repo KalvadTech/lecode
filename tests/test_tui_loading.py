@@ -323,7 +323,6 @@ def test_interactive_startup_prints_loading_screen(env, monkeypatch, capsys):
     """run_interactive prints the banner and step lines before the chat."""
     import lecode.cli as cli
 
-    monkeypatch.setattr(cli, "prompt_session_name", _fake_name_prompt)
     monkeypatch.setattr(cli, "build_provider", lambda config, api_key=None: object())
     monkeypatch.setattr(cli, "TuiApp", _FakeTui)
     monkeypatch.setattr(cli, "_run_tui", _fake_run_tui)
@@ -335,10 +334,6 @@ def test_interactive_startup_prints_loading_screen(env, monkeypatch, capsys):
     assert "by wowi42" in out
     assert "config" in out and "provider" in out and "session" in out
     assert out.index("| | ___") < out.index("provider")  # banner before the steps
-
-
-async def _fake_name_prompt(store):
-    return "loading-test"
 
 
 class _FakeTui:
@@ -358,7 +353,6 @@ def test_catalog_fetch_runs_in_background(env, monkeypatch):
     from lecode.providers.live import LoadedCatalog
 
     events: list[str] = []
-    monkeypatch.setattr(cli, "prompt_session_name", _fake_name_prompt)
     monkeypatch.setattr(cli, "build_provider", lambda config, api_key=None: object())
 
     class FakeTui:

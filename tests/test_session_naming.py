@@ -6,7 +6,13 @@ import re
 
 import pytest
 
-from lecode.session import SessionStore, auto_name, unique_name, validate_name
+from lecode.session import (
+    SessionStore,
+    auto_name,
+    sanitize_title,
+    unique_name,
+    validate_name,
+)
 
 
 @pytest.fixture
@@ -67,3 +73,24 @@ def test_auto_name_format():
 def test_auto_name_collision_suffixes(store):
     store.create(auto_name(), cwd="/tmp")
     assert auto_name(store) == auto_name() + "-2"
+
+
+def test_sanitize_title_keeps_plain_titles():
+    assert sanitize_title("Fix login bug") == "Fix login bug"
+
+
+def test_sanitize_title_takes_first_line_and_strips():
+    assert sanitize_title("Fix login bug.\n\nlonger explanation here.") == "Fix login bug"
+    assert sanitize_title('  "Session titles"  ') == "Session titles"
+
+
+def test_sanitize_title_truncates_to_max_length():
+    title = sanitize_title("A long and winding title " * 5)
+    assert title is not None
+    assert len(title) <= 64
+    assert validate_name(title or "") is None
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "\n\n", ".hidden", "bad/title", "tab\there"])
+def test_sanitize_title_rejects_unusable_output(raw):
+    assert sanitize_title(raw) is None

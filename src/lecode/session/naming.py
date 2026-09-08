@@ -60,3 +60,22 @@ def auto_name(store: SessionStore | None = None) -> str:
     if store is None:
         return base
     return unique_name(base, store)
+
+
+def sanitize_title(raw: str | None) -> str | None:
+    """Coerce raw LLM output into a usable session name, or ``None``.
+
+    Takes the first line, strips surrounding whitespace and quotes, cuts at
+    the name length cap, then :func:`validate_name`; unusable output (empty,
+    leading dot, separators, control chars) yields ``None`` so callers keep
+    the fallback name.
+    """
+    if not raw:
+        return None
+    first = next((line.strip() for line in raw.splitlines() if line.strip()), "")
+    text = first.strip("'\"").rstrip(".")
+    if len(text) > MAX_NAME_LENGTH:
+        text = text[:MAX_NAME_LENGTH].strip()
+    if validate_name(text) is not None:
+        return None
+    return text

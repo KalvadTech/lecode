@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lecode.session.naming import auto_name, unique_name, validate_name
+from lecode.session.naming import auto_name, sanitize_title, unique_name, validate_name
 from lecode.session.storage import (
     AmbiguousSessionError,
     Session,
@@ -20,6 +20,7 @@ __all__ = [
     "SessionNotFoundError",
     "SessionStore",
     "auto_name",
+    "sanitize_title",
     "unique_name",
     "validate_name",
 ]

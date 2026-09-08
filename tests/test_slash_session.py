@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from tests.test_tui_app import make_app, make_blocking_app, wait_for
 
 from lecode.session.model import EventRecord
@@ -32,6 +34,7 @@ async def test_new_with_name_switches_session(tmp_path, monkeypatch):
     await app.handle_command("/new second-session")
     assert app.session.name == "second-session"
     assert app.session.id != old_id
+    assert app.session.auto_title is False  # an explicit name is never AI-titled
     assert app.runner.session is app.session
     assert app.runtime.ctx.session is app.session
     assert app.status.session_name == "second-session"
@@ -52,19 +55,16 @@ async def test_new_invalid_name_errors(tmp_path, monkeypatch):
     assert app.session.name == "test-session"
 
 
-async def test_new_without_name_prompts(tmp_path, monkeypatch):
-    app, _, _ = make_app(tmp_path, monkeypatch, [])
-    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _fake_name_prompt("prompted"))
-    await app.handle_command("/new")
-    assert app.session.name == "prompted"
-
-
-async def test_new_prompt_aborted_keeps_session(tmp_path, monkeypatch):
+async def test_new_without_name_auto_names(tmp_path, monkeypatch):
+    """Bare /new starts immediately: timestamp name, AI title from the first
+    message (no name prompt)."""
     app, _, out = make_app(tmp_path, monkeypatch, [])
-    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _fake_name_prompt(None))
+    old_id = app.session.id
     await app.handle_command("/new")
-    assert app.session.name == "test-session"
-    assert "cancelled" in out.getvalue()
+    assert re.fullmatch(r"session-\d{8}-\d{6}", app.session.name)
+    assert app.session.id != old_id
+    assert app.session.auto_title is True
+    assert "new session:" in out.getvalue()
 
 
 async def test_new_refused_while_turn_runs(tmp_path, monkeypatch):

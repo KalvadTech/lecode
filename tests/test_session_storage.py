@@ -114,6 +114,22 @@ def test_resolve_ambiguous_prefix_raises(store):
     assert b.id != a.id
 
 
+def test_list_sessions_uses_latest_rename(store, session):
+    store.append_event(session, "rename", {"name": "first-take"})
+    store.append_event(session, "rename", {"name": "final-name"})
+    metas = store.list_sessions()
+    assert metas[0].name == "final-name"
+    # the id/cwd survive the rename; only the name changed
+    assert metas[0].id == session.id
+
+
+def test_resolve_uses_renamed_name(store, session):
+    store.append_event(session, "rename", {"name": "final-name"})
+    assert store.resolve("final-name").id == session.id
+    with pytest.raises(SessionNotFoundError):
+        store.resolve("demo")
+
+
 def test_list_sessions_scoped_to_folder(store):
     store.create("here", cwd="/tmp/here")
     store.create("there", cwd="/tmp/there")

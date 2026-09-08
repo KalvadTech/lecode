@@ -4,8 +4,9 @@ Scope: ``--version``, the startup dependency check (fd / rg / rtk), headless
 mode (``-p/--prompt``: auto-approved tools, auto-named session, final
 response on stdout, token/cost summary on stderr, exit codes 0 done /
 1 error / 2 startup / 3 max turns), and the interactive TUI (default when
-no ``-p`` is given): session-name prompt → session on disk → chat, with
-``-r/--resume`` and ``-c/--continue`` reopening existing sessions.
+no ``-p`` is given): session on disk immediately (timestamp-named, AI-titled
+from the first message, or ``--name``), then chat, with ``-r/--resume`` and
+``-c/--continue`` reopening existing sessions.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ from lecode.providers.catalog import Catalog
 from lecode.providers.live import LoadedCatalog, load_catalog
 from lecode.providers.openai_compat import ChatClient
 from lecode.providers.types import ChatMessage
-from lecode.session.naming import auto_name
+from lecode.session.naming import auto_name, unique_name, validate_name
 from lecode.session.storage import (
     AmbiguousSessionError,
     SessionInUseError,
@@ -57,7 +58,6 @@ from lecode.session.storage import (
 from lecode.setup_wizard import offer_first_run_setup, run_wizard
 from lecode.telemetry import init_telemetry, shutdown_telemetry
 from lecode.tui.app import TuiApp
-from lecode.tui.name_prompt import prompt_session_name
 
 #: Exit codes (headless mode uses the same taxonomy).
 EXIT_OK = 0
@@ -587,15 +587,16 @@ def run_interactive(
     continue_last: bool = False,
     no_color: bool = False,
     worktree: str | None = None,
+    name: str | None = None,
 ) -> int:
     """Interactive TUI path: banner → progressive load report → chat.
 
     Startup order (locked): dependency check (done by the caller) → ASCII
     banner (printed immediately) → first-run setup offer (no config + tty)
-    → config load → session-name prompt. Ctrl-C/Ctrl-D at the prompt exits
-    0 before any session file is created. Each subsystem prints its loading
-    line as it finishes. ``-r/--resume <ref>`` / ``-c/--continue`` reopen an
-    existing session and keep its name (no prompt).
+    → config load → session on disk. ``--name`` names the session up front;
+    without it the session starts under a timestamp name and the TUI titles
+    it from the first message. ``-r/--resume <ref>`` / ``-c/--continue``
+    reopen an existing session and keep its name.
     """
     from rich.console import Console
 
@@ -668,13 +669,10 @@ def run_interactive(
             return EXIT_STARTUP
         session = store.open(meta.id)
     else:
-        try:
-            name = asyncio.run(prompt_session_name(store))
-        except KeyboardInterrupt:
-            return EXIT_OK
-        if name is None:
-            return EXIT_OK
-        session = store.create(name, cwd, model=config.llm.model)
+        if name is not None:
+            session = store.create(unique_name(name, store), cwd, model=config.llm.model)
+        else:
+            session = store.create(auto_name(store), cwd, model=config.llm.model, auto_title=True)
 
     # One live lecode per session: refuse to attach when another process
     # holds the session lock (fail fast, before any network startup work).
@@ -915,6 +913,14 @@ def callback(
         str | None,
         typer.Option("--chain", help="Run a brainstorm→plan→code→review chain on TOPIC."),
     ] = None,
+    name: Annotated[
+        str | None,
+        typer.Option(
+            "--name",
+            help="Name the session up front (interactive mode). "
+            "Without it the session is titled from your first message.",
+        ),
+    ] = None,
 ) -> None:
     """lecode — minimalist terminal AI coding agent."""
     if setup:
@@ -925,6 +931,23 @@ def callback(
     if sum(x is not None for x in (prompt, loop, chain)) > 1:
         typer.echo("error: --prompt, --loop and --chain are mutually exclusive", err=True)
         raise typer.Exit(EXIT_STARTUP)
+    if name is not None:
+        if (error := validate_name(name)) is not None:
+            typer.echo(f"error: invalid session name: {error}", err=True)
+            raise typer.Exit(EXIT_STARTUP)
+        if (
+            prompt is not None
+            or loop is not None
+            or chain is not None
+            or resume is not None
+            or continue_last
+        ):
+            typer.echo(
+                "error: --name cannot be combined with --prompt, --loop, --chain, "
+                "--resume or --continue",
+                err=True,
+            )
+            raise typer.Exit(EXIT_STARTUP)
     if loop is not None:
         raise typer.Exit(
             run_loop_mode(
@@ -971,6 +994,7 @@ def callback(
                 continue_last=continue_last,
                 no_color=no_color,
                 worktree=worktree,
+                name=name,
             )
         )
     if prompt == _STDIN_MARKER:
