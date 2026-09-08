@@ -8,20 +8,30 @@ completion menu below the input and Escape dismisses it (default behavior).
 Insert-on-accept: an agent keeps the mention form (``@name `` — consumed by
 :func:`lecode.context.agents.parse_mentions`), a file inserts its path, a
 command inserts ``/name ``, a persona inserts ``.name ``.
+
+Commands with argument rows also pick their arguments: after ``/model ``
+the menu offers the catalog, after ``/resume `` the folder's sessions, and
+so on (:class:`CommandArgCompleter` routes ahead of path completion).
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion, merge_completers
 from prompt_toolkit.document import Document
 
 from lecode.context.agents import AgentRegistry
 from lecode.context.resources import list_available
 from lecode.context.skills import SkillRegistry, skill_commands
 from lecode.slash.catalog import BUILTIN_COMMANDS
-from lecode.tui.input import FileLister
+from lecode.slash.registry import CommandRegistry, CompletionRow, SlashCommand
+from lecode.tui.input import FileLister, PathCompleter
+
+if TYPE_CHECKING:
+    from lecode.tui.app import TuiApp
 
 #: Max file completions offered by the ``@`` picker.
 FILE_COMPLETION_LIMIT = 20
@@ -171,3 +181,102 @@ class TriggerCompleter(Completer):
     def get_completions(self, document: Document, complete_event: CompleteEvent):
         # Unused: prompt_toolkit drives the async variant.
         return iter(())
+
+
+# -- command-argument pickers ------------------------------------------------------
+
+
+def command_arg_context(
+    document: Document, registry: CommandRegistry
+) -> tuple[SlashCommand, list[str], str] | None:
+    """``(command, args, partial)`` when the buffer offers argument rows.
+
+    ``args`` are the tokens before the cursor's token, ``partial`` the token
+    under the cursor. Resolution mirrors dispatch: exact name or unique
+    prefix, case-sensitive — unknown, ambiguous and free-text commands get
+    no picker. The command word itself belongs to the slash picker, so a
+    space must have been typed (``/model`` → ``None``, ``/model `` → context).
+    """
+    text = document.text_before_cursor
+    if not text.startswith("/") or "\n" in text:
+        return None
+    words = text[1:].split(" ")
+    if len(words) < 2 or not words[0]:
+        return None
+    try:
+        command = registry.match(words[0])
+    except KeyError:  # unknown or ambiguous prefix — same as dispatch would say
+        return None
+    if command.arg_completions is None:
+        return None
+    # Empty tokens (double spaces) don't count as args — matches dispatch,
+    # which splits on any whitespace run.
+    return command, [w for w in words[1:-1] if w], words[-1]
+
+
+def arg_ranked(partial: str, rows: list[CompletionRow]) -> list[CompletionRow]:
+    """Argument rows for ``partial``: provider order for an empty query
+    (catalog order, newest sessions first), otherwise fuzzy-filtered over
+    the inserted value and the display label, best match first.
+    """
+    if not partial:
+        return rows
+    scored: list[tuple[int, CompletionRow]] = []
+    for row in rows:
+        best = None
+        for field in (row[0], row[1]):
+            score = fuzzy_score(partial, field)
+            if score is not None and (best is None or score > best):
+                best = score
+        if best is not None:
+            scored.append((best, row))
+    scored.sort(key=lambda item: (-item[0], item[1][0]))
+    return [row for _, row in scored]
+
+
+class CommandArgCompleter(Completer):
+    """Routes completion: command-argument pickers, else paths + triggers.
+
+    While the buffer is a command offering argument rows, those win and
+    path completion stays out — ``/model vendor/name`` is a model ref, not
+    a file. Providers can hit the disk (sessions, messages), so rows flow
+    through the app's single-slot cache (:meth:`TuiApp.arg_completion_rows`),
+    shared with the panel.
+    """
+
+    def __init__(self, app: TuiApp, fallback: Completer) -> None:
+        self._app = app
+        self._fallback = fallback
+
+    async def get_completions_async(
+        self, document: Document, complete_event: CompleteEvent
+    ) -> AsyncGenerator[Completion, None]:
+        result = self._app.arg_completion_rows(document)
+        if result is None:
+            async for completion in self._fallback.get_completions_async(document, complete_event):
+                yield completion
+            return
+        _, _, partial, rows = result
+        for insert, display, meta in arg_ranked(partial, rows):
+            yield Completion(
+                f"{insert} ",  # trailing space: the next token starts fresh
+                start_position=-len(partial),
+                display=display,
+                display_meta=meta,
+            )
+
+    def get_completions(self, document: Document, complete_event: CompleteEvent):
+        # Unused: prompt_toolkit drives the async variant.
+        return iter(())
+
+
+def build_completer(
+    app: TuiApp, cwd: Path, lister: FileLister, agents: AgentRegistry, skills: SkillRegistry
+) -> CommandArgCompleter:
+    """The input completer: argument pickers first, then paths, then triggers."""
+    return CommandArgCompleter(
+        app,
+        merge_completers(
+            [PathCompleter(cwd, lister=lister), TriggerCompleter(lister, agents, skills)]
+        ),
+    )

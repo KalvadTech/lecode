@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.completion import merge_completers
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
@@ -84,13 +83,18 @@ from lecode.providers.openai_compat import ProviderError
 from lecode.providers.types import ContentPart
 from lecode.session.stats import session_stats
 from lecode.slash.handlers import build_registry
-from lecode.slash.registry import AmbiguousCommandError, CommandRegistry, UnknownCommandError
+from lecode.slash.registry import (
+    AmbiguousCommandError,
+    CommandRegistry,
+    CompletionRow,
+    SlashCommand,
+    UnknownCommandError,
+)
 from lecode.tui.clipboard import copy_to_clipboard
 from lecode.tui.feed import Feed
 from lecode.tui.input import (
     FileLister,
     KillRing,
-    PathCompleter,
     SessionHistory,
     kill_to_end_of_line,
     kill_to_start_of_line,
@@ -100,7 +104,9 @@ from lecode.tui.input import (
 from lecode.tui.notify import Notifier
 from lecode.tui.permission import ApprovalPrompt, approval_prompt_text
 from lecode.tui.pickers import (
-    TriggerCompleter,
+    arg_ranked,
+    build_completer,
+    command_arg_context,
     command_candidates,
     persona_names,
     prefix_matches,
@@ -273,17 +279,20 @@ class TuiApp:
         self._kill_ring = KillRing()
         # One shared fd-backed file list feeds the path completer and pickers.
         self._file_lister = FileLister(self._cwd)
-        self._completer = merge_completers(
-            [
-                PathCompleter(self._cwd, lister=self._file_lister),
-                TriggerCompleter(self._file_lister, runtime.agents, runtime.skills),
-            ]
+        # Argument pickers first, then paths, then the @/./ trigger pickers.
+        self._completer = build_completer(
+            self, self._cwd, self._file_lister, runtime.agents, runtime.skills
         )
         self._input_area: TextArea | None = None
         self._chatbox: Frame | None = None
-        #: Prefix whose "No matching commands" row Escape dismissed (Tab or
-        #: any edit clears it — see _close_completion_menu / _tab).
+        #: Slash prefix or typed text whose "no matching…" row Escape
+        #: dismissed (Tab or any edit clears it — see _close_completion_menu
+        #: / _tab).
         self._no_match_dismissed: str | None = None
+        #: Single-slot cache for the argument picker: (typed text, rows).
+        #: The panel re-renders often (spinner ticks), providers can hit
+        #: the disk — recompute only when the typed text changes.
+        self._arg_rows_cache: tuple[str, list[CompletionRow]] | None = None
 
     # -- public seams for slash-command handlers -------------------------------
 
@@ -464,11 +473,8 @@ class TuiApp:
         if self._runtime.hooks is not None:
             self._runtime.hooks.cwd = path
         self._file_lister = FileLister(path)
-        self._completer = merge_completers(
-            [
-                PathCompleter(path, lister=self._file_lister),
-                TriggerCompleter(self._file_lister, self._runtime.agents, self._runtime.skills),
-            ]
+        self._completer = build_completer(
+            self, path, self._file_lister, self._runtime.agents, self._runtime.skills
         )
         if self._input_area is not None:
             self._input_area.completer = self._completer
@@ -563,9 +569,10 @@ class TuiApp:
         def _close_completion_menu(event: Any) -> None:
             # Approval owns Escape while pending; otherwise dismiss the
             # dropdown, restoring typed text a navigation overwrote. The
-            # no-match row has no completion state, so its dismissal is
-            # remembered per prefix (any edit or Tab brings it back).
-            # Longer M-* sequences still win over this bare-key handler.
+            # no-match rows (slash and argument pickers) have no completion
+            # state, so their dismissal is remembered per typed text (any
+            # edit or Tab brings it back). Longer M-* sequences still win
+            # over this bare-key handler.
             buffer = event.current_buffer
             if buffer.complete_state is not None:
                 buffer.cancel_completion()
@@ -573,6 +580,10 @@ class TuiApp:
             prefix = self._slash_prefix()
             if prefix:
                 self._no_match_dismissed = prefix
+                return
+            text = buffer.document.text_before_cursor
+            if text.startswith("/") and command_arg_context(buffer.document, self._commands):
+                self._no_match_dismissed = text  # dismiss the argument inert row
 
         @kb.add("enter")
         def _enter(event: Any) -> None:
@@ -687,12 +698,15 @@ class TuiApp:
 
         return kb
 
-    @staticmethod
-    def _accept_completion(buffer: Buffer) -> None:
+    def _accept_completion(self, buffer: Buffer) -> None:
         """Fill in the highlighted completion (first when none) and close the menu.
 
         Commands insert ``/name `` — a following Enter submits it. Selecting
-        never submits, so browsing the dropdown can't run a command.
+        never submits, so browsing the dropdown can't run a command. Inside
+        a command's argument picker, accepting reopens completion for the
+        next token; providers gate on the args typed so far, so a final
+        value (``/model <id> ``) lands on an empty picker and the menu stays
+        closed while a nested one (``/pierre model ``) gets its next stage.
         """
         state = buffer.complete_state
         if state is None:
@@ -700,6 +714,8 @@ class TuiApp:
         if state.complete_index is None:
             buffer.go_to_completion(0)
         buffer.complete_state = None
+        if command_arg_context(buffer.document, self._commands) is not None:
+            buffer.start_completion(select_first=False)
 
     def _slash_prefix(self) -> str | None:
         """The typed ``/`` prefix while the slash picker owns the input, else ``None``.
@@ -724,6 +740,54 @@ class TuiApp:
         if not prefix or prefix == self._no_match_dismissed:
             return False
         return not prefix_matches(prefix, command_candidates(self._runtime.skills))
+
+    def arg_completion_rows(
+        self, document: Document
+    ) -> tuple[SlashCommand, list[str], str, list[CompletionRow]] | None:
+        """``(command, args, partial, rows)`` for the argument picker the
+        document is in, else ``None``.
+
+        Rows come from the command's provider on demand — live state, no
+        snapshots (the catalog loads in the background). The panel renders
+        often (spinner ticks, feed appends), so the last result is cached
+        keyed by the typed text; every edit is a fresh key.
+        """
+        context = command_arg_context(document, self._commands)
+        if context is None:
+            return None
+        command, args, partial = context
+        key = document.text_before_cursor
+        if self._arg_rows_cache is not None and self._arg_rows_cache[0] == key:
+            return command, args, partial, self._arg_rows_cache[1]
+        rows = command.arg_completions(self, args) or []
+        self._arg_rows_cache = (key, rows)
+        return command, args, partial, rows
+
+    def _arg_no_match(self) -> tuple[SlashCommand, str] | None:
+        """``(command, inert-row text)`` while an argument picker is active
+        with nothing to render: a fresh top-level picker whose source is
+        empty (the command's ``arg_empty_hint``), or a filter that matches
+        none of the rows. ``None`` = no inert row (rows render, the position
+        is consumed, or Escape dismissed this exact text).
+        """
+        if self._input_area is None:
+            return None
+        buffer = self._input_area.buffer
+        if buffer.complete_state is not None:
+            return None  # rows render from the completion state
+        if buffer.document.text_before_cursor == self._no_match_dismissed:
+            return None
+        result = self.arg_completion_rows(buffer.document)
+        if result is None:
+            return None
+        command, args, partial, rows = result
+        if not rows:
+            if args:
+                return None  # consumed position: nothing to offer by design
+            return (command, command.arg_empty_hint) if command.arg_empty_hint else None
+        if arg_ranked(partial, rows):
+            return None  # matches exist — the completer renders them
+        return command, "no matching options"
 
     def _build_app(self, input: Input | None = None, output: Output | None = None) -> Application:
         _register_shift_enter()
@@ -762,28 +826,41 @@ class TuiApp:
         @Condition
         def picker_menu_visible() -> bool:
             # Every completion in this app comes from the trigger pickers
-            # (@/./commands) or the path completer, so the themed panel owns
-            # them all. Rows stream in asynchronously (the @/path pickers
-            # await the fd listing first), so wait for the first row; the
-            # no-match row adds the empty slash case.
+            # (@/./commands), a command's argument picker, or the path
+            # completer, so the themed panel owns them all. Rows stream in
+            # asynchronously (the @/path pickers await the fd listing
+            # first), so wait for the first row; the no-match rows (slash
+            # and argument pickers) render without completion state.
             state = buffer.complete_state
-            return (state is not None and bool(state.completions)) or self._slash_menu_empty()
+            return (
+                (state is not None and bool(state.completions))
+                or self._slash_menu_empty()
+                or self._arg_no_match() is not None
+            )
 
         def menu_heading() -> str:
             state = buffer.complete_state
             count = len(state.completions) if state else 0
-            if state is None:
-                label = "commands"  # the inert no-match row (slash picker)
-            else:
+            label = "commands"  # default: the inert no-match row (slash picker)
+            if state is not None:
+                arg = self.arg_completion_rows(state.original_document)
                 trigger = trigger_token(state.original_document)
-                label = {"@": "context", "/": "commands", ".": "personas"}.get(
-                    trigger[0] if trigger else None, "files"
+                label = (
+                    f"/{arg[0].name}"
+                    if arg is not None
+                    else {"@": "context", "/": "commands", ".": "personas"}.get(
+                        trigger[0] if trigger else None, "files"
+                    )
                 )
+            elif (no_match := self._arg_no_match()) is not None:
+                label = f"/{no_match[0].name}"
             return f" {label}  {count} {'match' if count == 1 else 'matches'}"
 
         def menu_rows() -> list[tuple[str, str]]:
             state = buffer.complete_state
             if state is None:
+                if (no_match := self._arg_no_match()) is not None:
+                    return [("", f" {no_match[1]}")]
                 return [("", " No matching commands")]
             if not state.completions:
                 return []  # rows still streaming in; nothing to render yet
@@ -919,6 +996,7 @@ class TuiApp:
         self._catalog = catalog
         self._runner._catalog = catalog
         self._runtime.ctx.catalog = catalog
+        self._arg_rows_cache = None  # an open "/model " picker may now have rows
         with contextlib.suppress(Exception):  # unknown model — keep the default
             self._status.context_window = catalog.get(self._config.llm.model).context_window
         if origin == "live":

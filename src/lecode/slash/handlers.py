@@ -34,7 +34,9 @@ from lecode.session.storage import AmbiguousSessionError, SessionNotFoundError
 from lecode.slash.catalog import BUILTIN_COMMANDS
 from lecode.slash.registry import (
     AmbiguousCommandError,
+    ArgCompletions,
     CommandRegistry,
+    CompletionRow,
     SlashCommand,
     UnknownCommandError,
 )
@@ -1281,6 +1283,178 @@ async def cmd_quit(app: TuiApp, args: list[str]) -> None:
     app.request_quit()
 
 
+# -- argument-picker providers ------------------------------------------------------
+# Rows for the shared completion panel: ``(insert, display, meta)``, read
+# live from app state (no snapshots — the catalog loads in the background).
+# Each provider gates on the args already typed, so a consumed position
+# offers nothing (the picker closes) while a nested one offers the next
+# stage. ponytail: session rows read the initial metadata record, so a
+# renamed session can show its old label — inserting canonical ids keeps
+# the handler resolving the right session.
+
+
+def _model_rows(app: TuiApp) -> list[CompletionRow]:
+    hidden = app.config.ui.hidden_models
+    rows: list[CompletionRow] = []
+    for entry in app.catalog.all():
+        if _is_hidden(entry.id, hidden):
+            continue
+        current = " · current" if entry.id == app.config.llm.model else ""
+        rows.append(
+            (
+                entry.id,
+                entry.id,
+                f"{entry.name} — ctx {human_tokens(entry.context_window)} · "
+                f"${entry.pricing.prompt}/M in · ${entry.pricing.completion}/M out{current}",
+            )
+        )
+    return rows
+
+
+def _complete_model(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args:
+        return []
+    return _model_rows(app)
+
+
+def _complete_model_subagent(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args:
+        return []
+    return [("default", "default", "inherit the main model"), *_model_rows(app)]
+
+
+def _complete_pierre(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if not args:
+        return [
+            ("on", "on", "enable the post-task reviewer"),
+            ("off", "off", "disable the reviewer"),
+            ("model", "model", "set the reviewer model"),
+        ]
+    if args[0] == "model" and len(args) == 1:
+        return _model_rows(app)
+    return []
+
+
+def _complete_thinking(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args:
+        return []
+    return [(level, level, "thinking level") for level in get_args(ThinkingLevel)]
+
+
+def _complete_mode(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args:
+        return []
+    return [(mode, mode, "permission mode") for mode in PERMISSION_MODES]
+
+
+def _complete_notifications(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args:
+        return []
+    return [
+        ("on", "on", "enable audio notifications"),
+        ("off", "off", "disable notifications"),
+    ]
+
+
+def _complete_help(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args:
+        return []
+    return [(c.name, c.name, c.description) for c in app.commands.list()]
+
+
+def _complete_tutor(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args:
+        return []
+    return [(topic, topic, "help topic") for topic in sorted(TUTOR_TOPICS)]
+
+
+def _complete_memory(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args:
+        return []
+    return [
+        ("show", "show", "read MEMORY.md"),
+        ("edit", "edit", "edit MEMORY.md"),
+        ("search", "search", "search memory <pattern>"),
+        ("log", "log", "daily log [date]"),
+        ("notes", "notes", "named notes"),
+    ]
+
+
+def _complete_resume(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args not in ([], ["--delete"]):
+        return []  # one reference only; --delete takes one too
+    rows: list[CompletionRow] = []
+    for meta in app.store.list_sessions(app.runtime.ctx.cwd):
+        marker = " (current)" if meta.id == app.session.id else ""
+        pid = app.store.lock_holder(meta.id)
+        in_use = f" · in use (pid {pid})" if pid else ""
+        rows.append((meta.id, meta.name, f"{meta.id} — {meta.created_at}{marker}{in_use}"))
+    return rows
+
+
+def _complete_rewind(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args:
+        return []
+    turns = [m for m in app.store.load_messages(app.session) if m.role == "user"]
+    return [
+        (str(turn.seq), f"seq {turn.seq}", _clip(_text_of(turn.message), 60))
+        for turn in turns[-REWIND_LIST_LIMIT:]
+    ]
+
+
+def _complete_drop(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args:
+        return []
+    return [
+        (str(i), a.path.name, f"{a.media_kind}, {format_size(a.size_bytes)}")
+        for i, a in enumerate(app.attachments.list(), 1)
+    ]
+
+
+def _complete_mcp(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    manager = app.runtime.ctx.extras.get("mcp")
+    statuses = list(manager.status()) if manager is not None else []
+    if not statuses:
+        return []  # nothing configured: the inert hint renders instead
+    if not args:
+        return [
+            ("tools", "tools", "list a server's tools"),
+            ("reconnect", "reconnect", "reconnect a server"),
+            ("auth", "auth", "OAuth login to a server"),
+            ("logout", "logout", "log out of a server"),
+        ]
+    if len(args) == 1 and args[0] in ("tools", "reconnect", "auth", "logout"):
+        return [(s.name, s.name, "MCP server") for s in statuses]
+    return []
+
+
+def _complete_wt_exit(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if app._worktree is None:
+        return []
+    return [(f, f, "wt-exit flag") for f in ("--delete", "--force") if f not in args]
+
+
+#: Providers + the inert-row hint for empty sources, per command.
+_ARG_COMPLETIONS: dict[str, tuple[ArgCompletions, str | None]] = {
+    "model": (_complete_model, "no models available (catalog still loading?)"),
+    "model-subagent": (_complete_model_subagent, "no models available (catalog still loading?)"),
+    "resume": (_complete_resume, "no sessions in this folder"),
+    "rewind": (_complete_rewind, "no user turns yet"),
+    "drop": (_complete_drop, "no pending attachments"),
+    "mcp": (_complete_mcp, "no MCP servers configured"),
+    "thinking": (_complete_thinking, None),
+    "reasoning": (_complete_thinking, None),
+    "permissions": (_complete_mode, None),
+    "mode": (_complete_mode, None),
+    "notifications": (_complete_notifications, None),
+    "pierre": (_complete_pierre, None),
+    "help": (_complete_help, None),
+    "tutor": (_complete_tutor, None),
+    "memory": (_complete_memory, None),
+    "wt-exit": (_complete_wt_exit, None),
+}
+
+
 # -- registry assembly -----------------------------------------------------------
 
 #: ``/help`` grouping (display order).
@@ -1453,7 +1627,17 @@ def build_registry(skills: SkillRegistry | None = None) -> CommandRegistry:
     registry = CommandRegistry()
     for name, description in BUILTIN_COMMANDS:
         handler = _HANDLERS.get(name) or _make_stub(name)
-        registry.register(SlashCommand(name, description, handler, arg_hint=ARG_HINTS.get(name)))
+        completions, empty_hint = _ARG_COMPLETIONS.get(name, (None, None))
+        registry.register(
+            SlashCommand(
+                name,
+                description,
+                handler,
+                arg_hint=ARG_HINTS.get(name),
+                arg_completions=completions,
+                arg_empty_hint=empty_hint,
+            )
+        )
     if skills is not None:
         registry.register_skills(skills)
     return registry

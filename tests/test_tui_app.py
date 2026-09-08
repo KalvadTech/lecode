@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 from lecode.agent.builder import build_runtime
 from lecode.cli import app as cli_app
 from lecode.config.models import Config
+from lecode.providers.catalog import Catalog
 from lecode.providers.types import Done, TokenDelta
 from lecode.session.storage import SessionStore
 from lecode.tui.app import QUEUE_LIMIT, TuiApp
@@ -219,6 +220,7 @@ async def test_slash_menu_tab_accepts_first_match(tmp_path, monkeypatch):
 
 
 async def test_slash_menu_tab_accepts_navigated_match_without_submitting(tmp_path, monkeypatch):
+    """Tab fills the navigated command; with argument rows, its picker reopens."""
     app, provider, out = make_app(tmp_path, monkeypatch, [])
     with create_pipe_input() as inp:
         task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
@@ -228,8 +230,15 @@ async def test_slash_menu_tab_accepts_navigated_match_without_submitting(tmp_pat
         inp.send_text("\x1b[B\x1b[B")
         await wait_for(lambda: _buffer(app).text == "/model ")
         inp.send_text("\t")
-        await wait_for(lambda: _buffer(app).complete_state is None)
-        assert _buffer(app).text == "/model "
+        await wait_for(
+            lambda: (
+                _buffer(app).text == "/model "
+                and _buffer(app).complete_state is not None
+                and _buffer(app).complete_state.original_document.text == "/model "
+                and _command_texts(_buffer(app).complete_state)
+            )
+        )  # accepting '/model ' reopens completion: the model picker
+        assert "openai/gpt-5 " in _command_texts(_buffer(app).complete_state)
         assert provider.requests == []
         assert out.getvalue() == ""
         inp.send_text("\x15/quit\r")
@@ -258,7 +267,7 @@ async def test_slash_menu_escape_dismisses_and_restores(tmp_path, monkeypatch):
 
 
 async def test_slash_menu_closes_after_command_name(tmp_path, monkeypatch):
-    """A space after the command closes the menu and it stays closed."""
+    """A space after an ambiguous command prefix closes the menu for good."""
     app, _, _ = make_app(tmp_path, monkeypatch, [])
     with create_pipe_input() as inp:
         task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
@@ -269,6 +278,82 @@ async def test_slash_menu_closes_after_command_name(tmp_path, monkeypatch):
         await wait_for(lambda: _buffer(app).text == "/mod ")
         await asyncio.sleep(0.3)  # give any spurious recompletion time to fire
         assert _buffer(app).complete_state is None
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+# -- command-argument pickers ------------------------------------------------------
+
+
+async def test_model_argument_picker_opens_on_space(tmp_path, monkeypatch):
+    """/model + space opens the shared panel with the catalog rows."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("/model ")
+        await wait_for(
+            lambda: (
+                _buffer(app).complete_state is not None
+                and _command_texts(_buffer(app).complete_state)
+            )
+        )
+        assert "openai/gpt-5 " in _command_texts(_buffer(app).complete_state)
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_model_picker_select_then_submit(tmp_path, monkeypatch):
+    """Down selects a row, Enter fills it (the menu closes), Enter executes."""
+    app, provider, out = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("/model ")
+        await wait_for(
+            lambda: (
+                _buffer(app).complete_state is not None
+                and _command_texts(_buffer(app).complete_state)
+            )
+        )
+        inp.send_text("\x1b[B")  # Down -> first row (anthropic/claude-sonnet-4)
+        await wait_for(lambda: _buffer(app).text == "/model anthropic/claude-sonnet-4 ")
+        inp.send_text("\r")  # accept: the position is consumed, the menu closes
+        await wait_for(lambda: _buffer(app).complete_state is None)
+        assert provider.requests == []
+        inp.send_text("\r")  # now submit the filled command
+        await wait_for(lambda: "model: anthropic/claude-sonnet-4" in out.getvalue())
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_model_picker_inert_row_and_escape(tmp_path, monkeypatch):
+    """Empty catalog: the hint row shows; Escape dismisses it until edited."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        app.set_catalog(Catalog([]), origin="live", count=0)  # the fetch lands empty
+        inp.send_text("/model z")
+        await wait_for(lambda: app._arg_no_match() is not None)
+        assert "no models available" in app._arg_no_match()[1]
+        inp.send_text("\x1b")  # Escape dismisses the inert row
+        await wait_for(lambda: app._arg_no_match() is None)
+        inp.send_text("z")  # any edit: the hint is back for the new text
+        await wait_for(lambda: app._arg_no_match() is not None)
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_argument_picker_no_matching_options_row(tmp_path, monkeypatch):
+    """Rows exist but the filter misses: the generic no-match row shows."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("/model zzz")
+        await wait_for(lambda: app._arg_no_match() is not None)
+        assert app._arg_no_match()[1] == "no matching options"
         inp.send_text("\x15/quit\r")
         assert await task == 0
 
