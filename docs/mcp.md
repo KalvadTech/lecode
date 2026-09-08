@@ -1,9 +1,10 @@
 # MCP servers
 
 lecode connects to [MCP](https://modelcontextprotocol.io) servers with the
-official Python SDK, over **stdio** and **streamable HTTP**. Their tools show
-up as first-class lecode tools named `mcp:<server>:<tool>` and go through the
-permission system like everything else.
+official Python SDK, over **stdio**, **streamable HTTP**, and **SSE** (the
+legacy HTTP transport). Their tools show up as first-class lecode tools named
+`mcp:<server>:<tool>` and go through the permission system like everything
+else.
 
 ## Auto-configured servers
 
@@ -28,16 +29,36 @@ timeout_s = 30           # per-call timeout (default 30)
 enabled = true
 
 [mcp.servers.internal]
-transport = "http"
+transport = "http"       # or "sse" for the legacy transport
 url = "https://mcp.internal.example/mcp"
 headers = { Authorization = "Bearer …" }
+
+[mcp.servers.remote]
+transport = "sse"
+url = "https://mcp.remote.example/sse"
+oauth = true             # interactive OAuth authorization-code flow
 ```
 
 A `[mcp.servers]` entry named `exa` or `context7` replaces the auto-configured
 definition.
 
-OAuth for HTTP servers is intentionally not wired up (it needs an interactive
-browser flow); pass bearer tokens via `headers` instead.
+## OAuth
+
+Remote servers (`http` / `sse`) can set `oauth = true` instead of a static
+`Authorization` header. On the first connect the SDK runs the
+authorization-code flow with PKCE: your browser opens at the server's
+authorization page (the URL is also printed in the feed / on stderr, so it
+works over SSH), and an ephemeral localhost listener captures the redirect.
+
+Tokens and the dynamic client registration persist in
+`<config_dir>/mcp_auth/<server>.json` (mode `0600`), so headless runs and
+restarts need no interaction — expired tokens are refreshed automatically.
+A revoked or expired grant that fails with 401 is dropped and re-authorized
+on the next call.
+
+If a server with `oauth = true` connects where no browser flow can complete,
+that server fails with an actionable error while everything else starts
+normally — authorize it once interactively with `lecode` + `/mcp login <name>`.
 
 ## Permissions
 
@@ -70,4 +91,6 @@ Rule targets for MCP tools are the canonical `mcp:<server>:<tool>` name.
 /mcp                  per-server state: connected (n tools) / failed / disabled
 /mcp tools <name>     list one server's tools
 /mcp reconnect <name> drop and re-establish a server session
+/mcp login <name>     delete stored OAuth tokens, re-run the browser flow
+/mcp logout <name>    delete stored OAuth tokens, reconnect without them
 ```

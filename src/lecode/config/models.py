@@ -131,12 +131,14 @@ class PermissionsConfig(BaseModel):
 
 
 class NotificationsConfig(BaseModel):
-    """``[notifications]`` — audio notifications."""
+    """``[notifications]`` — sound and desktop notifications."""
 
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = True
     volume: float = Field(default=0.5, ge=0.0, le=1.0)
+    sound: bool = True
+    desktop: bool = True
     on_finish: bool = True
     on_error: bool = True
     on_approval: bool = True
@@ -157,14 +159,16 @@ class McpServerConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    transport: Literal["stdio", "http"] = "stdio"
+    transport: Literal["stdio", "http", "sse"] = "stdio"
     # stdio
     command: str | None = None
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
-    # http
+    # http / sse
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
+    #: Interactive OAuth authorization-code flow for http/sse servers.
+    oauth: bool = False
     # common
     timeout_s: float = 30.0
     enabled: bool = True
