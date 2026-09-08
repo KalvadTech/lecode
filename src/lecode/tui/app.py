@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -951,8 +952,13 @@ class TuiApp:
             with patch_stdout(raw=True):
                 try:
                     await self._app.run_async()
-                except (EOFError, KeyboardInterrupt):
-                    self._quit = True  # e.g. stdin EOF on a non-tty
+                except (EOFError, KeyboardInterrupt) as e:
+                    # e.g. stdin EOF on a non-tty, Ctrl-C at the prompt, or a
+                    # stray signal — a clean exit either way. Named on stderr
+                    # because swallowed exceptions are undebuggable otherwise
+                    # (a CI pty-test flake hid behind this for two runs).
+                    self._quit = True
+                    print(f"lecode: exiting on {type(e).__name__}", file=sys.stderr)
         finally:
             self._spinner_task.cancel()
             self._approval.cancel()
