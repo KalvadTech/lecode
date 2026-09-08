@@ -61,6 +61,18 @@ def test_line2_model_cost_context(state, theme):
     assert line2 == "model: openai/gpt-5-mini · cost: $0.0123 · ctx: ▓▓▓░░ 84.0k/200.0k 42%"
 
 
+def test_line2_shows_reasoning_override_after_model(state, theme):
+    state.reasoning = "High"
+    line2 = render_statusline(state, theme, width=200).plain.splitlines()[1]
+    assert line2 == "model: openai/gpt-5-mini · High · cost: $0.0123 · ctx: ▓▓▓░░ 84.0k/200.0k 42%"
+
+
+def test_line2_omits_reasoning_at_baseline(state, theme):
+    line2 = render_statusline(state, theme, width=200).plain.splitlines()[1]
+    assert "High" not in line2
+    assert line2 == "model: openai/gpt-5-mini · cost: $0.0123 · ctx: ▓▓▓░░ 84.0k/200.0k 42%"
+
+
 def test_line3_session_agent_tokens_state(state, theme):
     line3 = render_statusline(state, theme, width=200).plain.splitlines()[2]
     assert line3 == "session: my-session · agent: default · in: 1.2k · out: 0.4k · ready"

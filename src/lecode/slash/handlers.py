@@ -10,7 +10,7 @@ so. Pickers are inline numbered lists — no dialogs.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, get_args
+from typing import TYPE_CHECKING, cast, get_args
 
 from lecode.config.models import PermissionMode, ThinkingLevel
 from lecode.context.resources import load_text
@@ -480,7 +480,7 @@ async def cmd_thinking(app: TuiApp, args: list[str]) -> None:
     if level not in levels:
         app.feed.error(f"unknown thinking level: {level} (one of: {', '.join(levels)})")
         return
-    app.config.llm.thinking = level
+    app.set_thinking(cast(ThinkingLevel, level))
     app.feed.info(f"thinking: {level} (applies from the next turn)")
 
 

@@ -101,6 +101,28 @@ async def test_thinking_passed_as_reasoning_effort(tmp_path, monkeypatch):
     assert provider.requests[-1]["kwargs"]["reasoning_effort"] is None
 
 
+async def test_thinking_updates_statusline_reasoning(tmp_path, monkeypatch):
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    assert app.status.reasoning is None  # at startup baseline (medium)
+    await app.handle_command("/thinking high")
+    assert app.status.reasoning == "High"
+    await app.handle_command("/thinking none")
+    assert app.status.reasoning == "None"
+    await app.handle_command("/thinking medium")  # back to baseline hides it
+    assert app.status.reasoning is None
+
+
+async def test_thinking_baseline_comes_from_startup_config(tmp_path, monkeypatch):
+    config = Config()
+    config.llm.thinking = "high"
+    app, _, _ = make_app(tmp_path, monkeypatch, [], config=config)
+    assert app.status.reasoning is None  # starting at its own baseline
+    await app.handle_command("/thinking medium")
+    assert app.status.reasoning == "Medium"
+    await app.handle_command("/thinking high")  # return to baseline
+    assert app.status.reasoning is None
+
+
 # -- /permissions /mode /toggle ---------------------------------------------------------
 
 
