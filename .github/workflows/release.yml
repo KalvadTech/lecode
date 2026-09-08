@@ -1,14 +1,69 @@
 name: release
 
+# Automated semver releases driven by conventional commits (release-please):
+# every push to main updates a release PR that bumps pyproject.toml and
+# CHANGELOG.md; merging it creates the vX.Y.Z tag + GitHub Release, which
+# triggers the publish job below (PyPI via trusted publishing + dists
+# attached to the GitHub Release).
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
 
 permissions:
-  id-token: write  # trusted publishing to PyPI
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write # trusted publishing to PyPI
 
 jobs:
-  release:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      pr: ${{ steps.release.outputs.pr }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          # GITHUB_TOKEN works, but its PRs/tags don't trigger other
+          # workflows (e.g. ci.yml on the release PR). Set a PAT as the
+          # RELEASE_PLEASE_TOKEN secret to get CI checks on release PRs.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+  # release-please bumps pyproject.toml but not uv.lock; keep the release
+  # PR's lockfile in sync.
+  lockfile:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.pr != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName || 'release-please--branches--main' }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.7"
+
+      - name: Re-lock and push if uv.lock changed
+        run: |
+          uv lock
+          if git diff --quiet uv.lock; then
+            echo "uv.lock already in sync"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add uv.lock
+          git commit -m "chore: sync uv.lock with version bump"
+          git push
+
+  publish:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,3 +78,8 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Attach distributions to the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" dist/*

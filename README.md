@@ -211,6 +211,15 @@ uv run ruff check && uv run ruff format --check
 prek install                   # git hooks: ruff on commit, pytest on push
 ```
 
+## Releasing
+
+Releases are automated with [release-please](https://github.com/googleapis/release-please-action)
+and follow semver, driven by conventional commits: `fix:` → patch, `feat:` →
+minor, `feat!:` (or any `!`) → major. Every push to `main` updates a release
+PR that bumps `pyproject.toml` and `CHANGELOG.md`; merging that PR creates the
+`vX.Y.Z` tag and the GitHub Release, then publishes the dists to PyPI and
+attaches them to the release.
+
 ## License
 
 MIT
