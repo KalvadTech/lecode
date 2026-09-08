@@ -60,6 +60,8 @@ class StatusState:
     model: str
     cwd: Path | str
     git: GitInfo | None = None
+    #: Reasoning-level override label ("High", "None", …); None at baseline.
+    reasoning: str | None = None
     context_used: int = 0
     context_window: int = 200_000
     input_tokens: int = 0
@@ -146,6 +148,9 @@ def render_statusline(state: StatusState, theme: Theme, width: int = 100) -> Tex
     bar, pct = context_meter(state.context_used, state.context_window)
     line2 = Text()
     labelled(line2, "model", state.model, theme.text, first=True)
+    if state.reasoning is not None:
+        line2.append_text(sep.copy())
+        line2.append(state.reasoning, style=theme.muted)
     labelled(line2, "cost", format_cost(state.cost_usd), theme.muted)
     labelled(
         line2,

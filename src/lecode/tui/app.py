@@ -51,7 +51,7 @@ from lecode.agent.runner import (
     ToolCall,
     ToolResult,
 )
-from lecode.config.models import PermissionMode
+from lecode.config.models import PermissionMode, ThinkingLevel
 from lecode.context.agents import parse_mentions
 from lecode.context.resources import load_text
 from lecode.extras.chain import run_chain
@@ -222,6 +222,8 @@ class TuiApp:
             cwd=self._cwd,
             context_window=config.agent.context_window,
         )
+        #: Startup reasoning level; the statusline only labels deviations.
+        self._baseline_thinking = config.llm.thinking
         self._git = CachedGitInfo()
         #: Chars-per-token ratio, calibrated per model from real usage (EMA).
         self._char_per_token = 4.0
@@ -311,6 +313,12 @@ class TuiApp:
     def refresh(self) -> None:
         """Re-render the statusline after state changes."""
         self._invalidate()
+
+    def set_thinking(self, level: ThinkingLevel) -> None:
+        """Apply the reasoning level; the statusline labels it until back at baseline."""
+        self._config.llm.thinking = level
+        self._status.reasoning = None if level == self._baseline_thinking else level.title()
+        self.refresh()
 
     @property
     def catalog(self) -> Any:
