@@ -12,7 +12,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from rich.console import Console
-from tests.fakes import FakeProvider
+from tests.fakes import FakeProvider, sample_catalog
 
 from lecode.agent.builder import build_runtime
 from lecode.config.models import Config
@@ -20,9 +20,16 @@ from lecode.context.agents import load_agents
 from lecode.context.skills import Skill, SkillRegistry
 from lecode.extras.proc import ProcResult
 from lecode.session.storage import SessionStore
+from lecode.slash.handlers import build_registry
 from lecode.tui.app import TuiApp
 from lecode.tui.input import FileLister
-from lecode.tui.pickers import TriggerCompleter, fuzzy_score, persona_names
+from lecode.tui.pickers import (
+    TriggerCompleter,
+    arg_ranked,
+    command_arg_context,
+    fuzzy_score,
+    persona_names,
+)
 
 # -- fuzzy_score ---------------------------------------------------------------
 
@@ -217,6 +224,139 @@ async def test_merged_completer_wired_in_app(tmp_path, monkeypatch):
 
 async def _async(value):
     return value
+
+
+# -- command-argument pickers -----------------------------------------------------
+
+
+def _doc(text: str) -> Document:
+    return Document(text, len(text))
+
+
+def _make_arg_app(tmp_path, monkeypatch, config=None):
+    """An app over the sample catalog and the real command registry."""
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    config = config or Config()
+    config.notifications.enabled = False  # never play sounds in tests
+    store = SessionStore()
+    session = store.create("s", tmp_path, model=config.llm.model)
+    runtime = build_runtime(config, tmp_path, session=session, store=store)
+    return TuiApp(
+        config,
+        runtime,
+        FakeProvider([]),
+        session,
+        store,
+        console=Console(record=True, file=StringIO(), width=200),
+        catalog=sample_catalog(),
+    )
+
+
+def test_arg_context_needs_known_command_and_space():
+    registry = build_registry()
+    assert command_arg_context(_doc("/model"), registry) is None  # still in the command word
+    assert command_arg_context(_doc("/mod "), registry) is None  # ambiguous prefix
+    assert command_arg_context(_doc("/nope "), registry) is None  # unknown command
+    assert command_arg_context(_doc("/copy "), registry) is None  # free-text args
+    assert command_arg_context(_doc("hello "), registry) is None
+    assert command_arg_context(_doc("/model one\ntwo"), registry) is None  # multiline
+    command, args, partial = command_arg_context(_doc("/resume --delete ab"), registry)
+    assert (command.name, args, partial) == ("resume", ["--delete"], "ab")
+
+
+def test_arg_ranked_keeps_provider_order_without_query():
+    rows = [("3", "c", ""), ("1", "a", ""), ("2", "b", "")]
+    assert arg_ranked("", rows) == rows
+
+
+def test_arg_ranked_matches_insert_or_display():
+    rows = [("an/id", "Fancy Name", ""), ("zz/x", "Plain", "")]
+    assert arg_ranked("fancy", rows) == [("an/id", "Fancy Name", "")]  # by display
+    assert arg_ranked("an/i", rows) == [("an/id", "Fancy Name", "")]  # by insert
+    assert arg_ranked("q", rows) == []
+
+
+async def test_model_argument_picker_lists_catalog(tmp_path, monkeypatch):
+    app = _make_arg_app(tmp_path, monkeypatch)
+    completions = await _complete(app._completer, "/model ")
+    texts = [c.text for c in completions]
+    assert "openai/gpt-5 " in texts and "anthropic/claude-sonnet-4 " in texts
+    gpt = next(c for c in completions if c.text == "openai/gpt-5 ")
+    assert gpt.start_position == 0  # nothing typed yet: rows insert at the cursor
+    assert "GPT-5" in str(gpt.display_meta_text)  # friendly label in the meta
+
+
+async def test_model_argument_picker_filters_and_hides(tmp_path, monkeypatch):
+    config = Config()
+    config.ui.hidden_models = ["moonshotai/kimi-k2.6"]
+    app = _make_arg_app(tmp_path, monkeypatch, config)
+    texts = [c.text for c in await _complete(app._completer, "/model gpt5")]
+    assert "openai/gpt-5 " in texts  # fuzzy over the id
+    assert "deepseek/deepseek-v4-flash " not in texts
+    texts = [c.text for c in await _complete(app._completer, "/model ")]
+    assert "moonshotai/kimi-k2.6 " not in texts  # hidden_models honored
+
+
+async def test_argument_picker_beats_path_completion(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "lecode.tui.input.run_proc",
+        lambda *a, **k: _async(ProcResult(exit_code=0, stdout="anthropic/claude.md\n", stderr="")),
+    )
+    app = _make_arg_app(tmp_path, monkeypatch)
+    texts = [c.text for c in await _complete(app._completer, "/model anthropic/cl")]
+    assert "anthropic/claude-sonnet-4 " in texts
+    assert "anthropic/claude.md" not in texts  # a model ref is not a file path
+    texts = [c.text for c in await _complete(app._completer, "anthropic/claude.md")]
+    assert "anthropic/claude.md" in texts  # fallback intact outside the arg context
+
+
+async def test_resume_argument_picker_lists_sessions_newest_first(tmp_path, monkeypatch):
+    app = _make_arg_app(tmp_path, monkeypatch)
+    app.store.create("older", tmp_path, model="m")
+    newer = app.store.create("newer", tmp_path, model="m")
+    completions = await _complete(app._completer, "/resume ")
+    displays = [str(c.display_text) for c in completions]
+    assert displays.index("newer") < displays.index("older")  # newest first
+    by_text = {c.text: c for c in completions}
+    assert f"{newer.id} " in by_text  # canonical ids insert
+    assert "current" in str(by_text[f"{app.session.id} "].display_meta_text)
+
+
+async def test_resume_delete_flag_completes_session_targets(tmp_path, monkeypatch):
+    app = _make_arg_app(tmp_path, monkeypatch)
+    other = app.store.create("other", tmp_path, model="m")
+    texts = [c.text for c in await _complete(app._completer, "/resume --delete ")]
+    assert f"{other.id} " in texts  # deletion targets offered after the flag
+
+
+async def test_literal_argument_pickers(tmp_path, monkeypatch):
+    app = _make_arg_app(tmp_path, monkeypatch)
+    assert [c.text for c in await _complete(app._completer, "/thinking ")] == [
+        "none ",
+        "low ",
+        "medium ",
+        "high ",
+    ]
+    assert [c.text for c in await _complete(app._completer, "/mode ")] == ["readonly ", "yolo "]
+    assert [c.text for c in await _complete(app._completer, "/notifications ")] == [
+        "on ",
+        "off ",
+    ]
+
+
+async def test_nested_argument_stages(tmp_path, monkeypatch):
+    app = _make_arg_app(tmp_path, monkeypatch)
+    assert "model " in [c.text for c in await _complete(app._completer, "/pierre ")]
+    assert "openai/gpt-5 " in [c.text for c in await _complete(app._completer, "/pierre model ")]
+    assert "default " in [c.text for c in await _complete(app._completer, "/model-subagent ")]
+    assert "quit " in [c.text for c in await _complete(app._completer, "/help ")]
+
+
+async def test_consumed_positions_offer_nothing(tmp_path, monkeypatch):
+    app = _make_arg_app(tmp_path, monkeypatch)
+    assert await _complete(app._completer, "/model openai/gpt-5 ") == []
+    assert await _complete(app._completer, "/help quit ") == []
+    assert await _complete(app._completer, "/thinking high ") == []
 
 
 async def test_pipe_smoke_with_pickers(tmp_path, monkeypatch):

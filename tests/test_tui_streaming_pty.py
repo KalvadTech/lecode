@@ -11,6 +11,7 @@ to erase the in-progress answer line.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fcntl
 import os
 import pty
@@ -98,7 +99,34 @@ def _prompt_then_quit(prompt: str) -> Driver:
     return drive
 
 
+class _AppExitedEarly(AssertionError):
+    """The TUI exited while the driver was still mid-flow.
+
+    A keystroke written after that echoes into a dead tty and every wait
+    times out with a misleading dump — the tell is the "Session …" totals
+    line printed *below* the frozen UI. TuiApp.run swallows the EOFError
+    / KeyboardInterrupt and names it on stderr; this fails fast with the
+    same fact. Known CI-runner-only flake (never reproduced locally:
+    dozens of loaded runs on both 3.14.3 and 3.14.7) — _run_pty_app
+    retries once on exactly this signature.
+    """
+
+
 async def _run_pty_app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: list[dict[str, Any]],
+    driver: Driver,
+    **kwargs: Any,
+) -> list[str]:
+    try:
+        return await _run_pty_app_once(tmp_path, monkeypatch, script, driver, **kwargs)
+    except _AppExitedEarly:
+        print("pty test: app exited early (known CI flake) — retrying once", file=sys.stderr)
+        return await _run_pty_app_once(tmp_path, monkeypatch, script, driver, **kwargs)
+
+
+async def _run_pty_app_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     script: list[dict[str, Any]],
@@ -176,7 +204,28 @@ async def _run_pty_app(
         session_pt._output = out
         try:
             task = asyncio.ensure_future(app.run(input=inp, output=out))
+            # Gate keystrokes on the first real render: prompt_toolkit only
+            # enters raw mode (and flushes pre-start input) as the app takes
+            # over the terminal — a byte written before that is echoed by the
+            # line discipline instead of delivered to the input.
+            await _wait_for(lambda: _screen_lines(screen), "dir:")
             driven = asyncio.ensure_future(driver(master, screen))
+            # The driver normally finishes first and its exit keystrokes end
+            # the app; wait on whichever completes first so an app that dies
+            # mid-flow fails fast instead of every driver wait timing out on
+            # a dead tty (the two CI flakes looked exactly like that).
+            done, _ = await asyncio.wait({task, driven}, return_when=asyncio.FIRST_COMPLETED)
+            if task in done and driven not in done:
+                driven.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await driven
+                exc = task.exception()
+                if exc is not None:
+                    raise exc  # a real crash: full traceback, no flake-retry
+                raise _AppExitedEarly(
+                    "the TUI exited early — TuiApp.run swallowed the "
+                    "EOFError/KeyboardInterrupt and named it on stderr"
+                )
             await asyncio.wait_for(task, timeout=30)
             return await driven
         finally:
@@ -411,3 +460,20 @@ async def test_permission_prompt_approves_tool(tmp_path, monkeypatch):
     assert "allow bash" in dump, "approval prompt never shown:\n" + dump
     assert "pty-approved-out" in dump, "approved tool output missing:\n" + dump
     assert "approved done" in dump, "final answer missing:\n" + dump
+
+
+async def test_app_exiting_mid_flow_fails_fast_and_retries(tmp_path, monkeypatch):
+    """A driver that outlives the app fails fast (not after a 15s stall) and
+    the known-flake signature gets exactly one retry."""
+    attempts: list[int] = []
+
+    async def drive(master: int, screen: pyte.HistoryScreen) -> list[str]:
+        attempts.append(1)
+        lines = lambda: _screen_lines(screen)  # noqa: E731
+        os.write(master, b"/quit\r")  # the app exits while the driver keeps waiting
+        await _wait_for(lines, "answer:")  # never appears
+        return lines()
+
+    with pytest.raises(_AppExitedEarly, match="exited early"):
+        await _run_pty_app(tmp_path, monkeypatch, [], drive)
+    assert len(attempts) == 2  # first attempt + the single flake retry

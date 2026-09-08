@@ -20,6 +20,14 @@ if TYPE_CHECKING:
 #: Handler signature: the app (feed + state seams) plus split arguments.
 CommandHandler = Callable[["TuiApp", list[str]], Awaitable[None]]
 
+#: One argument-picker row: ``(insert, display, meta)``.
+CompletionRow = tuple[str, str, str]
+
+#: Argument-picker provider: ``(app, args typed so far) -> rows``.
+#: Providers gate on ``args`` — a consumed position returns no rows (the
+#: picker closes), a nested one returns the next stage's rows.
+ArgCompletions = Callable[["TuiApp", "list[str]"], "list[CompletionRow]"]
+
 
 class UnknownCommandError(KeyError):
     """No command matched the query."""
@@ -43,6 +51,12 @@ class SlashCommand:
     handler: CommandHandler
     #: Usage hint shown by ``/help <name>`` (e.g. ``"<mode>"``).
     arg_hint: str | None = None
+    #: Dropdown rows for the command's arguments (the shared picker panel);
+    #: ``None`` = free-text arguments, no argument picker.
+    arg_completions: ArgCompletions | None = None
+    #: Inert-row text when a fresh top-level picker finds no rows (empty
+    #: catalog, no sessions…). ``None`` = render nothing.
+    arg_empty_hint: str | None = None
 
 
 class CommandRegistry:
