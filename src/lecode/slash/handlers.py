@@ -28,7 +28,7 @@ from lecode.providers.catalog import (
     ModelNotFoundError,
 )
 from lecode.session.handoff import handoff as handoff_session
-from lecode.session.naming import unique_name, validate_name
+from lecode.session.naming import auto_name, unique_name, validate_name
 from lecode.session.stats import session_stats
 from lecode.session.storage import AmbiguousSessionError, SessionNotFoundError
 from lecode.slash.catalog import BUILTIN_COMMANDS
@@ -122,7 +122,9 @@ async def _ask_name(app: TuiApp) -> str | None:
 
 
 async def cmd_new(app: TuiApp, args: list[str]) -> None:
-    """``/new [name]``: start a fresh session and switch to it."""
+    """``/new [name]``: start a fresh session and switch to it. Without a
+    name the session starts under a timestamp and is AI-titled from its
+    first message (like a nameless interactive start)."""
     if _busy(app):
         return
     if args:
@@ -131,11 +133,13 @@ async def cmd_new(app: TuiApp, args: list[str]) -> None:
             app.feed.error(error)
             return
         name = unique_name(wanted, app.store)
+        auto_title = False
     else:
-        name = await _ask_name(app)
-        if name is None:
-            return
-    session = app.store.create(name, app.runtime.ctx.cwd, model=app.config.llm.model)
+        name = auto_name(app.store)
+        auto_title = True
+    session = app.store.create(
+        name, app.runtime.ctx.cwd, model=app.config.llm.model, auto_title=auto_title
+    )
     if app.switch_session(session):
         app.feed.info(f"new session: {session.name}")
 
@@ -302,9 +306,9 @@ async def cmd_rename(app: TuiApp, args: list[str]) -> None:
     if wanted.strip() == app.session.name:
         app.feed.info(f"already named: {app.session.name}")
         return
+    app.session.auto_title = False  # explicit rename beats any pending AI title
     name = unique_name(wanted, app.store)
-    app.store.append_event(app.session, "rename", {"name": name})
-    app.session.meta.name = name
+    app.store.rename(app.session, name)
     app.status.session_name = name
     app.refresh()
     app.feed.info(f"renamed to: {name}")

@@ -79,7 +79,9 @@ from lecode.permission import (
 )
 from lecode.providers.openai_compat import ProviderError
 from lecode.providers.types import ContentPart
+from lecode.session.naming import unique_name
 from lecode.session.stats import session_stats
+from lecode.session.title import generate_title
 from lecode.slash.handlers import build_registry
 from lecode.slash.registry import AmbiguousCommandError, CommandRegistry, UnknownCommandError
 from lecode.tui.clipboard import copy_to_clipboard
@@ -244,6 +246,8 @@ class TuiApp:
             self._status.context_window = self.catalog.get(config.llm.model).context_window
 
         self._turn_task: asyncio.Task[None] | None = None
+        #: Background auto-title request for an auto-named session.
+        self._title_task: asyncio.Task[None] | None = None
         #: Pierre feedback stashed from the event stream; rendered after the
         #: stats line at the end of the turn.
         self._pending_review: Review | None = None
@@ -709,6 +713,10 @@ class TuiApp:
             self.cancel_turn()
             if self._turn_task is not None:
                 await asyncio.gather(self._turn_task, return_exceptions=True)
+            if self._title_task is not None:
+                self._title_task.cancel()
+                await asyncio.gather(self._title_task, return_exceptions=True)
+                self._title_task = None
             if self._mcp_task is not None:
                 await asyncio.gather(self._mcp_task, return_exceptions=True)
                 self._mcp_task = None
@@ -1028,6 +1036,12 @@ class TuiApp:
         message: dict[str, Any] = {"role": "user", "content": text}
         self._history.append(message)
         self._store.append_message(self._session, message)
+        if self._session.auto_title and self._title_task is None:
+            # Untitled auto-named session: one background request titles it
+            # from this first message. Never blocks the turn.
+            self._title_task = asyncio.ensure_future(
+                self._auto_title(self._session, describe_content(text))
+            )
         # Live context growth: the submitted message joins the next prompt.
         self._status.context_used += self._estimate(describe_content(text))
         run_history = self._history
@@ -1086,6 +1100,26 @@ class TuiApp:
         if follow_up is not None:
             self._feed.user_message(describe_content(follow_up))
             self._turn_task = asyncio.ensure_future(self._run_turn(follow_up))
+
+    async def _auto_title(self, session: Session, text: str) -> None:
+        """Title an auto-named session from its first message (background).
+
+        A ``/rename`` or session switch clears ``session.auto_title`` and the
+        result is discarded, so explicit names always win.
+        """
+        try:
+            title = await generate_title(self._runner.provider, self._runner.model, text)
+            if title is None or self._quit or not session.auto_title:
+                return
+            session.auto_title = False
+            self._store.rename(session, unique_name(title, self._store))
+            if self._session is session:
+                self._status.session_name = session.name
+                self._invalidate()
+        finally:
+            # The task is done: a later auto-named session (bare /new) must
+            # be able to schedule its own title.
+            self._title_task = None
 
     async def _run_subagent_turn(self, name: str, prompt: str) -> None:
         """A direct ``@agent`` submission: the subagent answers as a side

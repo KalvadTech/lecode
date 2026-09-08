@@ -98,6 +98,18 @@ def _next_seq(records: list[Record]) -> int:
     )
 
 
+def _latest_rename_name(records: list[Record]) -> str | None:
+    """The last rename event's name, or ``None`` if the session was never renamed."""
+    for record in reversed(records):
+        if (
+            isinstance(record, EventRecord)
+            and record.kind == "rename"
+            and (name := record.data.get("name"))
+        ):
+            return str(name)
+    return None
+
+
 @dataclass
 class Session:
     """Handle for an open session file."""
@@ -105,6 +117,9 @@ class Session:
     meta: MetaRecord
     path: Path
     next_seq: int = 1
+    #: Transient: this process auto-named the session and may auto-title it
+    #: from the first user message. Never persisted; explicit names stay.
+    auto_title: bool = False
 
     @property
     def id(self) -> str:
@@ -137,6 +152,8 @@ class SessionStore:
         cwd: str | Path,
         model: str | None = None,
         agent: str = "build",
+        *,
+        auto_title: bool = False,
     ) -> Session:
         """Create a new session file with its meta line."""
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -150,7 +167,7 @@ class SessionStore:
         )
         path = self.sessions_dir / f"{meta.id}.jsonl"
         path.write_text(meta.model_dump_json() + "\n", encoding="utf-8")
-        return Session(meta=meta, path=path, next_seq=1)
+        return Session(meta=meta, path=path, next_seq=1, auto_title=auto_title)
 
     def open(self, session_id: str) -> Session:
         """Open an existing session by id; the latest rename event wins."""
@@ -161,9 +178,8 @@ class SessionStore:
         meta = next((r for r in records if isinstance(r, MetaRecord)), None)
         if meta is None:
             raise SessionNotFoundError(f"{session_id} (no meta record)")
-        renames = [r for r in records if isinstance(r, EventRecord) and r.kind == "rename"]
-        if renames and (new_name := renames[-1].data.get("name")):
-            meta = meta.model_copy(update={"name": str(new_name)})
+        if (new_name := _latest_rename_name(records)) is not None:
+            meta = meta.model_copy(update={"name": new_name})
         return Session(meta=meta, path=path, next_seq=_next_seq(records))
 
     def acquire_lock(self, session: Session) -> SessionLock | None:
@@ -249,6 +265,15 @@ class SessionStore:
         self._append(session, record)
         return record
 
+    def rename(self, session: Session, name: str) -> EventRecord:
+        """Append a rename event and update the live handle's name in one step.
+
+        Callers are responsible for validating/deduplicating ``name``.
+        """
+        record = self.append_event(session, "rename", {"name": name})
+        session.meta.name = name
+        return record
+
     def append_tombstone(self, session: Session, up_to_seq: int) -> TombstoneRecord:
         record = TombstoneRecord(seq=session.next_seq, ts=_now(), up_to_seq=up_to_seq)
         self._append(session, record)
@@ -276,23 +301,32 @@ class SessionStore:
     def list_sessions(self, cwd: Path | str | None = None) -> list[MetaRecord]:
         """All sessions' meta records, most recent first.
 
-        ``cwd`` scopes the listing to sessions created in that folder —
-        resume never crosses directories.
+        The latest ``rename`` event's name wins, so listings, name-based
+        resume and deduplication all see renames. ``cwd`` scopes the listing
+        to sessions created in that folder, resume never crosses directories.
         """
         if not self.sessions_dir.is_dir():
             return []
         metas: list[MetaRecord] = []
         for path in self.sessions_dir.glob("*.jsonl"):
+            meta: MetaRecord | None = None
+            records: list[Record] = []
             with path.open(encoding="utf-8") as f:
                 for line in f:
                     record = parse_record(line)
-                    if isinstance(record, MetaRecord):
-                        metas.append(record)
-                        break
                     if record is None:
                         self.corrupt_lines += 1
                         continue
-                    break  # first valid record is not meta: skip file
+                    if meta is None:
+                        if not isinstance(record, MetaRecord):
+                            break  # first valid record is not meta: skip file
+                        meta = record
+                    records.append(record)
+            if meta is None:
+                continue
+            if (renamed := _latest_rename_name(records)) is not None:
+                meta = meta.model_copy(update={"name": renamed})
+            metas.append(meta)
         if cwd is not None:
             wanted = str(cwd)
             metas = [m for m in metas if m.cwd == wanted]

@@ -308,17 +308,26 @@ async def test_offer_eof_means_no(monkeypatch):
 
 
 def _patch_past_offer(monkeypatch, offered):
-    """Fake the setup offer and stop run_interactive at the name prompt."""
+    """Fake the setup offer and stop run_interactive right before the TUI."""
 
     async def fake_offer():
         offered.append(True)
         return False
 
-    async def no_name(store, **kwargs):
-        return None  # Ctrl-D at the name prompt → exit 0
+    class FakeTui:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def set_catalog(self, *args, **kwargs):
+            pass
+
+    async def fake_run_tui(tui, client, background=None):
+        return 0
 
     monkeypatch.setattr("lecode.cli.offer_first_run_setup", fake_offer)
-    monkeypatch.setattr("lecode.cli.prompt_session_name", no_name)
+    monkeypatch.setattr("lecode.cli.TuiApp", FakeTui)
+    monkeypatch.setattr("lecode.cli._run_tui", fake_run_tui)
+    monkeypatch.setattr("lecode.cli.build_provider", lambda config, api_key=None: object())
 
 
 def test_interactive_first_run_offers_setup(tmp_path, monkeypatch):

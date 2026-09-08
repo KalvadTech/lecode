@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from io import StringIO
 from typing import Any, ClassVar
 
@@ -16,7 +17,7 @@ from typer.testing import CliRunner
 from lecode.agent.builder import build_runtime
 from lecode.cli import app as cli_app
 from lecode.config.models import Config
-from lecode.providers.types import Done, TokenDelta
+from lecode.providers.types import CompletedMessage, Done, TokenDelta
 from lecode.session.storage import SessionStore
 from lecode.tui.app import QUEUE_LIMIT, TuiApp
 from lecode.tui.statusline import StatusLineState
@@ -72,6 +73,38 @@ async def wait_for(cond, timeout=5.0):
             return
         await asyncio.sleep(0.01)
     raise AssertionError("condition not met within timeout")
+
+
+class TitleProvider:
+    """Answers turns with a short reply and titles via ``complete``."""
+
+    def __init__(self, title: str | None = "Fix login bug") -> None:
+        self.title = title
+        self.title_requests: list[list[dict]] = []
+
+    def stream_chat(self, messages, model, tools=None, **kwargs):
+        async def _stream():
+            yield TokenDelta(text="ok")
+            yield Done(finish_reason="stop")
+
+        return _stream()
+
+    async def complete(self, messages, model, **kwargs):
+        self.title_requests.append([dict(m) for m in messages])
+        return CompletedMessage(content=self.title or "")
+
+
+class BlockingTitleProvider(TitleProvider):
+    """Title generation blocks until ``release`` is set."""
+
+    def __init__(self, title: str) -> None:
+        super().__init__(title)
+        self.release = asyncio.Event()
+
+    async def complete(self, messages, model, **kwargs):
+        self.title_requests.append([dict(m) for m in messages])
+        await self.release.wait()
+        return CompletedMessage(content=self.title or "")
 
 
 # -- submissions / runner wiring --------------------------------------------
@@ -146,6 +179,86 @@ async def test_submit_streams_answer(tmp_path, monkeypatch):
     assert rendered.startswith("> hi\n")
     assert "Hello world" in rendered
     assert provider.requests[0]["messages"][-1] == {"role": "user", "content": "hi"}
+
+
+async def test_first_message_auto_titles_auto_named_session(tmp_path, monkeypatch):
+    """An auto-named session gets an AI title after its first user message,
+    persisted as a rename so listings and the statusline agree."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    app._session.auto_title = True
+    title_provider = TitleProvider("Fix login bug")
+    app._runner.provider = title_provider
+    await app._submit("help me fix the login bug")
+    await app._turn_task
+    await wait_for(lambda: app.session.name == "Fix login bug")
+    assert app.session.name == "Fix login bug"
+    assert app.status.session_name == "Fix login bug"
+    assert app.session.auto_title is False
+    assert title_provider.title_requests[0][1] == {
+        "role": "user",
+        "content": "help me fix the login bug",
+    }
+    # persisted: reopen and listing both see the title
+    assert app.store.open(app.session.id).meta.name == "Fix login bug"
+    assert [m.name for m in app.store.list_sessions()] == ["Fix login bug"]
+
+
+async def test_explicit_session_name_never_auto_titled(tmp_path, monkeypatch):
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    title_provider = TitleProvider("Sneaky rename")
+    app._runner.provider = title_provider
+    await app._submit("hello")
+    await app._turn_task
+    assert title_provider.title_requests == []
+    assert app.session.name == "test-session"
+
+
+async def test_rename_beats_pending_auto_title(tmp_path, monkeypatch):
+    """A `/rename` while the title is generating must win."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    app._session.auto_title = True
+    title_provider = BlockingTitleProvider("AI title")
+    app._runner.provider = title_provider
+    await app._submit("build a thing")
+    await app._turn_task
+    await wait_for(lambda: bool(title_provider.title_requests))
+    title_task = app._title_task  # still blocked: the handle is stable
+    await app.handle_command("/rename my choice")
+    title_provider.release.set()
+    await title_task
+    assert app.session.name == "my choice"
+    assert app.store.open(app.session.id).meta.name == "my choice"
+
+
+async def test_unusable_ai_title_keeps_fallback_name(tmp_path, monkeypatch):
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    app._session.auto_title = True
+    fallback = app.session.name
+    app._runner.provider = TitleProvider(".bad")
+    await app._submit("hello")
+    await app._turn_task
+    await wait_for(lambda: app._title_task is None)  # attempt finished, title rejected
+    assert app.session.name == fallback
+    assert [m.name for m in app.store.list_sessions()] == [fallback]
+
+
+async def test_each_auto_named_session_gets_a_title(tmp_path, monkeypatch):
+    """A second bare /new in the same process must title too (and dedupe
+    against the first session's title, which lives in a rename event)."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    app._runner.provider = TitleProvider("Same title")
+    await app.handle_command("/new")
+    first_id = app.session.id
+    await app._submit("build one")
+    await app._turn_task
+    await wait_for(lambda: app.session.name == "Same title")
+    assert app.session.name == "Same title"
+    await app.handle_command("/new")
+    assert app.session.id != first_id
+    await app._submit("build two")
+    await app._turn_task
+    await wait_for(lambda: app.session.name == "Same title-2")
+    assert app.session.name == "Same title-2"
 
 
 def test_set_catalog_binds_late(tmp_path, monkeypatch):
@@ -485,46 +598,65 @@ def cli_env(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _name_prompt(value):
-    async def _prompt(store, **kwargs):
-        return value
-
-    return _prompt
-
-
-def test_cli_abort_exits_zero_without_session(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt(None))
-    result = runner.invoke(cli_app, [])
-    assert result.exit_code == 0
-    assert FakeTui.instances == []
-    assert SessionStore().list_sessions() == []
-
-
-def test_cli_interactive_creates_named_session(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("chatty"))
+def test_cli_default_creates_auto_named_session(cli_env):
+    """No --name: the session starts immediately with a timestamp name and
+    auto-titling armed (the AI title lands after the first message)."""
     result = runner.invoke(cli_app, [])
     assert result.exit_code == 0
     assert len(FakeTui.instances) == 1
-    assert FakeTui.instances[0].session.name == "chatty"
-    assert [m.name for m in SessionStore().list_sessions()] == ["chatty"]
+    session = FakeTui.instances[0].session
+    assert re.fullmatch(r"session-\d{8}-\d{6}", session.name)
+    assert session.auto_title is True
+    assert [m.name for m in SessionStore().list_sessions()] == [session.name]
 
 
-def test_cli_default_mode_is_yolo(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("s"))
+def test_cli_name_flag_creates_explicit_session(cli_env):
+    result = runner.invoke(cli_app, ["--name", "Fix login"])
+    assert result.exit_code == 0
+    session = FakeTui.instances[0].session
+    assert session.name == "Fix login"
+    assert session.auto_title is False
+    assert [m.name for m in SessionStore().list_sessions()] == ["Fix login"]
+
+
+def test_cli_name_flag_deduplicates(cli_env):
+    SessionStore().create("Fix login", cli_env)
+    result = runner.invoke(cli_app, ["--name", "Fix login"])
+    assert result.exit_code == 0
+    assert FakeTui.instances[0].session.name == "Fix login-2"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["-p", "hi"], ["--loop", "plan.md"], ["--chain", "topic"], ["-r"], ["-r", "old"], ["-c"]],
+)
+def test_cli_name_rejected_with_other_modes(cli_env, extra):
+    result = runner.invoke(cli_app, ["--name", "nope", *extra])
+    assert result.exit_code == 2
+    assert "--name cannot be combined" in result.output
+    assert FakeTui.instances == []
+
+
+def test_cli_invalid_name_rejected(cli_env):
+    result = runner.invoke(cli_app, ["--name", ".hidden"])
+    assert result.exit_code == 2
+    assert "invalid session name" in result.output
+    assert FakeTui.instances == []
+
+
+def test_cli_default_mode_is_yolo(cli_env):
     result = runner.invoke(cli_app, [])
     assert result.exit_code == 0
     assert FakeTui.instances[0].runtime.ctx.permission_checker.mode == "yolo"
 
 
-def test_cli_safe_flag_forces_readonly(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("s"))
+def test_cli_safe_flag_forces_readonly(cli_env):
     result = runner.invoke(cli_app, ["--safe"])
     assert result.exit_code == 0
     assert FakeTui.instances[0].runtime.ctx.permission_checker.mode == "readonly"
 
 
-def test_cli_read_only_alias_still_works(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("s"))
+def test_cli_read_only_alias_still_works(cli_env):
     result = runner.invoke(cli_app, ["--read-only"])
     assert result.exit_code == 0
     assert FakeTui.instances[0].runtime.ctx.permission_checker.mode == "readonly"
@@ -532,11 +664,6 @@ def test_cli_read_only_alias_still_works(cli_env, monkeypatch):
 
 def test_cli_resume_keeps_name_without_prompt(cli_env, monkeypatch):
     SessionStore().create("old-session", cli_env)
-
-    async def _boom(store, **kwargs):
-        raise AssertionError("name prompt must not run on --resume")
-
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _boom)
     result = runner.invoke(cli_app, ["-r", "old-session"])
     assert result.exit_code == 0
     assert FakeTui.instances[0].session.name == "old-session"
@@ -546,14 +673,12 @@ def test_cli_continue_picks_latest(cli_env, monkeypatch):
     store = SessionStore()
     store.create("first", cli_env)
     store.create("second", cli_env)
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt(None))
     result = runner.invoke(cli_app, ["-c"])
     assert result.exit_code == 0
     assert FakeTui.instances[0].session.name == "second"
 
 
 def test_cli_resume_unknown_ref_fails(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt(None))
     result = runner.invoke(cli_app, ["-r", "nope"])
     assert result.exit_code == 2
     assert "nope" in result.output
@@ -585,7 +710,6 @@ def test_cli_bare_resume_abort_exits_zero(cli_env, monkeypatch):
 
 
 def test_cli_no_color_lands_in_config(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("x"))
     result = runner.invoke(cli_app, ["--no-color"])
     assert result.exit_code == 0
     assert FakeTui.instances[0].config.ui.no_color is True
@@ -676,7 +800,6 @@ def test_cli_resume_locked_session_fails(cli_env, monkeypatch):
     session = store.create("busy", cli_env)
     lock = store.acquire_lock(session)
     assert lock is not None
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt(None))
     result = runner.invoke(cli_app, ["-r", "busy"])
     assert result.exit_code == 2
     assert "already open in another lecode process" in result.output

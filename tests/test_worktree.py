@@ -11,7 +11,7 @@ import subprocess
 from os.path import realpath
 
 import pytest
-from tests.test_tui_app import FakeTui, _name_prompt, make_app
+from tests.test_tui_app import FakeTui, make_app
 from typer.testing import CliRunner
 
 from lecode.cli import app as cli_app
@@ -304,7 +304,6 @@ def cli_env(tmp_path, monkeypatch):
 
 def test_cli_worktree_flag_switches_cwd(cli_env, monkeypatch):
     make_repo_sync(cli_env)
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("wt-session"))
     result = runner.invoke(cli_app, ["--worktree", "feat"])
     assert result.exit_code == 0, result.output
     expected = cli_env / ".lecode" / "worktrees" / "feat"
@@ -316,7 +315,6 @@ def test_cli_worktree_flag_switches_cwd(cli_env, monkeypatch):
 
 
 def test_cli_worktree_flag_not_a_repo(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("x"))
     result = runner.invoke(cli_app, ["--worktree", "feat"])
     assert result.exit_code == 2
     assert "not a git repository" in result.output
