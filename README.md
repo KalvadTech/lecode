@@ -77,8 +77,7 @@ Targets macOS and Linux; Windows is best-effort.
 uv tool install --force git+https://github.com/KalvadTech/lecode
 ```
 
-(If the `lecode` name is ever taken on PyPI, the package is also published
-as `lecode-agent` — the command stays `lecode`.)
+lecode is distributed from this repository only — it is not on PyPI.
 
 ## Quickstart
 
@@ -234,8 +233,8 @@ Releases are automated with [release-please](https://github.com/googleapis/relea
 and follow semver, driven by conventional commits: `fix:` → patch, `feat:` →
 minor, `feat!:` (or any `!`) → major. Every push to `main` updates a release
 PR that bumps `pyproject.toml` and `CHANGELOG.md`; merging that PR creates the
-`vX.Y.Z` tag and the GitHub Release, then publishes the dists to PyPI and
-attaches them to the release.
+`vX.Y.Z` tag and the GitHub Release, with the built dists (wheel + sdist)
+attached to the release. Nothing is published to PyPI.
 
 ## License
 

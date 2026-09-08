@@ -3,8 +3,7 @@ name: release
 # Automated semver releases driven by conventional commits (release-please):
 # every push to main updates a release PR that bumps pyproject.toml and
 # CHANGELOG.md; merging it creates the vX.Y.Z tag + GitHub Release, which
-# triggers the publish job below (PyPI via trusted publishing + dists
-# attached to the GitHub Release).
+# triggers the publish job below (dists attached to the GitHub Release).
 on:
   push:
     branches: [main]
@@ -13,7 +12,6 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
-  id-token: write # trusted publishing to PyPI
 
 jobs:
   release-please:
@@ -75,9 +73,6 @@ jobs:
 
       - name: Build distributions
         run: uv build
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
 
       - name: Attach distributions to the GitHub Release
         env:

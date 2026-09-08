@@ -24,8 +24,8 @@ Design stance (from kon): the default harness stays tiny — **default system pr
 ~300 tokens**, project context loaded externally via AGENTS.md files and skills. A rich,
 detailed prompt (personas, mode prompts) is available as a config option.
 
-(Release-time check: if `lecode` is taken on PyPI, publish as `lecode-agent` while
-keeping the `lecode` command name.)
+(Release: GitHub-only — git tag + GitHub Release via release-please; not
+published to PyPI.)
 
 ## Feature lineage
 
@@ -121,7 +121,7 @@ portal.
   `rtk` compacts `bash` output (`rtk rewrite`, fail-open with 5s timeout on individual
   rewrites). Startup verifies all three exist on PATH and exits with install
   instructions otherwise (exit code 2). No auto-download, no fallback code paths.
-- **Packaging**: PyPI package, `uv tool install`.
+- **Packaging**: installable from the GitHub repo via `uv tool install` (not on PyPI).
 - **Tooling**: `uv`, `pytest` + `pytest-asyncio` + `respx`, `ruff`, `pydantic` v2,
   `typer`.
 
@@ -421,9 +421,9 @@ lecode/
     diagnostics-in-results, `lsp_diagnostics`), then MCP client with Exa/context7
     auto-config (largest, own sub-phase).
 11. **Onboarding + release** — `--setup` wizard, first-run defaults, `/init`, `/welcome`,
-    docs (including fd/rg/rtk install instructions); PyPI publish workflow (verify the
-    `lecode` name, else `lecode-agent`); clean-machine `uv tool install` → setup →
-    real coding task; full CI green.
+    docs (including fd/rg/rtk install instructions); automated release workflow
+    (release-please: semver tag + GitHub Release, no PyPI); clean-machine
+    `uv tool install` → setup → real coding task; full CI green.
 
 ## Sizing
 
