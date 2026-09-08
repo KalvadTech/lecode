@@ -167,8 +167,10 @@ class McpServerConfig(BaseModel):
     # http / sse
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
-    #: Interactive OAuth authorization-code flow for http/sse servers.
-    oauth: bool = False
+    #: ``"oauth"`` enables the SDK's OAuth 2.1 flow (discovery, dynamic client
+    #: registration, PKCE). ``None`` keeps static ``headers`` (bearer token)
+    #: authentication. Only meaningful with ``transport = "http"`` or ``"sse"``.
+    auth: Literal["oauth"] | None = None
     # common
     timeout_s: float = 30.0
     enabled: bool = True

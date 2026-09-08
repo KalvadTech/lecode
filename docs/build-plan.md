@@ -249,8 +249,8 @@ portal.
   (`/model-subagent`), tool calls visible in feed; subagent lifecycle hooks fire.
 - **MCP client**: stdio + streamable-HTTP + SSE servers via the official `mcp`
   Python SDK, with optional interactive OAuth for remote servers
-  (`oauth = true`; tokens under `<config_dir>/mcp_auth/`, unrelated to LLM
-  auth), per-server timeouts/reconnect, tools under the permission system,
+  (`auth = "oauth"`; credentials under `<config_dir>/mcp-auth/`, unrelated to
+  LLM auth), per-server timeouts/reconnect, tools under the permission system,
   `/mcp` management.
   **Auto-configured servers**: Exa web search (default on, needs `EXA_API_KEY` or
   dashboard key flow) and context7 docs lookup (default off, `enable_context7 = true`).

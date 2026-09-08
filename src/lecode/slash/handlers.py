@@ -10,7 +10,7 @@ so. Pickers are inline numbered lists — no dialogs.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, get_args
+from typing import TYPE_CHECKING, cast, get_args
 
 from lecode.agent.tools.background import format_row
 from lecode.config.models import PermissionMode, ThinkingLevel
@@ -463,7 +463,7 @@ async def cmd_thinking(app: TuiApp, args: list[str]) -> None:
     if level not in levels:
         app.feed.error(f"unknown thinking level: {level} (one of: {', '.join(levels)})")
         return
-    app.config.llm.thinking = level
+    app.set_thinking(cast(ThinkingLevel, level))
     app.feed.info(f"thinking: {level} (applies from the next turn)")
 
 
@@ -647,6 +647,8 @@ async def cmd_doctor(app: TuiApp, args: list[str]) -> None:
                 report("ok", f"mcp {s.name}: connected · {s.tools} tools")
             elif s.state == "failed":
                 report("warn", f"mcp {s.name}: failed — {s.error or 'connect error'}")
+            elif s.state == "auth_required":
+                report("warn", f"mcp {s.auth_hint}")
             else:
                 report("skip", f"mcp {s.name}: disabled")
     else:
@@ -968,26 +970,10 @@ async def cmd_chain(app: TuiApp, args: list[str]) -> None:
 
 
 async def cmd_mcp(app: TuiApp, args: list[str]) -> None:
-    """``/mcp`` — server states; tools/reconnect/login/logout subcommands."""
+    """``/mcp`` — states; ``tools|reconnect|auth|login|logout <name>``."""
     manager = app.runtime.ctx.extras.get("mcp")
     if manager is None or not manager.status():
         app.feed.info("no MCP servers configured")
-        return
-    if args and args[0] in ("login", "logout"):
-        if len(args) < 2:
-            app.feed.error(f"usage: /mcp {args[0]} <name>")
-            return
-        action = manager.login if args[0] == "login" else manager.logout
-        status = await action(args[1])
-        if status is None:
-            app.feed.error(f"unknown MCP server: {args[1]}")
-            return
-        for wrapper in manager.tool_wrappers():
-            app.runtime.registry.register(wrapper)
-        if status.state == "connected":
-            app.feed.info(f"mcp: {status.name} {args[0]} ok — connected ({status.tools} tools)")
-        else:
-            app.feed.error(f"mcp: {status.name} {args[0]} failed: {status.error}")
         return
     if args and args[0] == "reconnect":
         if len(args) < 2:
@@ -997,14 +983,53 @@ async def cmd_mcp(app: TuiApp, args: list[str]) -> None:
         if status is None:
             app.feed.error(f"unknown MCP server: {args[1]}")
             return
-        # Pick up tools that (re)appeared; wrappers delegate by name, so the
-        # existing registrations survive reconnects unchanged.
-        for wrapper in manager.tool_wrappers():
-            app.runtime.registry.register(wrapper)
         if status.state == "connected":
             app.feed.info(f"mcp: {status.name} reconnected ({status.tools} tools)")
         else:
             app.feed.error(f"mcp: {status.name} reconnect failed: {status.error}")
+        return
+    if args and args[0] in ("auth", "login"):
+        if len(args) < 2:
+            app.feed.error(f"usage: /mcp {args[0]} <name>")
+            return
+        name = args[1]
+        if manager.server_tools(name) is None:
+            app.feed.error(f"unknown MCP server: {name}")
+            return
+        app.feed.info(f"mcp: {name}: opening your browser for OAuth login — approve there…")
+        # login forces a fresh flow (drops cached credentials); auth reuses
+        # still-valid ones.
+        action = manager.login if args[0] == "login" else manager.authenticate
+        status = await action(
+            name,
+            announce=lambda url: app.feed.info(
+                f"mcp: {name}: authorization URL (a different browser works too): {url}"
+            ),
+        )
+        if status.error and status.state == "connected":
+            # e.g. /mcp auth on a server without auth = "oauth"
+            app.feed.error(f"mcp: {name}: {status.error}")
+        elif status.state == "connected":
+            app.feed.info(f"mcp: {name} authenticated ({status.tools} tools)")
+        elif status.state == "auth_required":
+            app.feed.error(
+                f"mcp: {name} authentication failed: {status.error} — try /mcp auth {name}"
+            )
+        else:
+            app.feed.error(f"mcp: {name} authentication failed: {status.error}")
+        return
+    if args and args[0] == "logout":
+        if len(args) < 2:
+            app.feed.error("usage: /mcp logout <name>")
+            return
+        status = await manager.logout(args[1])
+        if status is None:
+            app.feed.error(f"unknown MCP server: {args[1]}")
+            return
+        if status.error:
+            app.feed.error(f"mcp: {status.name}: {status.error}")
+        else:
+            app.feed.info(f"mcp: {status.name} logged out — /mcp auth {status.name} to reconnect")
         return
     if args and args[0] == "tools":
         if len(args) < 2:
@@ -1026,6 +1051,8 @@ async def cmd_mcp(app: TuiApp, args: list[str]) -> None:
             lines.append(f"{status.name}: connected ({status.tools} tools)")
         elif status.state == "disabled":
             lines.append(f"{status.name}: disabled")
+        elif status.state == "auth_required":
+            lines.append(status.auth_hint)
         else:
             lines.append(f"{status.name}: failed — {status.error}")
     app.feed.info("\n".join(lines))
@@ -1097,10 +1124,11 @@ TUTOR_TOPICS: dict[str, str] = {
     "mcp": (
         "MCP servers are configured under [mcp.servers] (stdio, http, or sse); "
         "Exa web search is auto-configured when EXA_API_KEY is set, context7 "
-        "with enable_context7 = true. Remote servers can use oauth = true for "
-        "browser authorization (tokens persist under <config_dir>/mcp_auth/). "
-        "/mcp shows state, /mcp tools|reconnect|login|logout <name>. Tools "
-        "appear as mcp:<server>:<tool>."
+        "with enable_context7 = true. /mcp shows state; /mcp "
+        "tools|reconnect|auth|login|logout <name>. Remote servers with "
+        'auth = "oauth" log in via /mcp auth (opens your browser once; '
+        "credentials are reused afterwards; /mcp login forces a fresh login). "
+        "Tools appear as mcp:<server>:<tool>."
     ),
     "memory": (
         "Persistent markdown memory: MEMORY.md (auto-injected), daily logs, "
@@ -1399,7 +1427,7 @@ ARG_HINTS = {
     "wt-exit": "[--delete] [--force]",
     "loop": "<plan-file> [max-iterations]",
     "chain": "<topic>",
-    "mcp": "[tools|reconnect|login|logout <name>]",
+    "mcp": "[tools|reconnect|auth|login|logout <name>]",
     "tutor": "<topic>",
     "review": "[file…]",
     "notifications": "[on|off]",

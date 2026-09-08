@@ -155,7 +155,7 @@ Payload: `{"event", "session", "ts", …}`; failures are dropped silently.
 | `transport` | `"stdio"` | `stdio` \| `http` (streamable HTTP) \| `sse` (legacy) |
 | `command` / `args` / `env` | — | stdio: argv and extra environment |
 | `url` / `headers` | — | http/sse: endpoint and extra headers (static bearer tokens go here) |
-| `oauth` | `false` | http/sse: interactive OAuth flow; tokens in `<config_dir>/mcp_auth/` (0600) |
+| `auth` | — | http/sse: `"oauth"` enables the interactive OAuth 2.1 flow; credentials in `<config_dir>/mcp-auth/` (0600) |
 | `timeout_s` | `30.0` | per-call timeout |
 | `enabled` | `true` | disabled servers are skipped |
 

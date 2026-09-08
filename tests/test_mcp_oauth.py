@@ -1,16 +1,20 @@
-"""Tests for MCP OAuth: token storage, the callback listener, the live dance.
+"""MCP OAuth over the SSE transport: the full dance, end to end.
+
+These tests pin the SSE half of the unified OAuth stack
+(``lecode.extras.mcp_auth`` + ``McpManager``); the streamable-HTTP half plus
+the storage/loopback units live in tests/test_mcp_auth.py.
 
 The full authorization-code flow runs against an in-process uvicorn server
 that plays both the OAuth authorization server (discovery, registration,
 authorize redirect, token exchange) and the protected MCP SSE endpoint. The
 "browser" is a patched ``webbrowser.open`` that follows the authorization
-URL with a real httpx client, so the SDK's own httpx2 stack and the
-localhost callback listener are exercised end to end.
+URL with a real HTTP client, so the SDK's own stack and lecode's loopback
+callback are exercised end to end.
 
 Manual verification against a real server: add
-``[mcp.servers.x] transport = "http" url = "…" oauth = true`` for an
-OAuth-protected server, run ``lecode`` interactively, ``/mcp login x`` —
-the browser opens, tokens land in ``<config_dir>/mcp_auth/x.json`` (0600),
+``[mcp.servers.x] transport = "sse" url = "…" auth = "oauth"`` for an
+OAuth-protected server, run ``lecode`` interactively, ``/mcp auth x`` —
+the browser opens, credentials land in ``<config_dir>/mcp-auth/`` (0600),
 and subsequent headless runs (``lecode -p …``) reuse them.
 """
 
@@ -19,176 +23,16 @@ from __future__ import annotations
 import asyncio
 import json
 import stat
-import webbrowser
 from pathlib import Path
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl
 
-import httpx
+import httpx2
 import pytest
 
 from lecode.config.models import Config, McpServerConfig
+from lecode.extras import mcp_auth as mcp_auth_mod
+from lecode.extras.mcp_auth import mcp_auth_file
 from lecode.extras.mcp_client import McpManager
-from lecode.extras.mcp_oauth import (
-    FileTokenStorage,
-    OAuthCallbackListener,
-    browser_redirect_handler,
-    build_oauth_provider,
-    delete_tokens,
-)
-
-# -- FileTokenStorage ----------------------------------------------------------
-
-
-async def test_storage_round_trip(tmp_path):
-    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
-
-    storage = FileTokenStorage("my server", base_dir=tmp_path)  # space is sanitized
-    assert await storage.get_tokens() is None
-    assert await storage.get_client_info() is None
-
-    await storage.set_tokens(OAuthToken(access_token="tok", expires_in=3600, refresh_token="r1"))
-    await storage.set_client_info(
-        OAuthClientInformationFull(client_id="cid", redirect_uris=["http://127.0.0.1:1/callback"])
-    )
-
-    again = FileTokenStorage("my server", base_dir=tmp_path)
-    tokens = await again.get_tokens()
-    assert tokens is not None
-    assert tokens.access_token == "tok"
-    assert tokens.refresh_token == "r1"
-    info = await again.get_client_info()
-    assert info is not None
-    assert info.client_id == "cid"
-
-    path = tmp_path / "my_server.json"
-    assert path.is_file()
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-
-
-async def test_storage_missing_and_corrupt_files(tmp_path):
-    storage = FileTokenStorage("srv", base_dir=tmp_path)
-    assert await storage.get_tokens() is None
-
-    path = tmp_path / "srv.json"
-    path.write_text("not json{")
-    assert await storage.get_tokens() is None
-    assert await storage.get_client_info() is None
-
-    path.write_text(json.dumps({"tokens": {"unexpected": "shape"}}))
-    assert await storage.get_tokens() is None
-
-    path.write_text(json.dumps(["a", "list"]))
-    assert await storage.get_tokens() is None
-
-
-async def test_storage_set_tokens_preserves_client_info(tmp_path):
-    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
-
-    storage = FileTokenStorage("srv", base_dir=tmp_path)
-    await storage.set_client_info(OAuthClientInformationFull(client_id="keep-me"))
-    await storage.set_tokens(OAuthToken(access_token="tok"))
-    info = await storage.get_client_info()
-    assert info is not None and info.client_id == "keep-me"
-
-
-def test_delete_tokens(tmp_path, monkeypatch):
-    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path))
-    assert delete_tokens("srv") is False
-    directory = tmp_path / "mcp_auth"
-    directory.mkdir()
-    (directory / "srv.json").write_text("{}")
-    assert delete_tokens("srv") is True
-    assert not (directory / "srv.json").exists()
-
-
-# -- callback listener ------------------------------------------------------------
-
-
-def _listener_port(listener: OAuthCallbackListener) -> int:
-    return int(urlparse(listener.redirect_uri).port)
-
-
-async def test_listener_captures_code_and_state():
-    listener = OAuthCallbackListener(timeout=5)
-    await listener.start()
-    try:
-        port = _listener_port(listener)
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        writer.write(b"GET /callback?code=abc123&state=xyz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
-        await writer.drain()
-        result = await listener.wait()
-        assert result.code == "abc123"
-        assert result.state == "xyz"
-        body = await reader.read()
-        assert b"authorization received" in body
-        writer.close()
-    finally:
-        await listener.close()
-
-
-async def test_listener_times_out():
-    listener = OAuthCallbackListener(timeout=0.05)
-    await listener.start()
-    try:
-        with pytest.raises(TimeoutError):
-            await listener.wait()
-    finally:
-        await listener.close()
-
-
-async def test_listener_wait_before_start_raises():
-    listener = OAuthCallbackListener(timeout=5)
-    with pytest.raises(RuntimeError):
-        _ = listener.redirect_uri
-
-
-# -- redirect handler / provider wiring --------------------------------------------
-
-
-async def test_redirect_handler_opens_browser_and_notifies(monkeypatch):
-    opened = []
-    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url) or True)
-    notices = []
-    await browser_redirect_handler("http://as.example/authorize?x=1", notify=notices.append)
-    assert opened == ["http://as.example/authorize?x=1"]
-    assert len(notices) == 1
-    assert "http://as.example/authorize?x=1" in notices[0]
-    assert "opened the authorization page" in notices[0]
-
-
-async def test_redirect_handler_fail_open_without_browser(monkeypatch):
-    def _boom(url):
-        raise OSError("no display")
-
-    monkeypatch.setattr(webbrowser, "open", _boom)
-    notices = []
-    await browser_redirect_handler("http://as.example/auth", notify=notices.append)
-    assert "open this URL in a browser" in notices[0]
-    assert "http://as.example/auth" in notices[0]
-
-    # no notify callback at all: still never raises
-    await browser_redirect_handler("http://as.example/auth")
-
-
-async def test_build_oauth_provider_wiring(tmp_path, monkeypatch):
-    from mcp.client.auth import OAuthClientProvider
-
-    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path))
-    provider = await build_oauth_provider("srv", "http://mcp.example/sse", notify=None)
-    try:
-        assert isinstance(provider, OAuthClientProvider)
-        assert isinstance(provider.context.storage, FileTokenStorage)
-        metadata = provider.context.client_metadata
-        assert metadata.client_name == "lecode"
-        # the registered redirect URI matches the live listener
-        assert str(metadata.redirect_uris[0]).rstrip("/") == provider.callback_listener.redirect_uri
-        assert provider.context.redirect_handler is not None
-        assert provider.context.callback_handler is not None
-    finally:
-        await provider.callback_listener.close()
-
-
-# -- the full dance against an in-process authorization server ---------------------
 
 
 class _FakeAuthServer:
@@ -291,28 +135,6 @@ class _FakeAuthServer:
         await send({"type": "http.response.body", "body": body})
 
 
-class _FakeBrowser:
-    """``webbrowser.open`` stand-in: follows the authorize URL with httpx."""
-
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
-        self._loop = loop
-        self.opened: list[str] = []
-        self.drive = True
-
-    def __call__(self, url: str) -> bool:
-        self.opened.append(url)
-        if not self.drive:
-            return False
-
-        async def _follow() -> None:
-            async with httpx.AsyncClient(follow_redirects=True) as client:
-                response = await client.get(url)
-                assert response.status_code == 200
-
-        asyncio.run_coroutine_threadsafe(_follow(), self._loop)
-        return True
-
-
 @pytest.fixture
 async def oauth_server(tmp_path, monkeypatch):
     """The fake AS + protected SSE MCP server; config dir redirected to tmp."""
@@ -320,7 +142,7 @@ async def oauth_server(tmp_path, monkeypatch):
     from mcp.server.mcpserver import MCPServer
 
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
-    server = MCPServer("mock-oauth")
+    server = MCPServer("mock-oauth-sse")
 
     @server.tool()
     def ping() -> str:
@@ -345,32 +167,50 @@ async def oauth_server(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-async def fake_browser(monkeypatch):
-    browser = _FakeBrowser(asyncio.get_running_loop())
-    monkeypatch.setattr(webbrowser, "open", browser)
-    return browser
+def fake_browser(monkeypatch):
+    """``webbrowser.open`` stand-in: follow the authorize URL into lecode."""
+    opened: list[str] = []
+
+    def _open(url: str) -> bool:
+        opened.append(url)
+        with httpx2.Client(trust_env=False, follow_redirects=False) as client:
+            response = client.get(url)
+            assert response.status_code in (302, 303), f"expected a redirect, got {response}"
+            location = response.headers["location"]
+            assert location.startswith("http://127.0.0.1:"), "redirect must land on loopback"
+            assert client.get(location).status_code == 200
+        return True
+
+    monkeypatch.setattr(mcp_auth_mod.webbrowser, "open", _open)
+    return opened
 
 
 def _oauth_config(base: str) -> Config:
     config = Config()
     config.mcp.enable_exa = False
     config.mcp.servers["auth"] = McpServerConfig(
-        transport="sse", url=f"{base}/sse", oauth=True, timeout_s=5.0
+        transport="sse", url=f"{base}/sse", auth="oauth", timeout_s=5.0
     )
     return config
 
 
-def _token_file(tmp_path: Path) -> Path:
-    return tmp_path / "cfg" / "mcp_auth" / "auth.json"
+def _token_file(base: str) -> Path:
+    return mcp_auth_file(f"{base}/sse")
 
 
-async def test_oauth_full_dance_and_token_reuse(oauth_server, fake_browser, tmp_path):
-    config = _oauth_config(oauth_server.base)
+async def test_sse_oauth_full_dance_and_token_reuse(oauth_server, fake_browser):
+    base = oauth_server.base
+    config = _oauth_config(base)
     notices: list[str] = []
-    mgr = McpManager(config, notify=lambda text: notices.append(text))
+    mgr = McpManager(config, notify=notices.append)
     await mgr.connect()
     try:
-        status = mgr.status()[0]
+        # automatic connect never opens a browser: it reports auth_required
+        assert mgr.status()[0].state == "auth_required"
+        assert fake_browser == []
+
+        # interactive login: browser dance, then connected with tools
+        status = await mgr.authenticate("auth")
         assert status.state == "connected", status.error
         assert status.tools == 1
         result = await mgr.call("auth", "ping", {})
@@ -378,21 +218,24 @@ async def test_oauth_full_dance_and_token_reuse(oauth_server, fake_browser, tmp_
     finally:
         await mgr.shutdown()
 
-    # the browser was sent to /authorize; the URL was also surfaced via notify
-    assert len(fake_browser.opened) == 1
-    assert "/authorize" in fake_browser.opened[0]
+    # the browser was sent to /authorize exactly once; the URL was also
+    # surfaced through the manager-level notify callback
+    assert len(fake_browser) == 1
+    assert "/authorize" in fake_browser[0]
     assert any("/authorize" in notice for notice in notices)
-    assert oauth_server.hits == {"register": 1, "authorize": 1, "token": 1, "unauthorized": 1}
+    assert oauth_server.hits["register"] == 1
+    assert oauth_server.hits["authorize"] == 1
+    assert oauth_server.hits["token"] == 1
 
-    # tokens + client registration persisted, 0600
-    token_file = _token_file(tmp_path)
+    # credentials + client registration persisted, 0600
+    token_file = _token_file(base)
     assert token_file.is_file()
     assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
     data = json.loads(token_file.read_text())
     assert data["tokens"]["access_token"] == "good-token"
     assert data["client_info"]["client_id"] == "lecode-test-client"
 
-    # a fresh manager reuses the stored token: no second dance
+    # a fresh manager reuses the stored credentials: no second dance
     mgr2 = McpManager(config)
     await mgr2.connect()
     try:
@@ -403,52 +246,56 @@ async def test_oauth_full_dance_and_token_reuse(oauth_server, fake_browser, tmp_
         await mgr2.shutdown()
     assert oauth_server.hits["authorize"] == 1
     assert oauth_server.hits["token"] == 1
-    assert len(fake_browser.opened) == 1
+    assert len(fake_browser) == 1
 
 
-async def test_login_reruns_the_flow(oauth_server, fake_browser, tmp_path):
+async def test_login_reruns_the_flow(oauth_server, fake_browser):
+    """``login`` drops cached credentials, so the browser flow runs again."""
     mgr = McpManager(_oauth_config(oauth_server.base))
     await mgr.connect()
     try:
-        assert mgr.status()[0].state == "connected"
+        status = await mgr.authenticate("auth")
+        assert status.state == "connected", status.error
         assert oauth_server.hits["authorize"] == 1
         status = await mgr.login("auth")
         assert status is not None
         assert status.state == "connected", status.error
         assert oauth_server.hits["authorize"] == 2
+        assert len(fake_browser) == 2
     finally:
         await mgr.shutdown()
 
 
-async def test_logout_deletes_tokens(oauth_server, fake_browser, tmp_path, monkeypatch):
+async def test_logout_deletes_tokens(oauth_server, fake_browser):
     mgr = McpManager(_oauth_config(oauth_server.base))
     await mgr.connect()
     try:
-        assert mgr.status()[0].state == "connected"
-        assert _token_file(tmp_path).is_file()
+        status = await mgr.authenticate("auth")
+        assert status.state == "connected", status.error
+        assert _token_file(oauth_server.base).is_file()
 
-        # with no browser to complete the re-authorization, the reconnect fails
-        # fast; the deleted token file must stay deleted
-        fake_browser.drive = False
-        monkeypatch.setattr("lecode.extras.mcp_client.CONNECT_TIMEOUT_S", 2.0)
         status = await mgr.logout("auth")
         assert status is not None
-        assert status.state == "failed"
-        assert not _token_file(tmp_path).exists()
+        assert status.state == "auth_required"
+        assert not _token_file(oauth_server.base).exists()
+
+        # reconnect stays non-interactive: auth_required, never a browser
+        status = await mgr.reconnect("auth")
+        assert status is not None
+        assert status.state == "auth_required"
+        assert len(fake_browser) == 1
     finally:
         await mgr.shutdown()
 
 
-async def test_oauth_headless_without_tokens_fails(oauth_server, fake_browser, monkeypatch):
-    """No browser, no stored tokens: the server fails with an actionable error."""
-    fake_browser.drive = False
-    monkeypatch.setattr("lecode.extras.mcp_client.CONNECT_TIMEOUT_S", 2.0)
+async def test_sse_oauth_headless_without_tokens_fails(oauth_server, fake_browser):
+    """No stored credentials: the server reports an actionable auth_required."""
     mgr = McpManager(_oauth_config(oauth_server.base))
     try:
         await mgr.connect()
         status = mgr.status()[0]
-        assert status.state == "failed"
-        assert "authorize interactively" in (status.error or "")
-        assert "/mcp login auth" in (status.error or "")
+        assert status.state == "auth_required"
+        assert status.auth_hint == "auth: authentication required — /mcp auth auth"
+        assert fake_browser == []
     finally:
         await mgr.shutdown()

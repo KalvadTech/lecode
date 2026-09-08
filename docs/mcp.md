@@ -36,29 +36,48 @@ headers = { Authorization = "Bearer …" }
 [mcp.servers.remote]
 transport = "sse"
 url = "https://mcp.remote.example/sse"
-oauth = true             # interactive OAuth authorization-code flow
+auth = "oauth"           # interactive OAuth 2.1 authorization-code flow
 ```
 
 A `[mcp.servers]` entry named `exa` or `context7` replaces the auto-configured
 definition.
 
-## OAuth
+## OAuth 2.1
 
-Remote servers (`http` / `sse`) can set `oauth = true` instead of a static
-`Authorization` header. On the first connect the SDK runs the
-authorization-code flow with PKCE: your browser opens at the server's
-authorization page (the URL is also printed in the feed / on stderr, so it
-works over SSH), and an ephemeral localhost listener captures the redirect.
+Remote servers (`http` / `sse`) that advertise OAuth (like GlitchTip)
+authenticate interactively — set `auth = "oauth"` instead of a static
+`Authorization` header:
 
-Tokens and the dynamic client registration persist in
-`<config_dir>/mcp_auth/<server>.json` (mode `0600`), so headless runs and
-restarts need no interaction — expired tokens are refreshed automatically.
-A revoked or expired grant that fails with 401 is dropped and re-authorized
-on the next call.
+```toml
+[mcp.servers.glitchtip]
+transport = "http"
+url = "https://your-glitchtip.example.com/mcp"
+auth = "oauth"
+```
 
-If a server with `oauth = true` connects where no browser flow can complete,
-that server fails with an actionable error while everything else starts
-normally — authorize it once interactively with `lecode` + `/mcp login <name>`.
+- On startup lecode connects with **cached credentials only** — an expired
+  access token is refreshed silently from its refresh token; a missing or
+  rejected refresh shows `authentication required`. Startup never blocks on
+  a browser.
+- `/mcp auth glitchtip` runs the interactive login: it opens your browser
+  and prints the authorization URL in the feed (paste it into a different
+  browser if you prefer — e.g. over SSH); the redirect lands back on a
+  loopback port lecode serves (`http://127.0.0.1:<port>/callback`).
+- `/mcp login glitchtip` is the same but drops the cached credentials first,
+  forcing a fresh browser flow (e.g. to switch accounts).
+- `/mcp logout glitchtip` drops the session and the persisted credentials.
+- Credentials (access + refresh tokens, client registration) are stored per
+  endpoint under `~/.config/lecode/mcp-auth/` (0600 files, 0700 directory,
+  plaintext JSON). `LECODE_CONFIG_DIR` moves them.
+- A revoked or expired grant that fails a tool call with 401 is dropped on
+  the spot; the server then shows `authentication required` until you
+  re-authorize with `/mcp auth`.
+
+The protocol itself — resource/server metadata discovery, dynamic client
+registration, PKCE, token exchange and refresh — is handled by the SDK's
+OAuth client; lecode supplies storage, the browser step, and the loopback
+callback. `auth = "oauth"` conflicts with a static `Authorization` header
+(that header path is the alternative for servers without OAuth).
 
 ## Permissions
 
@@ -89,8 +108,11 @@ Rule targets for MCP tools are the canonical `mcp:<server>:<tool>` name.
 
 ```
 /mcp                  per-server state: connected (n tools) / failed / disabled
+                      / authentication required
 /mcp tools <name>     list one server's tools
 /mcp reconnect <name> drop and re-establish a server session
-/mcp login <name>     delete stored OAuth tokens, re-run the browser flow
-/mcp logout <name>    delete stored OAuth tokens, reconnect without them
+/mcp auth <name>      interactive OAuth login (opens the browser; reuses
+                      still-valid cached credentials)
+/mcp login <name>     like auth, but drops cached credentials first
+/mcp logout <name>    drop a server session and its stored credentials
 ```
