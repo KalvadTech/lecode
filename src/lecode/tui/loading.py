@@ -127,6 +127,8 @@ def mcp_step(config: Config, mcp_servers: list[ServerStatus] | None = None) -> L
                 lines.append(f"{s.name}: connected · {s.tools} tools")
             elif s.state == "failed":
                 lines.append(f"{s.name}: failed — {s.error or 'connect error'}")
+            elif s.state == "auth_required":
+                lines.append(s.auth_hint)
             else:
                 lines.append(f"{s.name}: disabled")
         exa_missing = (
@@ -138,7 +140,7 @@ def mcp_step(config: Config, mcp_servers: list[ServerStatus] | None = None) -> L
             lines.append("exa: no EXA_API_KEY")
         if not lines:
             return LoadStep("mcp", "no servers", SKIP)
-        degraded = exa_missing or any(s.state == "failed" for s in mcp_servers)
+        degraded = exa_missing or any(s.state in ("failed", "auth_required") for s in mcp_servers)
         return LoadStep("mcp", "\n".join(lines), WARN if degraded else OK)
 
     # no live statuses (tests, headless): report the configuration only

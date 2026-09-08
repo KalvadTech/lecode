@@ -36,8 +36,34 @@ headers = { Authorization = "Bearer …" }
 A `[mcp.servers]` entry named `exa` or `context7` replaces the auto-configured
 definition.
 
-OAuth for HTTP servers is intentionally not wired up (it needs an interactive
-browser flow); pass bearer tokens via `headers` instead.
+## OAuth 2.1
+
+HTTP servers that advertise OAuth (like GlitchTip) authenticate interactively:
+
+```toml
+[mcp.servers.glitchtip]
+transport = "http"
+url = "https://your-glitchtip.example.com/mcp"
+auth = "oauth"
+```
+
+- On startup lecode connects with **cached credentials only** — an expired
+  access token is refreshed silently from its refresh token; a missing or
+  rejected refresh shows `authentication required`. Startup never blocks on
+  a browser.
+- `/mcp auth glitchtip` runs the interactive login: it opens your browser,
+  the server walks you through approval, and the redirect lands back on a
+  loopback port lecode serves (`http://127.0.0.1:<port>/callback`).
+- `/mcp logout glitchtip` drops the session and the persisted credentials.
+- Credentials (access + refresh tokens, client registration) are stored per
+  endpoint under `~/.config/lecode/mcp-auth/` (0600 files, 0700 directory,
+  plaintext JSON). `LECODE_CONFIG_DIR` moves them.
+
+The protocol itself — resource/server metadata discovery, dynamic client
+registration, PKCE, token exchange and refresh - is handled by the SDK's
+OAuth client; lecode supplies storage, the browser step, and the loopback
+callback. `auth = "oauth"` conflicts with a static `Authorization` header
+(that header path is the alternative for servers without OAuth).
 
 ## Permissions
 
@@ -68,6 +94,9 @@ Rule targets for MCP tools are the canonical `mcp:<server>:<tool>` name.
 
 ```
 /mcp                  per-server state: connected (n tools) / failed / disabled
+                      / authentication required
 /mcp tools <name>     list one server's tools
 /mcp reconnect <name> drop and re-establish a server session
+/mcp auth <name>      interactive OAuth login (opens the browser)
+/mcp logout <name>    drop a server session and its stored credentials
 ```
