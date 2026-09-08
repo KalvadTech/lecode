@@ -5,7 +5,14 @@ from __future__ import annotations
 from lecode.hooks.decorator import apply_hooks
 from lecode.hooks.events import (
     EVENTS,
+    INTERRUPT,
+    NOTIFICATION,
+    PERMISSION_REQUEST,
+    PERMISSION_RESULT,
+    POST_COMPACT,
     POST_TOOL_USE,
+    POST_TOOL_USE_FAILURE,
+    PRE_COMPACT,
     PRE_TOOL_USE,
     SESSION_END,
     SESSION_START,
@@ -17,6 +24,7 @@ from lecode.hooks.events import (
 )
 from lecode.hooks.runner import (
     DEFAULT_HOOK_TIMEOUT_S,
+    DENY_SAFE_EVENTS,
     HookDispatcher,
     HookHandler,
     HookVerdict,
@@ -29,8 +37,16 @@ from lecode.hooks.runner import (
 
 __all__ = [
     "DEFAULT_HOOK_TIMEOUT_S",
+    "DENY_SAFE_EVENTS",
     "EVENTS",
+    "INTERRUPT",
+    "NOTIFICATION",
+    "PERMISSION_REQUEST",
+    "PERMISSION_RESULT",
+    "POST_COMPACT",
     "POST_TOOL_USE",
+    "POST_TOOL_USE_FAILURE",
+    "PRE_COMPACT",
     "PRE_TOOL_USE",
     "SESSION_END",
     "SESSION_START",
