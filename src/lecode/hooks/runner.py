@@ -10,9 +10,10 @@ A handler that exits 0 with empty stdout has **no opinion** — modelled as
 ``verdict="allow", matched=False`` (abstain), which never affects a merge.
 
 Failure semantics are deny-safe: a crash, non-zero exit, timeout, or invalid
-output becomes a **Deny** verdict for ``PreToolUse`` (reason "hook failed: …")
-and a logged no-op (abstain, ``failed=True``) for every other event — a hook
-failure can never widen access.
+output becomes a **Deny** verdict for the enforced gates (``PreToolUse`` and
+``UserPromptSubmit``, reason "hook failed: …") and a logged no-op (abstain,
+``failed=True``) for every other event — a hook failure can never widen
+access.
 
 Merging is most-severe-wins: Deny > Ask > Defer > Allow/abstain. The first
 non-empty reason wins; ``rewritten_input`` comes from the most severe handler
@@ -28,7 +29,13 @@ from pathlib import Path
 from typing import Any
 
 from lecode.extras.proc import run_proc
-from lecode.hooks.events import EVENTS, POST_TOOL_USE, PRE_TOOL_USE, build_envelope
+from lecode.hooks.events import (
+    EVENTS,
+    POST_TOOL_USE,
+    PRE_TOOL_USE,
+    USER_PROMPT_SUBMIT,
+    build_envelope,
+)
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +44,9 @@ DEFAULT_HOOK_TIMEOUT_S = 10.0
 
 #: Valid verdicts, lowest to highest severity.
 SEVERITY = {"allow": 0, "defer": 1, "ask": 2, "deny": 3}
+
+#: Enforced gates: a handler failure becomes Deny instead of abstain.
+DENY_SAFE_EVENTS = frozenset({PRE_TOOL_USE, USER_PROMPT_SUBMIT})
 
 
 @dataclass(frozen=True)
@@ -70,9 +80,9 @@ class MergedVerdict:
 
 
 def _failure(handler: HookHandler, event: str, detail: str) -> HookVerdict:
-    """A deny-safe failure verdict: Deny for PreToolUse, abstain otherwise."""
+    """A deny-safe failure verdict: Deny for enforced gates, abstain otherwise."""
     reason = f"hook failed: {detail}"
-    if event == PRE_TOOL_USE:
+    if event in DENY_SAFE_EVENTS:
         return HookVerdict("deny", reason=reason, failed=True, handler=handler.command)
     log.warning("%s hook handler %r failed: %s", event, handler.command, detail)
     return HookVerdict("allow", reason=reason, matched=False, failed=True, handler=handler.command)
@@ -165,6 +175,16 @@ class HookDispatcher:
             result={"content": content, "is_error": is_error},
         )
         return await dispatch_event(POST_TOOL_USE, envelope, self.handlers.get(POST_TOOL_USE, []))
+
+    async def fire(self, event: str, **payload: Any) -> MergedVerdict:
+        """Dispatch any event with an envelope built from ``payload`` kwargs.
+
+        The one entry point for observational fire sites (Stop, SessionStart,
+        Notification, …): with no configured handlers it returns the default
+        allow verdict without running anything.
+        """
+        envelope = build_envelope(event, self.cwd, session=self.session, **payload)
+        return await dispatch_event(event, envelope, self.handlers.get(event, []))
 
 
 def dispatcher_from_config(

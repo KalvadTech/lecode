@@ -20,12 +20,22 @@ project cwd, with a default 10s timeout each.
 
 | event | when | extra envelope fields |
 |---|---|---|
-| `PreToolUse` | before a tool runs (after the permission check) | `tool` |
-| `PostToolUse` | after a tool runs | `tool`, `result` |
-| `UserPromptSubmit` | a prompt is submitted | `prompt` |
-| `Stop` | a turn finishes | — |
-| `SessionStart` / `SessionEnd` | session lifecycle | — |
+| `PreToolUse` | before a tool runs (after the permission check) — **enforced** | `tool` |
+| `PostToolUse` | after a tool runs successfully | `tool`, `result` |
+| `PostToolUseFailure` | after a tool returns an error result or raises — fires **instead of** `PostToolUse` | `tool`, `result` or `reason` |
+| `PermissionRequest` | an Ask verdict goes to the interactive approval prompt | `tool` |
+| `PermissionResult` | a permission Ask resolves: `decision` is `allow_once` / `allow_always` / `deny` / `auto` (auto-approved) | `tool`, `decision` |
+| `UserPromptSubmit` | a prompt is submitted (TUI and `-p`) — **enforced**: deny blocks the prompt | `prompt` |
+| `Stop` | an agent run finishes | `reason` (stop reason: `done`, `empty`, `max_turns`, `context_overflow`) |
+| `SessionStart` / `SessionEnd` | session lifecycle (chat open/quit, `-p`/`--loop`/`--chain` runs, session switch) | — |
 | `SubagentStart` / `SubagentEnd` | subagent (task/@mention) lifecycle | `agent` |
+| `PreCompact` / `PostCompact` | around context compaction (`/compact` and automatic) | — |
+| `Interrupt` | Ctrl-C cancels a running turn (TUI) or the headless run | — |
+| `Notification` | a desktop/sound notification is sent | `kind` (`approval` / `error` / `finish`), `tool` or `reason` for approval/error |
+
+Only `PreToolUse` and `UserPromptSubmit` are enforced (a deny blocks the
+tool call / the prompt). Every other event is observational: verdicts are
+ignored.
 
 ## The envelope
 
@@ -41,8 +51,8 @@ Handlers receive one JSON object on **stdin**:
 }
 ```
 
-`session` is `null` outside a session. `result` (PostToolUse) is
-`{"content": "…", "is_error": false}`.
+`session` is `null` outside a session. `result` (PostToolUse/PostToolUseFailure)
+is `{"content": "…", "is_error": false}`.
 
 ## The verdict protocol
 
@@ -66,8 +76,9 @@ wins; the first non-empty reason is reported.
 
 A crash, non-zero exit, timeout, or invalid JSON becomes:
 
-- **Deny** for `PreToolUse` (reason `hook failed: …`) — a broken guard blocks
-  the tool rather than letting it through;
+- **Deny** for the enforced events (`PreToolUse`, `UserPromptSubmit`; reason
+  `hook failed: …`) — a broken guard blocks the tool/prompt rather than
+  letting it through;
 - a logged **abstain** for every other event.
 
 ## Inspecting and testing

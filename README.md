@@ -22,7 +22,7 @@ just your terminal, an OpenAI-compatible model, and a sharp set of tools.
 │  – skills       none                                                   │
 │  ✓ agents       primaries: build, plan · custom: researcher            │
 │  ✓ memory       long-term 2.4 KB injected                              │
-│  ✓ tools        15 tools                                               │
+│  ✓ tools        19 tools                                               │
 │  ✓ permissions  mode yolo · custom rules                               │
 │  – hooks        none configured                                        │
 │  – pierre       off                                                    │
@@ -96,7 +96,8 @@ session: fix-auth · agent: build · in: 4.1k · out: 0.9k · ⠼
 ```
 
 One fixed statusline, every element labelled: directory · commit · branch ·
-diff / model · cost · context meter / session · agent · tokens · state.
+diff / model · cost · context meter / session · agent · tokens · state
+(a reasoning-level override shows on the model line when `/thinking` is set).
 No configuration needed.
 
 Useful things to type:
@@ -105,6 +106,8 @@ Useful things to type:
 /help                     all slash commands, grouped
 /welcome                  key bindings cheat-sheet
 /tutor permissions        explain one feature
+/tasks                    background tasks, live
+/doctor                   health-check the install
 !make test                run a shell command, see the output
 !!pytest -x               run it AND feed the output to the model
 @src/auth.py              attach a file (images/PDF/audio too)
@@ -126,7 +129,7 @@ The final answer goes to stdout; a `tokens: <in> in / <out> out · cost:
 $X.XXXX` summary goes to stderr, so scripts can pipe the answer cleanly.
 
 Exit codes: `0` done · `1` error · `2` startup (missing deps, bad flags,
-non-tty `--setup`) · `3` max turns / max loop iterations.
+non-tty `--setup`) · `3` max turns / max loop iterations / context overflow.
 
 ## A tour of the power features
 
@@ -137,7 +140,9 @@ non-tty `--setup`) · `3` max turns / max loop iterations.
   were created in (resume never crosses directories), `/new` `/resume`
   `/undo` `/redo` `/rewind` `/retry` `/compact` `/handoff` `/rename`,
   searchable picker with delete, HTML export (`/export`), secret-gist
-  sharing (`/share`), re-import (`/import`).
+  sharing (`/share`), re-import (`/import`). Approaching the context window,
+  the runner compacts automatically (summary + recent tail; `[compaction]`
+  tunes the trigger, buffer and overflow policy).
 - **Custom agents** — markdown files in `~/.config/lecode/agents/` or
   `.lecode/agents/` with their own model, temperature, prompt and permission
   overlay. Tab cycles primaries; `@agent` or the `task` tool runs subagents.
@@ -147,13 +152,24 @@ non-tty `--setup`) · `3` max turns / max loop iterations.
 - **Memory** — persistent per-project markdown: long-term `MEMORY.md`
   (auto-injected, 32 KB cap), daily logs, scratchpad, named notes.
   `/memory` to inspect; the agent has `memory_*` tools.
-- **Hooks** — shell commands on lifecycle events (`PreToolUse`,
-  `PostToolUse`, `Stop`, …) that return verdicts; they can only narrow
-  permissions. `--hooks-test` dry-runs the pipeline.
+- **Hooks** — shell commands on 15 lifecycle events (`PreToolUse`,
+  `PostToolUse`, `UserPromptSubmit`, `Stop`, …) that return verdicts; they can
+  only narrow permissions. `--hooks-test` dry-runs the pipeline.
 - **Pierre mode** — when enabled, a second model reviews every finished
   task: it compares your request with the agent's result and tells you
   plainly whether it delivered. `/pierre on|off|model`.
-- **MCP** — stdio + streamable-HTTP servers. Exa web search is
+- **Structured questions** — the `ask_user` tool lets the agent ask 1-4
+  multiple-choice questions mid-turn instead of guessing; you answer inline
+  with the keyboard (`1`-`4` to pick, `enter` to confirm a multi-select,
+  `esc` to dismiss). Headless, loop, chain, and subagent runs get a
+  "use your best judgment" result instead of a prompt.
+- **Notifications** — sound (afplay/paplay/aplay, terminal bell fallback) and
+  desktop notifications (osascript / notify-send) on turn finish, error, and
+  approval-needed. `/notifications on|off`; channels and per-event toggles in
+  `[notifications]`.
+- **MCP** — stdio, streamable-HTTP, and SSE servers, with optional OAuth 2.1
+  (`auth = "oauth"`, browser flow, tokens under `<config_dir>/mcp-auth/`;
+  `/mcp auth` to authorize, `/mcp login|logout` to manage). Exa web search is
   preconfigured (needs `EXA_API_KEY`); context7 is one flag away.
 - **LSP** — diagnostics from real language servers appended to `write`/`edit`
   results; fail-open, never blocks.
@@ -161,6 +177,25 @@ non-tty `--setup`) · `3` max turns / max loop iterations.
   `/wt-merge` / `/wt-exit` with conflict detection.
 - **Multimodal** — `/add image.png` or `@file.pdf`; capability-checked
   against the model.
+- **Background tasks** — `bash` and `task` accept `run_in_background` and
+  return a task id immediately; the agent inspects them with the `tasks_list`
+  / `tasks_output` / `tasks_wait` / `tasks_stop` tools, you watch them with
+  `/tasks`, and completions land in the feed and in the next turn. Remaining
+  tasks are stopped (SIGTERM, then SIGKILL) when the session exits.
+- **Prompts and personas** — the default system prompt is minimal (<300
+  tokens); `style = "rich"` opts into a detailed prompt. 16 named personas
+  (`.review …`, `.plan …`) overlay one turn, `/prompt` switches style,
+  `/editsys` opens the system prompt in `$EDITOR`.
+- **Reasoning levels** — `/thinking` sets the reasoning effort; collapsible
+  thinking blocks in the feed; the statusline shows the active override.
+- **Pickers and polish** — `/` opens a slash-command dropdown, `@` and `.`
+  open fuzzy file/agent/persona pickers — all in themed panels; Tab path
+  completion; queued prompts while the agent runs, Alt-Enter to steer
+  mid-turn; OSC 8 hyperlinks; `/copy` (OSC 52 / pbcopy / xclip).
+- **Status signals** — start/stop/git-conflict events over a Unix socket, for
+  external status bars and scripts.
+- **Doctor** — `/doctor` health-checks the install: external binaries, config,
+  provider connectivity, MCP servers, memory, hooks, telemetry.
 - **Telemetry (opt-in)** — Sentry/GlitchTip error reports and OpenTelemetry
   metrics (turns, tokens, cost, tool calls) via `[telemetry]`; needs the
   `telemetry` extra, fail-open by design.
@@ -188,10 +223,19 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 
 ```sh
 uv sync
-uv run python -m pytest        # 1000+ tests
+uv run python -m pytest        # 1200+ tests
 uv run ruff check && uv run ruff format --check
 prek install                   # git hooks: ruff on commit, pytest on push
 ```
+
+## Releasing
+
+Releases are automated with [release-please](https://github.com/googleapis/release-please-action)
+and follow semver, driven by conventional commits: `fix:` → patch, `feat:` →
+minor, `feat!:` (or any `!`) → major. Every push to `main` updates a release
+PR that bumps `pyproject.toml` and `CHANGELOG.md`; merging that PR creates the
+`vX.Y.Z` tag and the GitHub Release, then publishes the dists to PyPI and
+attaches them to the release.
 
 ## License
 

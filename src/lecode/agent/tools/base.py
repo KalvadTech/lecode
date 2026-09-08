@@ -55,6 +55,10 @@ class ToolContext:
     #: Interactive approver: async ``(tool_name, args, reason) -> ApprovalDecision``.
     #: Set by the TUI; ``None`` keeps Ask as a denial ("requires approval").
     approval_callback: Any | None = None
+    #: Interactive questioner: async ``(questions) -> list[dict]`` of per-question
+    #: ``{"question": ..., "answers": [...]}`` / ``{"question": ..., "dismissed": True}``.
+    #: Set by the TUI; ``None`` makes ``ask_user`` degrade to "decide yourself".
+    question_callback: Any | None = None
     read_paths: set[str] = field(default_factory=set)  # files read (edit guard)
     todos: list[dict[str, Any]] = field(default_factory=list)  # todo_write state
     extras: dict[str, Any] = field(default_factory=dict)  # memory/MCP/subagent seams
@@ -72,6 +76,21 @@ def grant_always(ctx: ToolContext, tool: str, pattern: str) -> None:
         ctx.session_perms.grant(tool, pattern)
     if ctx.session is not None and ctx.session_store is not None:
         ctx.session_store.grant_permission(ctx.session, tool, pattern)
+
+
+async def _fire_permission_hook(
+    ctx: ToolContext,
+    event: str,
+    tool_name: str,
+    args: dict[str, Any],
+    *,
+    decision: str | None = None,
+) -> None:
+    """Fire an observational PermissionRequest/PermissionResult hook event."""
+    dispatcher = ctx.extras.get("hooks")
+    if dispatcher is None or not dispatcher.handlers.get(event):
+        return
+    await dispatcher.fire(event, tool_name=tool_name, tool_args=args, decision=decision)
 
 
 class ToolRegistry:
@@ -153,19 +172,35 @@ class ToolRegistry:
         check = ctx.permission_checker.check(name, args)
         if check.decision == Decision.DENY:
             return ToolResult(f"denied: {check.reason}", is_error=True)
-        if check.decision == Decision.ASK and not ctx.auto_approve:
-            if ctx.approval_callback is None:
+        if check.decision == Decision.ASK:
+            # Deferred import: hooks.decorator wraps this module's tools.
+            from lecode.hooks import PERMISSION_REQUEST, PERMISSION_RESULT
+
+            if ctx.auto_approve:
+                await _fire_permission_hook(ctx, PERMISSION_RESULT, name, args, decision="auto")
+            elif ctx.approval_callback is None:
+                await _fire_permission_hook(ctx, PERMISSION_RESULT, name, args, decision="deny")
                 return ToolResult(
                     f"denied: requires approval ({check.reason})",
                     is_error=True,
                     metadata={"needs_approval": True},
                 )
-            approval = await ctx.approval_callback(name, args, check.reason)
-            if isinstance(approval, Deny):
-                return ToolResult(f"denied by user ({check.reason})", is_error=True)
-            if isinstance(approval, AllowAlways):
-                grant_always(ctx, name, approval.pattern)
-            # AllowOnce / AllowAlways fall through to running the tool.
+            else:
+                await _fire_permission_hook(ctx, PERMISSION_REQUEST, name, args)
+                approval = await ctx.approval_callback(name, args, check.reason)
+                if isinstance(approval, Deny):
+                    await _fire_permission_hook(ctx, PERMISSION_RESULT, name, args, decision="deny")
+                    return ToolResult(f"denied by user ({check.reason})", is_error=True)
+                if isinstance(approval, AllowAlways):
+                    grant_always(ctx, name, approval.pattern)
+                await _fire_permission_hook(
+                    ctx,
+                    PERMISSION_RESULT,
+                    name,
+                    args,
+                    decision="allow_always" if isinstance(approval, AllowAlways) else "allow_once",
+                )
+                # AllowOnce / AllowAlways fall through to running the tool.
 
         try:
             started = time.monotonic()

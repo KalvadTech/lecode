@@ -14,7 +14,9 @@ import asyncio
 import contextlib
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from lecode.agent.tools.base import Tool, ToolContext, ToolResult
 from lecode.extras.rtk import rewrite_command
@@ -37,9 +39,22 @@ def _kill_tree(proc: asyncio.subprocess.Process) -> None:
 
 
 async def _run_shell(
-    command: str, cwd: Path, timeout: float, idle_timeout: float, max_bytes: int
+    command: str,
+    cwd: Path,
+    timeout: float,
+    idle_timeout: float,
+    max_bytes: int,
+    *,
+    on_chunk: Callable[[bytes], None] | None = None,
+    proc_slot: dict[str, Any] | None = None,
 ) -> tuple[bytes, int, bool, bool]:
-    """Run a shell command; returns (output, exit_code, timed_out, idle_killed)."""
+    """Run a shell command; returns (output, exit_code, timed_out, idle_killed).
+
+    ``on_chunk`` (background tasks) receives each chunk as it arrives; the
+    retained buffer is then capped at ``max_bytes`` (the tail), since the
+    caller streams the full output elsewhere. ``proc_slot`` receives the
+    spawned process under ``"proc"`` so the caller can signal it.
+    """
     proc = await asyncio.create_subprocess_exec(
         "/bin/sh",
         "-c",
@@ -50,6 +65,8 @@ async def _run_shell(
         stderr=asyncio.subprocess.STDOUT,
         start_new_session=True,  # own process group so _kill_tree works
     )
+    if proc_slot is not None:
+        proc_slot["proc"] = proc
     buffer = bytearray()
     deadline = time.monotonic() + timeout
     idle_deadline = time.monotonic() + idle_timeout
@@ -73,6 +90,10 @@ async def _run_shell(
             if not chunk:  # EOF: process exited and pipes drained
                 break
             buffer += chunk
+            if on_chunk is not None:
+                on_chunk(chunk)
+                if len(buffer) > max_bytes:
+                    del buffer[: len(buffer) - max_bytes]
             idle_deadline = time.monotonic() + idle_timeout
     except asyncio.CancelledError:
         # Turn aborted (Ctrl-C): never leave the child running.
@@ -120,6 +141,13 @@ class BashTool(Tool):
                         "type": "number",
                         "description": "Kill after this many seconds without output",
                     },
+                    "run_in_background": {
+                        "type": "boolean",
+                        "description": (
+                            "Run detached and return a task id immediately; "
+                            "track with the tasks_* tools"
+                        ),
+                    },
                 },
                 "required": ["command"],
             },
@@ -131,6 +159,23 @@ class BashTool(Tool):
         idle = float(args.get("idle_timeout") or ctx.config.agent.tool_idle_timeout_s)
 
         command = await rewrite_command(command)
+        if args.get("run_in_background"):
+            from lecode.extras.background import (
+                BACKGROUND_EXTRA,
+                BackgroundError,
+                start_shell_task,
+            )
+
+            manager = ctx.extras.get(BACKGROUND_EXTRA)
+            if manager is None:
+                return ToolResult(
+                    "error: background tasks are unavailable in this context", is_error=True
+                )
+            try:
+                record = start_shell_task(manager, command, ctx.cwd, timeout, idle)
+            except BackgroundError as e:
+                return ToolResult(f"error: {e}", is_error=True)
+            return ToolResult(f"background task {record.id} started: {command}")
         try:
             output, exit_code, timed_out, idle_killed = await _run_shell(
                 command, ctx.cwd, timeout, idle, MAX_OUTPUT_BYTES

@@ -1,4 +1,4 @@
-"""Tests for audio notifications (bell / afplay / paplay / aplay)."""
+"""Tests for notifications (bell / afplay / paplay / aplay / osascript / notify-send)."""
 
 from __future__ import annotations
 
@@ -136,6 +136,86 @@ async def test_bell_itself_never_raises(monkeypatch):
     await notifier.task_finish()  # must not raise
 
 
+# -- desktop channel ------------------------------------------------------------
+
+
+def make_desktop_notifier(bells: list, binaries: tuple[str, ...], **kwargs):
+    """A Notifier whose ``which`` finds exactly the given binaries.
+
+    ``kwargs`` are split: ``session_name`` goes to the constructor, the rest
+    to ``NotificationsConfig``.
+    """
+    session_name = kwargs.pop("session_name", None)
+    return Notifier(
+        NotificationsConfig(**kwargs),
+        which=lambda binary: f"/usr/bin/{binary}" if binary in binaries else None,
+        file_exists=lambda path: True,
+        bell=lambda: bells.append("\a"),
+        session_name=session_name,
+    )
+
+
+async def test_desktop_osascript_argv(proc_calls):
+    notifier = make_desktop_notifier([], ("afplay", "osascript"), session_name="work")
+    await notifier.task_finish()
+    assert proc_calls == [
+        ["afplay", "-v", "0.5", "/System/Library/Sounds/Glass.aiff"],
+        ["osascript", "-e", 'display notification "task finished: work" with title "lecode"'],
+    ]
+
+
+async def test_desktop_notify_send_argv(proc_calls):
+    notifier = make_desktop_notifier([], ("afplay", "notify-send"))
+    await notifier.task_finish()
+    assert proc_calls[1] == ["notify-send", "lecode", "task finished"]
+
+
+async def test_no_desktop_binary_skips_desktop(proc_calls):
+    notifier = make_desktop_notifier([], ("afplay",))
+    await notifier.task_finish()
+    assert proc_calls == [["afplay", "-v", "0.5", "/System/Library/Sounds/Glass.aiff"]]
+
+
+async def test_desktop_channel_disabled(proc_calls):
+    notifier = make_desktop_notifier([], ("afplay", "osascript"), desktop=False)
+    await notifier.task_finish()
+    assert proc_calls == [["afplay", "-v", "0.5", "/System/Library/Sounds/Glass.aiff"]]
+
+
+async def test_sound_channel_disabled(proc_calls):
+    bells = []
+    notifier = make_desktop_notifier(bells, ("afplay", "osascript"), sound=False)
+    await notifier.task_finish()
+    assert proc_calls == [
+        ["osascript", "-e", 'display notification "task finished" with title "lecode"']
+    ]
+    assert bells == []
+
+
+async def test_error_desktop_escapes_and_truncates(proc_calls):
+    notifier = make_desktop_notifier([], ("osascript",), sound=False)
+    message = 'boom "quoted" \\ path\n' + "x" * 300
+    await notifier.error(message)
+    script = proc_calls[0][2]
+    expected = 'boom \\"quoted\\" \\\\ path ' + "x" * 179
+    assert script == f'display notification "{expected}" with title "lecode"'
+
+
+async def test_approval_desktop_includes_tool_name(proc_calls):
+    notifier = make_desktop_notifier([], ("notify-send",), sound=False)
+    await notifier.approval_needed("bash")
+    assert proc_calls == [["notify-send", "lecode", "approval needed: bash"]]
+
+
+async def test_desktop_spawn_failure_never_raises(monkeypatch):
+    async def _proc(argv, **kwargs):
+        raise OSError("cannot spawn")
+
+    monkeypatch.setattr("lecode.tui.notify.run_proc", _proc)
+    notifier = make_desktop_notifier([], ("osascript",), sound=False)
+    await notifier.task_finish()  # must not raise
+
+
 # -- app wiring ---------------------------------------------------------------------
 
 
@@ -148,10 +228,10 @@ class FakeNotifier:
     async def task_finish(self):
         self.finished += 1
 
-    async def error(self):
+    async def error(self, message: str = ""):
         self.errors += 1
 
-    async def approval_needed(self):
+    async def approval_needed(self, tool_name: str = ""):
         self.approvals += 1
 
 

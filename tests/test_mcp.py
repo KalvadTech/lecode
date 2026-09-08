@@ -336,6 +336,82 @@ async def test_http_transport_round_trip(http_port):
         await mgr.shutdown()
 
 
+# -- SSE transport ----------------------------------------------------------------
+
+
+@pytest.fixture
+async def sse_port():
+    """An in-process legacy-SSE MCP server on a random localhost port."""
+    import uvicorn
+    from mcp.server.mcpserver import MCPServer
+
+    server = MCPServer("mock-sse")
+
+    @server.tool()
+    def ping() -> str:
+        """Ping the server."""
+        return "pong"
+
+    app = server.sse_app()
+    uvicorn_config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error")
+    uvicorn_server = uvicorn.Server(uvicorn_config)
+    task = asyncio.ensure_future(uvicorn_server.serve())
+    deadline = asyncio.get_running_loop().time() + 15
+    while not uvicorn_server.started:
+        if asyncio.get_running_loop().time() > deadline:
+            task.cancel()
+            raise RuntimeError("uvicorn MCP server did not start")
+        await asyncio.sleep(0.02)
+    port = uvicorn_server.servers[0].sockets[0].getsockname()[1]
+    yield port
+    uvicorn_server.should_exit = True
+    await asyncio.wait_for(task, timeout=10)
+
+
+async def test_sse_transport_round_trip(sse_port):
+    config = Config()
+    config.mcp.enable_exa = False
+    config.mcp.servers["legacy"] = McpServerConfig(
+        transport="sse", url=f"http://127.0.0.1:{sse_port}/sse", timeout_s=5.0
+    )
+    mgr = McpManager(config)
+    await mgr.connect()
+    try:
+        status = mgr.status()[0]
+        assert status.state == "connected"
+        assert status.tools == 1
+        assert "mcp:legacy:ping" in [t.name for t in mgr.tool_wrappers()]
+        result = await mgr.call("legacy", "ping", {})
+        assert result.content == "pong"
+    finally:
+        await mgr.shutdown()
+
+
+# -- OAuth config / wiring ----------------------------------------------------------
+
+
+def test_config_parses_sse_and_oauth():
+    server = McpServerConfig.model_validate(
+        {"transport": "sse", "url": "https://mcp.example/sse", "auth": "oauth"}
+    )
+    assert server.transport == "sse"
+    assert server.auth == "oauth"
+    # defaults unchanged
+    assert McpServerConfig().transport == "stdio"
+    assert McpServerConfig().auth is None
+
+
+async def test_oauth_on_stdio_fails_clearly():
+    mgr = McpManager(mcp_config(auth="oauth"))
+    try:
+        await mgr.connect()
+        status = mgr.status()[0]
+        assert status.state == "failed"
+        assert "oauth" in (status.error or "")
+    finally:
+        await mgr.shutdown()
+
+
 async def test_sse_shutdown_sets_process_global_exit_flag(http_server):
     """[regression 1/2] uvicorn teardown poisons sse-starlette's global exit flag.
 
@@ -453,6 +529,25 @@ async def test_mcp_unknown_server(app_with_mcp):
     await app.handle_command("/mcp reconnect nope")
     await app.handle_command("/mcp tools nope")
     assert out.getvalue().count("unknown MCP server: nope") == 2
+
+
+async def test_mcp_login_logout_unknown_server(app_with_mcp):
+    app, _, out = app_with_mcp
+    await app.handle_command("/mcp login nope")
+    await app.handle_command("/mcp logout nope")
+    assert out.getvalue().count("unknown MCP server: nope") == 2
+
+
+async def test_mcp_login_requires_oauth_config(app_with_mcp):
+    app, _, out = app_with_mcp
+    await app.handle_command("/mcp login test")  # "test" is stdio without auth = "oauth"
+    assert "not configured with auth = 'oauth'" in out.getvalue()
+
+
+async def test_mcp_logout_without_oauth(app_with_mcp):
+    app, _, out = app_with_mcp
+    await app.handle_command("/mcp logout test")
+    assert "logout applies only to OAuth servers" in out.getvalue()
 
 
 async def test_mcp_command_without_servers(tmp_path, monkeypatch):

@@ -55,7 +55,7 @@ default context window and zeroed pricing.
 | `enabled` | `true` | auto-compact when approaching the context window |
 | `buffer_tokens` | `20000` | headroom kept below the window |
 | `on_overflow` | `"continue"` | `continue` \| `pause` when even compaction can't fit |
-| `mid_turn_threshold` | unset | token count that triggers mid-turn compaction |
+| `mid_turn_threshold` | unset | absolute token count that triggers compaction on tool-loop rounds after the first (instead of window − buffer) |
 
 ## `[agent]`
 
@@ -118,13 +118,16 @@ is denied (doom-loop guard).
 
 ## `[notifications]`
 
-Audio notifications (afplay/paplay/aplay, terminal bell fallback).
+Sound notifications (afplay/paplay/aplay, terminal bell fallback) and desktop
+notifications (osascript on macOS, notify-send on Linux).
 
 | field | default | meaning |
 |---|---|---|
 | `enabled` | `true` | master switch (`/notifications on\|off` toggles per session) |
 | `volume` | `0.5` | 0.0–1.0 (afplay only) |
-| `on_finish` / `on_error` / `on_approval` | `true` | per-event toggles |
+| `sound` | `true` | sound channel (player or bell) |
+| `desktop` | `true` | desktop-notification channel |
+| `on_finish` / `on_error` / `on_approval` | `true` | per-event toggles (both channels) |
 
 ## `[signals]`
 
@@ -149,9 +152,10 @@ Payload: `{"event", "session", "ts", …}`; failures are dropped silently.
 
 | field | default | meaning |
 |---|---|---|
-| `transport` | `"stdio"` | `stdio` \| `http` (streamable HTTP) |
+| `transport` | `"stdio"` | `stdio` \| `http` (streamable HTTP) \| `sse` (legacy) |
 | `command` / `args` / `env` | — | stdio: argv and extra environment |
-| `url` / `headers` | — | http: endpoint and extra headers (bearer tokens go here) |
+| `url` / `headers` | — | http/sse: endpoint and extra headers (static bearer tokens go here) |
+| `auth` | — | http/sse: `"oauth"` enables the interactive OAuth 2.1 flow; credentials in `<config_dir>/mcp-auth/` (0600) |
 | `timeout_s` | `30.0` | per-call timeout |
 | `enabled` | `true` | disabled servers are skipped |
 
@@ -196,9 +200,11 @@ PreToolUse = ["./ci/check-tool.sh"]
 Stop = ["say done"]
 ```
 
-Events: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`,
-`SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentEnd`. Hooks can only
-narrow permission verdicts. See [hooks.md](hooks.md).
+Events: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`,
+`PermissionResult`, `UserPromptSubmit`, `Stop`, `SessionStart`, `SessionEnd`,
+`SubagentStart`, `SubagentEnd`, `PreCompact`, `PostCompact`, `Interrupt`,
+`Notification`. Hooks can only narrow permission verdicts; only `PreToolUse`
+and `UserPromptSubmit` deny-verdicts are enforced. See [hooks.md](hooks.md).
 
 ## `[custom_providers]`
 

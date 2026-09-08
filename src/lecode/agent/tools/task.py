@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from lecode.agent.tools.base import Tool, ToolContext, ToolResult
+from lecode.extras.background import BACKGROUND_EXTRA, BackgroundError
 from lecode.extras.subagents import (
     AGENTS_EXTRA,
     REGISTRY_EXTRA,
@@ -54,6 +55,13 @@ class TaskTool(Tool):
                         "type": "string",
                         "description": "Short human-readable label for the task.",
                     },
+                    "run_in_background": {
+                        "type": "boolean",
+                        "description": (
+                            "Run detached and return a task id immediately; "
+                            "track with the tasks_* tools"
+                        ),
+                    },
                 },
                 "required": ["prompt"],
             },
@@ -67,6 +75,8 @@ class TaskTool(Tool):
         agents = ctx.extras.get(AGENTS_EXTRA)
         if registry is None or agents is None:
             return ToolResult("error: subagents are unavailable in this context", is_error=True)
+        if args.get("run_in_background"):
+            return self._start_background(args, ctx, registry, agents, prompt)
         try:
             outcome = await run_subagent(
                 ctx,
@@ -88,6 +98,42 @@ class TaskTool(Tool):
                 "cost_usd": outcome.cost_usd,
             },
         )
+
+    def _start_background(
+        self,
+        args: dict[str, Any],
+        ctx: ToolContext,
+        registry: Any,
+        agents: Any,
+        prompt: str,
+    ) -> ToolResult:
+        manager = ctx.extras.get(BACKGROUND_EXTRA)
+        if manager is None:
+            return ToolResult(
+                "error: background tasks are unavailable in this context", is_error=True
+            )
+        agent_name = str(args.get("agent") or DEFAULT_AGENT)
+        description = str(args.get("description") or prompt[:60])
+        on_event = ctx.extras.get(SUBAGENT_EVENTS_EXTRA)
+
+        async def body(emit: Any) -> tuple[str, int | None]:
+            try:
+                # run_subagent builds fresh child extras itself — the parent's
+                # "conversation" seam is never clobbered.
+                outcome = await run_subagent(
+                    ctx, registry, agents, name=agent_name, prompt=prompt, on_event=on_event
+                )
+            except SubagentError as e:
+                return f"error: {e}", 1
+            text = outcome.text or "(subagent returned no text)"
+            emit(text.encode("utf-8", errors="replace"))
+            return text, 0
+
+        try:
+            record = manager.start("agent", description, body)
+        except BackgroundError as e:
+            return ToolResult(f"error: {e}", is_error=True)
+        return ToolResult(f"background task {record.id} started ({agent_name}): {description}")
 
 
 def make_tool() -> Tool:

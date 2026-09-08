@@ -7,8 +7,27 @@ import json
 import pytest
 
 from lecode.config.models import Config
-from lecode.hooks.events import PRE_TOOL_USE, STOP, build_envelope
+from lecode.hooks.events import (
+    EVENTS,
+    INTERRUPT,
+    NOTIFICATION,
+    PERMISSION_REQUEST,
+    PERMISSION_RESULT,
+    POST_COMPACT,
+    POST_TOOL_USE,
+    POST_TOOL_USE_FAILURE,
+    PRE_COMPACT,
+    PRE_TOOL_USE,
+    SESSION_END,
+    SESSION_START,
+    STOP,
+    SUBAGENT_END,
+    SUBAGENT_START,
+    USER_PROMPT_SUBMIT,
+    build_envelope,
+)
 from lecode.hooks.runner import (
+    HookDispatcher,
     HookHandler,
     dispatch_event,
     dispatcher_from_config,
@@ -220,3 +239,91 @@ def test_hooks_status_rows():
     config.hooks = {"PreToolUse": ["echo hi"], "Bogus": ["echo nope"]}
     rows = hooks_status(config)
     assert rows == [{"event": "PreToolUse", "command": "echo hi", "timeout_s": 10.0}]
+
+
+def test_events_tuple_covers_all_15_events():
+    assert EVENTS == (
+        PRE_TOOL_USE,
+        POST_TOOL_USE,
+        POST_TOOL_USE_FAILURE,
+        PERMISSION_REQUEST,
+        PERMISSION_RESULT,
+        USER_PROMPT_SUBMIT,
+        STOP,
+        SESSION_START,
+        SESSION_END,
+        SUBAGENT_START,
+        SUBAGENT_END,
+        PRE_COMPACT,
+        POST_COMPACT,
+        INTERRUPT,
+        NOTIFICATION,
+    )
+
+
+async def test_invalid_json_is_deny_safe_for_user_prompt_submit():
+    result = await run_handler(HookHandler("echo 'not json'"), envelope(USER_PROMPT_SUBMIT))
+    assert result.verdict == "deny"
+    assert result.failed is True
+    assert "hook failed" in result.reason
+
+
+@pytest.mark.parametrize(
+    "event",
+    [SESSION_START, SESSION_END, NOTIFICATION, INTERRUPT, PRE_COMPACT, POST_TOOL_USE_FAILURE],
+)
+async def test_handler_failure_is_noop_for_observational_events(event):
+    result = await run_handler(HookHandler("exit 1"), envelope(event))
+    assert result.matched is False
+    assert result.failed is True
+    assert result.verdict == "allow"
+
+
+async def test_dispatcher_fire_builds_envelope_with_payload(tmp_path):
+    out = tmp_path / "envelope.json"
+    dispatcher = HookDispatcher({"PermissionResult": [HookHandler(f"cat > {out}")]}, tmp_path)
+    merged = await dispatcher.fire(
+        PERMISSION_RESULT,
+        tool_name="bash",
+        tool_args={"command": "ls"},
+        decision="allow_once",
+    )
+    assert merged.verdict == "allow"  # cat abstains
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["event"] == "PermissionResult"
+    assert data["decision"] == "allow_once"
+    assert data["tool"] == {"name": "bash", "args": {"command": "ls"}}
+    assert data["cwd"] == str(tmp_path)
+
+
+async def test_dispatcher_fire_without_handlers_is_noop(tmp_path):
+    dispatcher = HookDispatcher({}, tmp_path)
+    merged = await dispatcher.fire(STOP, reason="done")
+    assert merged.verdict == "allow"
+    assert merged.failed is False
+
+
+def test_envelope_optional_fields(tmp_path):
+    env = envelope(STOP, reason="max_turns", kind="finish", decision="deny")
+    assert env["reason"] == "max_turns"
+    assert env["kind"] == "finish"
+    assert env["decision"] == "deny"
+    env = envelope(SESSION_START)
+    assert "reason" not in env
+    assert "kind" not in env
+    assert "decision" not in env
+
+
+def test_new_events_accepted_from_config(tmp_path):
+    config = Config()
+    config.hooks = {
+        "PreCompact": ["echo a"],
+        "PostCompact": ["echo b"],
+        "PermissionRequest": ["echo c"],
+        "Notification": ["echo d"],
+        "Interrupt": ["echo e"],
+        "PostToolUseFailure": ["echo f"],
+    }
+    dispatcher, warnings = dispatcher_from_config(config, tmp_path)
+    assert warnings == []
+    assert set(dispatcher.handlers) == set(config.hooks)

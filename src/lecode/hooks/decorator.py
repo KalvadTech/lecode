@@ -4,9 +4,11 @@ The permission checker runs first — ``ToolRegistry._execute`` returns early on
 a checker Deny without ever calling ``tool.run``, so decorated hooks are never
 consulted for checker-denied calls and can therefore only narrow. PreToolUse
 fires before execution (Deny blocks, Ask requires approval unless the context
-auto-approves, ``rewritten_input`` replaces the tool args); PostToolUse fires
-after execution and is informational — its verdict is recorded in the result
-metadata and cannot undo anything.
+auto-approves, ``rewritten_input`` replaces the tool args); after execution,
+exactly one of PostToolUse (success) or PostToolUseFailure (``is_error``
+result or an exception out of ``tool.run``) fires — both informational, their
+verdicts are recorded in the result metadata and cannot undo anything. On an
+exception the failure hook fires before the error propagates.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from lecode.agent.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
+from lecode.hooks.events import POST_TOOL_USE_FAILURE
 from lecode.hooks.runner import HookDispatcher
 
 
@@ -37,10 +40,27 @@ def _wrap(tool: Tool, dispatcher: HookDispatcher) -> None:
                 metadata={"needs_approval": True, "hook_verdict": "ask"},
             )
         effective_args = pre.rewritten_input if pre.rewritten_input is not None else args
-        result = await original_run(effective_args, ctx)
-        post = await dispatcher.post_tool_use(
-            tool.name, effective_args, result.content, result.is_error
-        )
+        try:
+            result = await original_run(effective_args, ctx)
+        except Exception as e:
+            await dispatcher.fire(
+                POST_TOOL_USE_FAILURE,
+                tool_name=tool.name,
+                tool_args=effective_args,
+                reason=f"{type(e).__name__}: {e}",
+            )
+            raise
+        if result.is_error:
+            post = await dispatcher.fire(
+                POST_TOOL_USE_FAILURE,
+                tool_name=tool.name,
+                tool_args=effective_args,
+                result={"content": result.content, "is_error": True},
+            )
+        else:
+            post = await dispatcher.post_tool_use(
+                tool.name, effective_args, result.content, result.is_error
+            )
         if post.verdict != "allow" or post.reason:
             result.metadata["post_hook"] = {"verdict": post.verdict, "reason": post.reason}
         return result

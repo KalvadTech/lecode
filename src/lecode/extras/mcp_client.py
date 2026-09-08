@@ -1,12 +1,12 @@
 """The MCP client: connects configured + auto servers and exposes their tools.
 
-Uses the official ``mcp`` SDK over stdio and streamable-HTTP. Each server is
-connected lazily at session start with a ~10s budget; failures are isolated
-per server (one bad server never blocks the others or startup). Discovered
-tools are registered as lecode tools named ``mcp:<server>:<tool>`` — the
-permission system already treats exa/context7/grep-app as read-equivalent,
-every other MCP tool falls back to the mode default (Allow in yolo, Deny in
-readonly).
+Uses the official ``mcp`` SDK over stdio, streamable-HTTP, and SSE. Each
+server is connected lazily at session start with a ~10s budget; failures are
+isolated per server (one bad server never blocks the others or startup).
+Discovered tools are registered as lecode tools named ``mcp:<server>:<tool>``
+— the permission system already treats exa/context7/grep-app as
+read-equivalent, every other MCP tool falls back to the mode default (Allow
+in yolo, Deny in readonly).
 
 Auto-configured servers (``[mcp] enable_exa`` / ``enable_context7``):
 
@@ -16,16 +16,19 @@ Auto-configured servers (``[mcp] enable_exa`` / ``enable_context7``):
   header — Exa's exact header scheme is not pinned down in their docs.
 - **context7** (default off): ``https://mcp.context7.com/mcp``, no auth.
 
-OAuth 2.1 for HTTP servers (``[mcp.servers.<name>] auth = "oauth"``)
-rides on the SDK's ``OAuthClientProvider`` (see ``lecode.extras.mcp_auth``):
-automatic connections reuse cached credentials and refresh them silently;
-interactive login is explicit via ``/mcp auth <name>``, which opens the
-browser and serves the redirect on a loopback port. Static bearer tokens via
-``[mcp.servers.<name>].headers`` remain the supported path for servers that
-do not speak OAuth.
+OAuth 2.1 for remote servers (``transport = "http"`` or ``"sse"``;
+``[mcp.servers.<name>] auth = "oauth"``) rides on the SDK's
+``OAuthClientProvider`` (see ``lecode.extras.mcp_auth``): automatic
+connections reuse cached credentials and refresh them silently; interactive
+login is explicit via ``/mcp auth <name>`` (alias ``/mcp login <name>``),
+which opens the browser and serves the redirect on a loopback port. Static
+bearer tokens via ``[mcp.servers.<name>].headers`` remain the supported path
+for servers that do not speak OAuth.
 
 Failed tool calls get exactly one reconnect attempt (fresh session), then an
-error result. Everything is fail-open: MCP trouble never blocks the agent.
+error result; a 401 on an OAuth server first drops the stored grant, so the
+server lands in ``auth_required`` instead of looping on the dead token.
+Everything is fail-open: MCP trouble never blocks the agent.
 """
 
 from __future__ import annotations
@@ -199,9 +202,17 @@ def _result_text(result: Any) -> str:
 class McpManager:
     """Owns MCP server sessions; bridges their tools into lecode."""
 
-    def __init__(self, config: Config, ctx: ToolContext | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        ctx: ToolContext | None = None,
+        *,
+        notify: Callable[[str], Any] | None = None,
+    ) -> None:
         self._config = config
         self._ctx = ctx
+        #: Async ``(text) -> None`` for user-facing OAuth progress lines.
+        self._notify = notify
         self._servers: dict[str, _Server] = {}
         self._registry: ToolRegistry | None = None
         self._closed = False
@@ -287,15 +298,34 @@ class McpManager:
         http_client: Any | None = None,
     ) -> tuple[Any, Any]:
         config = server.config
-        if config.transport == "http":
+        if config.transport in ("http", "sse"):
             if not config.url:
-                raise ValueError(f"mcp server {server.name}: http transport needs a url")
+                raise ValueError(
+                    f"mcp server {server.name}: {config.transport} transport needs a url"
+                )
+            if config.transport == "sse":
+                from mcp.client.sse import sse_client
+
+                auth = None
+                if config.auth == "oauth":
+                    auth = await self._oauth_provider(server, config, stack)
+                return await stack.enter_async_context(
+                    sse_client(
+                        config.url,
+                        headers=config.headers or None,
+                        **({"auth": auth} if auth is not None else {}),
+                    )
+                )
             from mcp.client.streamable_http import streamable_http_client
 
             if http_client is None:
                 http_client = await self._build_http_client(server, config, stack)
             return await stack.enter_async_context(
                 streamable_http_client(config.url, http_client=http_client)
+            )
+        if config.auth == "oauth":
+            raise ValueError(
+                f"mcp server {server.name}: auth = 'oauth' needs an http or sse transport"
             )
         if not config.command:
             raise ValueError(f"mcp server {server.name}: stdio transport needs a command")
@@ -312,21 +342,25 @@ class McpManager:
         stack.callback(devnull.close)
         return await stack.enter_async_context(stdio_client(params, errlog=devnull))
 
-    async def _build_http_client(
+    async def _oauth_notify(self, text: str) -> None:
+        if self._notify is not None:
+            try:
+                result = self._notify(text)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                log.debug("mcp: notify failed: %s", e)
+
+    async def _oauth_provider(
         self, server: _Server, config: McpServerConfig, stack: contextlib.AsyncExitStack
     ) -> Any:
-        """The httpx client for one server, with OAuth attached when configured."""
-        from mcp.client.streamable_http import create_mcp_http_client
+        """The SDK OAuth provider for one http/sse server.
 
-        url = config.url
-        if not url:
-            raise ValueError(f"mcp server {server.name}: http transport needs a url")
-        headers = config.headers or None
-        if config.auth != "oauth":
-            return create_mcp_http_client(headers=headers)
-        if config.transport != "http":
-            raise ValueError(f"mcp server {server.name}: auth='oauth' requires transport='http'")
-        if any(key.lower() == "authorization" for key in (config.headers or {})):
+        File-backed storage; a loopback callback is only attached for
+        interactive logins (``/mcp auth``), so automatic connects reuse cached
+        credentials and never block on a browser.
+        """
+        if any(key.lower() == "authorization" for key in config.headers):
             raise ValueError(
                 f"mcp server {server.name}: auth='oauth' conflicts with a static "
                 "Authorization header — drop the header, OAuth manages Authorization"
@@ -337,13 +371,28 @@ class McpManager:
             make_oauth_provider,
         )
 
-        storage = FileTokenStorage(url)
+        storage = FileTokenStorage(config.url or "")
         loopback = None
         if server.interactive:
-            loopback = await LoopbackAuthCallback.open(storage, announce=server.announce)
+            loopback = await LoopbackAuthCallback.open(
+                storage, announce=server.announce or self._notify
+            )
             stack.push_async_callback(loopback.aclose)
+        return await make_oauth_provider(storage.server_url, storage, loopback)
+
+    async def _build_http_client(
+        self, server: _Server, config: McpServerConfig, stack: contextlib.AsyncExitStack
+    ) -> Any:
+        """The httpx client for one server, with OAuth attached when configured."""
+        from mcp.client.streamable_http import create_mcp_http_client
+
+        if not config.url:
+            raise ValueError(f"mcp server {server.name}: http transport needs a url")
+        headers = config.headers or None
+        if config.auth != "oauth":
+            return create_mcp_http_client(headers=headers)
         return create_mcp_http_client(
-            headers=headers, auth=await make_oauth_provider(url, storage, loopback)
+            headers=headers, auth=await self._oauth_provider(server, config, stack)
         )
 
     async def _close_server(self, server: _Server) -> None:
@@ -397,6 +446,15 @@ class McpManager:
                 return await self._call_once(server, tool_name, args)
             except Exception as e:
                 log.debug("mcp: %s:%s call failed, reconnecting: %s", server_name, tool_name, e)
+                if server.config.auth == "oauth" and "401" in str(e):
+                    # Stale/revoked grant: drop it so the reconnect cannot loop
+                    # on the dead token; the server lands in auth_required and
+                    # the user re-authorizes with /mcp auth.
+                    await self._drop_credentials(server)
+                    await self._oauth_notify(
+                        f"mcp {server_name}: authorization expired — "
+                        f"re-authorize with /mcp auth {server_name}"
+                    )
         await self._close_server(server)
         await self._connect_one(server)
         self._sync_tools(server_name)
@@ -463,8 +521,15 @@ class McpManager:
         if server is None:
             return None
         if server.config.auth != "oauth":
-            server.error = "this server is not configured with auth = 'oauth'"
-            return server.status
+            # server.status would drop the error for a connected server, so
+            # build the status by hand.
+            current = server.status
+            return ServerStatus(
+                name,
+                current.state,
+                tools=current.tools,
+                error="this server is not configured with auth = 'oauth'",
+            )
         await self._close_server(server)
         server.error = None
         server.auth_required = False
@@ -492,8 +557,13 @@ class McpManager:
         if server is None:
             return None
         if server.config.auth != "oauth" or not server.config.url:
-            server.error = "logout applies only to OAuth servers"
-            return server.status
+            current = server.status
+            return ServerStatus(
+                name,
+                current.state,
+                tools=current.tools,
+                error="logout applies only to OAuth servers",
+            )
         await self._close_server(server)
         from lecode.extras.mcp_auth import FileTokenStorage
 
@@ -502,6 +572,37 @@ class McpManager:
         server.auth_required = True
         self._sync_tools(name)
         return server.status
+
+    async def login(
+        self, name: str, announce: Callable[[str], Any] | None = None
+    ) -> ServerStatus | None:
+        """Force a fresh interactive login: drop stored credentials first.
+
+        ``authenticate`` reuses still-valid cached credentials; ``login``
+        always re-runs the browser flow (e.g. to switch accounts).
+        """
+        server = self._servers.get(name)
+        if server is None:
+            return None
+        if server.config.auth == "oauth" and server.config.url:
+            from lecode.extras.mcp_auth import FileTokenStorage
+
+            await FileTokenStorage(server.config.url).clear()
+        return await self.authenticate(name, announce)
+
+    async def _drop_credentials(self, server: _Server) -> None:
+        """Clear one OAuth server's stored + in-memory credentials."""
+        if not server.config.url:
+            return
+        session = server.session
+        auth = getattr(getattr(session, "_client", None), "auth", None)
+        context = getattr(auth, "context", None)
+        if context is not None:
+            context.clear_tokens()
+            context.client_info = None
+        from lecode.extras.mcp_auth import FileTokenStorage
+
+        await FileTokenStorage(server.config.url).clear()
 
     async def shutdown(self) -> None:
         """Close every server session; idempotent, never raises."""
@@ -529,15 +630,23 @@ class McpTool(Tool):
         return await self._manager.call(self._server_name, self._tool_name, args)
 
 
-async def attach_mcp(registry: ToolRegistry, ctx: ToolContext) -> McpManager:
+async def attach_mcp(
+    registry: ToolRegistry,
+    ctx: ToolContext,
+    *,
+    notify: Callable[[str], Any] | None = None,
+) -> McpManager:
     """Connect MCP servers and register their tools into ``registry``.
 
-    Never raises: per-server failures are isolated inside the manager, and a
-    wholesale failure just leaves zero MCP tools registered. The manager is
-    always installed under ``ctx.extras["mcp"]`` so ``/mcp`` can report, and
-    keeps the registry handle so later reconnects/auth/logout can update it.
+    ``notify`` receives user-facing lines (an OAuth authorization URL when an
+    interactive login has no explicit ``announce``, expired-grant notices);
+    the TUI passes a feed line, headless a stderr write. Never raises:
+    per-server failures are isolated inside the manager, and a wholesale
+    failure just leaves zero MCP tools registered. The manager is always
+    installed under ``ctx.extras["mcp"]`` so ``/mcp`` can report, and keeps
+    the registry handle so later reconnects/auth/logout can update it.
     """
-    manager = McpManager(ctx.config, ctx)
+    manager = McpManager(ctx.config, ctx, notify=notify)
     manager.bind_registry(registry)
     ctx.extras[MCP_EXTRA] = manager
     try:

@@ -161,7 +161,11 @@ portal.
   whitespace-normalized search/replace and CRC-anchored line addressing), `bash`
   (timeout, truncation, idle timeout, `rtk` output compaction), `grep` (regex + glob +
   context; implemented over `rg`), `find_files` (glob; implemented over `fd`); plus
-  `list_dir`, `todo_write`, `lsp_diagnostics`, the four `memory_*` tools;
+  `list_dir`, `todo_write`, `lsp_diagnostics`, `ask_user` (inline structured
+  multiple-choice questions, keyboard-answered in the TUI), the four `memory_*` tools;
+  `bash`/`task` accept `run_in_background` (detached, manager-owned, completion fed
+  back into the next turn) with `tasks_list` / `tasks_output` / `tasks_wait` /
+  `tasks_stop` to inspect and control them, plus a `/tasks` command;
   MCP-provided web search/fetch via Exa.
 - **Custom agents**: built-in primaries `build` (full access) and `plan` (read-only +
   ask), cycled with Tab and shown in the statusline; user agents from markdown files
@@ -243,9 +247,11 @@ portal.
 - **Subagents**: `task` tool spawning parallel child agents (per-prompt, timeout +
   response cap) — built-in read-only `explore` plus user-defined agents; own model
   (`/model-subagent`), tool calls visible in feed; subagent lifecycle hooks fire.
-- **MCP client**: stdio + streamable-HTTP servers via the official `mcp` Python SDK
-  (OAuth here is for MCP servers only, unrelated to LLM auth), per-server
-  timeouts/reconnect, tools under the permission system, `/mcp` management.
+- **MCP client**: stdio + streamable-HTTP + SSE servers via the official `mcp`
+  Python SDK, with optional interactive OAuth for remote servers
+  (`auth = "oauth"`; credentials under `<config_dir>/mcp-auth/`, unrelated to
+  LLM auth), per-server timeouts/reconnect, tools under the permission system,
+  `/mcp` management.
   **Auto-configured servers**: Exa web search (default on, needs `EXA_API_KEY` or
   dashboard key flow) and context7 docs lookup (default off, `enable_context7 = true`).
 - **Git worktrees**: `--worktree <name>` isolated worktree+branch, merge-back on exit

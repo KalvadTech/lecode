@@ -6,8 +6,10 @@ from lecode.agent.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
 
 
 def core_tools() -> list[Tool]:
-    """The eight core tools."""
+    """The thirteen core tools."""
     from lecode.agent.tools import (
+        ask_user,
+        background,
         bash,
         edit,
         find_files,
@@ -27,6 +29,8 @@ def core_tools() -> list[Tool]:
         find_files.make_tool(),
         list_dir.make_tool(),
         todo_write.make_tool(),
+        ask_user.make_tool(),
+        *background.make_tools(),
     ]
 
 

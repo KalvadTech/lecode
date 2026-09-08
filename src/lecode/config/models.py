@@ -131,12 +131,14 @@ class PermissionsConfig(BaseModel):
 
 
 class NotificationsConfig(BaseModel):
-    """``[notifications]`` — audio notifications."""
+    """``[notifications]`` — sound and desktop notifications."""
 
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = True
     volume: float = Field(default=0.5, ge=0.0, le=1.0)
+    sound: bool = True
+    desktop: bool = True
     on_finish: bool = True
     on_error: bool = True
     on_approval: bool = True
@@ -157,17 +159,17 @@ class McpServerConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    transport: Literal["stdio", "http"] = "stdio"
+    transport: Literal["stdio", "http", "sse"] = "stdio"
     # stdio
     command: str | None = None
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
-    # http
+    # http / sse
     url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
     #: ``"oauth"`` enables the SDK's OAuth 2.1 flow (discovery, dynamic client
     #: registration, PKCE). ``None`` keeps static ``headers`` (bearer token)
-    #: authentication. Only meaningful with ``transport = "http"``.
+    #: authentication. Only meaningful with ``transport = "http"`` or ``"sse"``.
     auth: Literal["oauth"] | None = None
     # common
     timeout_s: float = 30.0

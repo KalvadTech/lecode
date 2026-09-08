@@ -38,8 +38,8 @@ SUBAGENT_TIMEOUT_S = 300.0
 #: Cap on the final text handed back to the parent (chars).
 SUBAGENT_RESPONSE_CAP = 32 * 1024
 
-#: Tools never handed to a subagent (no recursion).
-CHILD_EXCLUDED_TOOLS = frozenset({"task"})
+#: Tools never handed to a subagent (no recursion, no user interaction).
+CHILD_EXCLUDED_TOOLS = frozenset({"task", "ask_user"})
 
 #: ``ctx.extras`` keys the subagent machinery reads.
 PROVIDER_EXTRA = "provider"
@@ -141,6 +141,7 @@ async def run_subagent(
         session_store=None,
         todos=[],
         extras=extras,
+        question_callback=None,  # children decide themselves; only the parent asks
     )
 
     system_prompt = build_system_prompt(ctx.config, ctx.cwd, extra=agent.body or None)

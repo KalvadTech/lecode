@@ -12,9 +12,12 @@ Every event delivered to a hook handler carries a JSON envelope on stdin:
       "cwd": "/path/to/project"
     }
 
-``tool`` is present for ``PreToolUse``/``PostToolUse``, ``result`` only for
-``PostToolUse``, ``prompt`` only for ``UserPromptSubmit``, ``agent`` only for
-``SubagentStart``/``SubagentEnd``. ``session`` is ``None`` outside a session.
+``tool`` is present for tool and permission events, ``result`` for
+``PostToolUse``/``PostToolUseFailure``, ``prompt`` only for
+``UserPromptSubmit``, ``agent`` only for ``SubagentStart``/``SubagentEnd``.
+``reason`` carries the ``Stop`` stop reason (and error text for the
+``Notification`` error kind), ``decision`` the ``PermissionResult`` outcome,
+``kind`` the ``Notification`` kind. ``session`` is ``None`` outside a session.
 """
 
 from __future__ import annotations
@@ -25,23 +28,37 @@ from typing import Any
 
 PRE_TOOL_USE = "PreToolUse"
 POST_TOOL_USE = "PostToolUse"
-STOP = "Stop"
+POST_TOOL_USE_FAILURE = "PostToolUseFailure"
+PERMISSION_REQUEST = "PermissionRequest"
+PERMISSION_RESULT = "PermissionResult"
 USER_PROMPT_SUBMIT = "UserPromptSubmit"
+STOP = "Stop"
 SESSION_START = "SessionStart"
 SESSION_END = "SessionEnd"
 SUBAGENT_START = "SubagentStart"
 SUBAGENT_END = "SubagentEnd"
+PRE_COMPACT = "PreCompact"
+POST_COMPACT = "PostCompact"
+INTERRUPT = "Interrupt"
+NOTIFICATION = "Notification"
 
 #: All known hook event names, in canonical order.
 EVENTS = (
     PRE_TOOL_USE,
     POST_TOOL_USE,
-    STOP,
+    POST_TOOL_USE_FAILURE,
+    PERMISSION_REQUEST,
+    PERMISSION_RESULT,
     USER_PROMPT_SUBMIT,
+    STOP,
     SESSION_START,
     SESSION_END,
     SUBAGENT_START,
     SUBAGENT_END,
+    PRE_COMPACT,
+    POST_COMPACT,
+    INTERRUPT,
+    NOTIFICATION,
 )
 
 
@@ -55,6 +72,9 @@ def build_envelope(
     result: dict[str, Any] | None = None,
     prompt: str | None = None,
     agent: str | None = None,
+    decision: str | None = None,
+    reason: str | None = None,
+    kind: str | None = None,
 ) -> dict[str, Any]:
     """Build the JSON envelope delivered to hook handlers on stdin."""
     envelope: dict[str, Any] = {
@@ -75,4 +95,10 @@ def build_envelope(
         envelope["prompt"] = prompt
     if agent is not None:
         envelope["agent"] = agent
+    if decision is not None:
+        envelope["decision"] = decision
+    if reason is not None:
+        envelope["reason"] = reason
+    if kind is not None:
+        envelope["kind"] = kind
     return envelope

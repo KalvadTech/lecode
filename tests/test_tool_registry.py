@@ -28,6 +28,11 @@ def test_openai_tool_specs_shape(registry):
         "find_files",
         "list_dir",
         "todo_write",
+        "ask_user",
+        "tasks_list",
+        "tasks_output",
+        "tasks_stop",
+        "tasks_wait",
     }
     for spec in specs:
         assert spec["type"] == "function"
