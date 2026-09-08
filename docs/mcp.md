@@ -51,9 +51,10 @@ auth = "oauth"
   access token is refreshed silently from its refresh token; a missing or
   rejected refresh shows `authentication required`. Startup never blocks on
   a browser.
-- `/mcp auth glitchtip` runs the interactive login: it opens your browser,
-  the server walks you through approval, and the redirect lands back on a
-  loopback port lecode serves (`http://127.0.0.1:<port>/callback`).
+- `/mcp auth glitchtip` runs the interactive login: it opens your browser
+  and prints the authorization URL in the feed (paste it into a different
+  browser if you prefer); the redirect lands back on a loopback port lecode
+  serves (`http://127.0.0.1:<port>/callback`).
 - `/mcp logout glitchtip` drops the session and the persisted credentials.
 - Credentials (access + refresh tokens, client registration) are stored per
   endpoint under `~/.config/lecode/mcp-auth/` (0600 files, 0700 directory,

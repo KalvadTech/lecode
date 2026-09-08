@@ -34,6 +34,7 @@ import asyncio
 import contextlib
 import logging
 import os
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -114,6 +115,8 @@ class _Server:
     error: str | None = None
     auth_required: bool = False
     interactive: bool = False
+    #: called with the authorization URL during an interactive login (UI hint)
+    announce: Callable[[str], Any] | None = None
 
     @property
     def status(self) -> ServerStatus:
@@ -166,6 +169,27 @@ def _connect_failure(e: BaseException) -> tuple[str, bool]:
     return f"{type(e).__name__}: {_clean_error(e)}", False
 
 
+@contextlib.contextmanager
+def _quiet_oauth_flow_logs() -> Iterator[None]:
+    """Mute the SDK's expected dead-end OAuth logging during automatic connects.
+
+    Without stored credentials the SDK still attempts the authorization-code
+    grant, hits "No redirect handler provided", and logs it at ERROR with a
+    full traceback — splashing raw stderr around the TUI at every startup
+    until the user runs ``/mcp auth``. The failure is expected and already
+    classified as auth_required; only the noise is lost.
+    """
+    loggers = [logging.getLogger(n) for n in ("mcp.client.auth", "mcp.client.auth.oauth2")]
+    saved = [(lg, lg.level) for lg in loggers]
+    for lg in loggers:
+        lg.setLevel(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        for lg, level in saved:
+            lg.setLevel(level)
+
+
 def _result_text(result: Any) -> str:
     """Flatten a CallToolResult's content parts to plain text."""
     parts = [getattr(part, "text", "") for part in result.content or []]
@@ -195,8 +219,10 @@ class McpManager:
     async def _connect_one(self, server: _Server) -> None:
         if not server.config.enabled:
             return
+        quiet = server.config.auth == "oauth" and not server.interactive
         try:
-            await asyncio.wait_for(self._open(server), timeout=CONNECT_TIMEOUT_S)
+            with _quiet_oauth_flow_logs() if quiet else contextlib.nullcontext():
+                await asyncio.wait_for(self._open(server), timeout=CONNECT_TIMEOUT_S)
             server.error = None
             server.auth_required = False
             log.debug("mcp: %s connected (%d tools)", server.name, len(server.tools))
@@ -314,7 +340,7 @@ class McpManager:
         storage = FileTokenStorage(url)
         loopback = None
         if server.interactive:
-            loopback = await LoopbackAuthCallback.open(storage)
+            loopback = await LoopbackAuthCallback.open(storage, announce=server.announce)
             stack.push_async_callback(loopback.aclose)
         return create_mcp_http_client(
             headers=headers, auth=await make_oauth_provider(url, storage, loopback)
@@ -422,11 +448,16 @@ class McpManager:
         self._sync_tools(name)
         return server.status
 
-    async def authenticate(self, name: str) -> ServerStatus | None:
+    async def authenticate(
+        self, name: str, announce: Callable[[str], Any] | None = None
+    ) -> ServerStatus | None:
         """Interactive OAuth login for one server (opens the browser).
 
         Runs outside the normal per-server connect budget: the user needs time
-        to approve in the browser. Non-OAuth servers get a plain error state.
+        to approve in the browser. ``announce`` is called with the
+        authorization URL just before the browser opens, so the UI can show
+        the link (a different browser can be used with it). Non-OAuth servers
+        get a plain error state.
         """
         server = self._servers.get(name)
         if server is None:
@@ -438,6 +469,7 @@ class McpManager:
         server.error = None
         server.auth_required = False
         server.interactive = True
+        server.announce = announce
         try:
             await asyncio.wait_for(self._open(server), timeout=INTERACTIVE_AUTH_BUDGET_S)
         except asyncio.CancelledError:
@@ -450,6 +482,7 @@ class McpManager:
             log.debug("mcp: %s authentication failed: %s", name, e)
         finally:
             server.interactive = False
+            server.announce = None
         self._sync_tools(name)
         return server.status
 

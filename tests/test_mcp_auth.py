@@ -9,6 +9,7 @@ client: resource/server metadata, dynamic registration, an insta-consent
 from __future__ import annotations
 
 import asyncio
+import logging
 import stat
 import time
 from collections.abc import Awaitable, Callable
@@ -228,7 +229,9 @@ async def test_mcp_auth_and_logout_commands(tmp_path, monkeypatch):
     app.runtime.ctx.extras[MCP_EXTRA] = manager
     try:
 
-        async def fake_authenticate(name):
+        async def fake_authenticate(name, announce=None):
+            if announce is not None:
+                announce("https://auth.example/authorize?code_challenge=x")
             return ServerStatus(name, "connected", tools=4)
 
         async def fake_logout(name):
@@ -239,6 +242,8 @@ async def test_mcp_auth_and_logout_commands(tmp_path, monkeypatch):
 
         await app.handle_command("/mcp auth test")
         assert "test authenticated (4 tools)" in out.getvalue()
+        assert "authorization URL" in out.getvalue()
+        assert "https://auth.example/authorize?code_challenge=x" in out.getvalue()
         await app.handle_command("/mcp logout test")
         assert "test logged out" in out.getvalue()
         await app.handle_command("/mcp auth nope")
@@ -654,5 +659,65 @@ async def test_oauth_no_browser_available(tmp_path, monkeypatch, fake_oauth_serv
         status = await manager.authenticate("oauth")
         assert status.state == "auth_required"
         assert "browser" in status.error
+        # when no browser can be opened, the error carries the URL to open by hand
+        assert f"{base}/authorize?" in status.error
+    finally:
+        await manager.shutdown()
+
+
+async def test_oauth_auth_announces_authorization_url(tmp_path, monkeypatch, fake_oauth_server):
+    """/mcp auth must surface the authorization URL so another browser can be used."""
+    base, _ = fake_oauth_server
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "lecode-config"))
+    config = Config()
+    config.mcp.enable_exa = False
+    config.mcp.servers["oauth"] = McpServerConfig(
+        transport="http", url=f"{base}/mcp", auth="oauth", timeout_s=5.0
+    )
+    monkeypatch.setattr(mcp_auth_mod.webbrowser, "open", _fake_browser)
+
+    manager = McpManager(config)
+    try:
+        await manager.connect()
+        announced: list[str] = []
+        status = await manager.authenticate("oauth", announce=announced.append)
+        assert status.state == "connected"
+        assert len(announced) == 1  # once, before the browser opened
+        assert announced[0].startswith(f"{base}/authorize?")
+        assert "127.0.0.1" in announced[0]  # the loopback redirect is in the URL
+    finally:
+        await manager.shutdown()
+
+
+async def test_automatic_connect_does_not_splash_oauth_flow_traceback(
+    tmp_path, monkeypatch, fake_oauth_server, caplog
+):
+    """The expected no-credentials dead end at startup must not hit the terminal.
+
+    Without stored tokens the SDK still attempts the authorization-code grant,
+    hits "No redirect handler provided", and logs it at ERROR with a full
+    traceback — raw stderr splashing around the TUI at every startup until the
+    user runs /mcp auth. The manager already classifies it as auth_required.
+    """
+    base, _ = fake_oauth_server
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "lecode-config"))
+    config = Config()
+    config.mcp.enable_exa = False
+    config.mcp.servers["oauth"] = McpServerConfig(
+        transport="http", url=f"{base}/mcp", auth="oauth", timeout_s=5.0
+    )
+    monkeypatch.setattr(mcp_auth_mod.webbrowser, "open", _fake_browser)
+
+    manager = McpManager(config)
+    try:
+        with caplog.at_level(logging.DEBUG, logger="mcp.client.auth"):
+            await manager.connect()
+        assert manager.status()[0].state == "auth_required"
+        loud = [
+            r
+            for r in caplog.records
+            if r.name.startswith("mcp.client.auth") and r.levelno >= logging.ERROR
+        ]
+        assert loud == []
     finally:
         await manager.shutdown()

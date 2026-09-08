@@ -25,6 +25,7 @@ import os
 import tempfile
 import time
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlsplit
@@ -225,16 +226,25 @@ class LoopbackAuthCallback:
         redirect_url: str,
         result: asyncio.Future[dict[str, list[str]]],
         accepted: set[asyncio.StreamWriter],
+        announce: Callable[[str], Any] | None = None,
     ) -> None:
         self.server_url = server_url
         self._server = server
         self.redirect_url = redirect_url
         self._result = result
         self._accepted = accepted
+        self._announce = announce
 
     @classmethod
-    async def open(cls, storage: FileTokenStorage) -> LoopbackAuthCallback:
-        """Bind the callback listener, reusing the port registered previously."""
+    async def open(
+        cls, storage: FileTokenStorage, announce: Callable[[str], Any] | None = None
+    ) -> LoopbackAuthCallback:
+        """Bind the callback listener, reusing the port registered previously.
+
+        ``announce`` (optional) is called with the authorization URL right
+        before the browser opens — the UI uses it to show the link so the
+        user can paste it into a different browser.
+        """
         port = _redirect_port(storage.server_url)
         client_info = await storage.get_client_info()
         registered = client_info.redirect_uris if client_info is not None else None
@@ -296,16 +306,19 @@ class LoopbackAuthCallback:
             server = await asyncio.start_server(handle, "127.0.0.1", 0)
         actual_port = server.sockets[0].getsockname()[1]
         redirect_url = f"http://127.0.0.1:{actual_port}{_REDIRECT_CALLBACK}"
-        return cls(storage.server_url, server, redirect_url, result, accepted)
+        return cls(storage.server_url, server, redirect_url, result, accepted, announce)
 
     async def open_browser(self, authorization_url: str) -> None:
         """The SDK's redirect_handler: hand the URL to the system browser."""
         from mcp.client.auth import OAuthFlowError
 
+        if self._announce is not None:
+            with contextlib.suppress(Exception):  # announcing is best-effort
+                self._announce(authorization_url)
         opened = await asyncio.to_thread(webbrowser.open, authorization_url)
         if not opened:
             raise OAuthFlowError(
-                "could not open a browser on this machine — run /mcp auth where one exists"
+                f"could not open a browser — open this URL to continue: {authorization_url}"
             )
 
     async def wait_for_callback(self) -> AuthorizationCodeResult:

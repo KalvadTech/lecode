@@ -1004,7 +1004,12 @@ async def cmd_mcp(app: TuiApp, args: list[str]) -> None:
             app.feed.error(f"unknown MCP server: {name}")
             return
         app.feed.info(f"mcp: {name}: opening your browser for OAuth login — approve there…")
-        status = await manager.authenticate(name)
+        status = await manager.authenticate(
+            name,
+            announce=lambda url: app.feed.info(
+                f"mcp: {name}: authorization URL (a different browser works too): {url}"
+            ),
+        )
         if status.error and status.state == "connected":
             # e.g. /mcp auth on a server without auth = "oauth"
             app.feed.error(f"mcp: {name}: {status.error}")
