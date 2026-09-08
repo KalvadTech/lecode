@@ -96,7 +96,8 @@ session: fix-auth · agent: build · in: 4.1k · out: 0.9k · ⠼
 ```
 
 One fixed statusline, every element labelled: directory · commit · branch ·
-diff / model · cost · context meter / session · agent · tokens · state.
+diff / model · cost · context meter / session · agent · tokens · state
+(a reasoning-level override shows on the model line when `/thinking` is set).
 No configuration needed.
 
 Useful things to type:
@@ -105,6 +106,8 @@ Useful things to type:
 /help                     all slash commands, grouped
 /welcome                  key bindings cheat-sheet
 /tutor permissions        explain one feature
+/tasks                    background tasks, live
+/doctor                   health-check the install
 !make test                run a shell command, see the output
 !!pytest -x               run it AND feed the output to the model
 @src/auth.py              attach a file (images/PDF/audio too)
@@ -164,10 +167,10 @@ non-tty `--setup`) · `3` max turns / max loop iterations / context overflow.
   desktop notifications (osascript / notify-send) on turn finish, error, and
   approval-needed. `/notifications on|off`; channels and per-event toggles in
   `[notifications]`.
-- **MCP** — stdio, streamable-HTTP, and SSE servers, with optional OAuth
-  (`oauth = true`, browser flow, tokens under `<config_dir>/mcp_auth/`;
-  `/mcp login|logout`). Exa web search is preconfigured (needs `EXA_API_KEY`);
-  context7 is one flag away.
+- **MCP** — stdio, streamable-HTTP, and SSE servers, with optional OAuth 2.1
+  (`auth = "oauth"`, browser flow, tokens under `<config_dir>/mcp-auth/`;
+  `/mcp auth` to authorize, `/mcp login|logout` to manage). Exa web search is
+  preconfigured (needs `EXA_API_KEY`); context7 is one flag away.
 - **LSP** — diagnostics from real language servers appended to `write`/`edit`
   results; fail-open, never blocks.
 - **Worktrees** — `--worktree <name>` or `/worktree` for isolated branches,
@@ -179,6 +182,20 @@ non-tty `--setup`) · `3` max turns / max loop iterations / context overflow.
   / `tasks_output` / `tasks_wait` / `tasks_stop` tools, you watch them with
   `/tasks`, and completions land in the feed and in the next turn. Remaining
   tasks are stopped (SIGTERM, then SIGKILL) when the session exits.
+- **Prompts and personas** — the default system prompt is minimal (<300
+  tokens); `style = "rich"` opts into a detailed prompt. 16 named personas
+  (`.review …`, `.plan …`) overlay one turn, `/prompt` switches style,
+  `/editsys` opens the system prompt in `$EDITOR`.
+- **Reasoning levels** — `/thinking` sets the reasoning effort; collapsible
+  thinking blocks in the feed; the statusline shows the active override.
+- **Pickers and polish** — `/` opens a slash-command dropdown, `@` and `.`
+  open fuzzy file/agent/persona pickers — all in themed panels; Tab path
+  completion; queued prompts while the agent runs, Alt-Enter to steer
+  mid-turn; OSC 8 hyperlinks; `/copy` (OSC 52 / pbcopy / xclip).
+- **Status signals** — start/stop/git-conflict events over a Unix socket, for
+  external status bars and scripts.
+- **Doctor** — `/doctor` health-checks the install: external binaries, config,
+  provider connectivity, MCP servers, memory, hooks, telemetry.
 - **Telemetry (opt-in)** — Sentry/GlitchTip error reports and OpenTelemetry
   metrics (turns, tokens, cost, tool calls) via `[telemetry]`; needs the
   `telemetry` extra, fail-open by design.
@@ -206,7 +223,7 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 
 ```sh
 uv sync
-uv run python -m pytest        # 1000+ tests
+uv run python -m pytest        # 1200+ tests
 uv run ruff check && uv run ruff format --check
 prek install                   # git hooks: ruff on commit, pytest on push
 ```
