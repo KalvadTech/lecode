@@ -40,6 +40,7 @@ class StatusLineState(StrEnum):
     IDLE = "idle"
     RUNNING = "running"
     AWAITING_APPROVAL = "awaiting_approval"
+    QUESTION = "question"
 
 
 @dataclass
@@ -109,6 +110,9 @@ def _state_segment(state: StatusState) -> tuple[str, str]:
         color = "accent"
     elif state.state is StatusLineState.AWAITING_APPROVAL:
         text = "awaiting approval"
+        color = "permission"
+    elif state.state is StatusLineState.QUESTION:
+        text = "awaiting answer"
         color = "permission"
     else:
         text = "ready"

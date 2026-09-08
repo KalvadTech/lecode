@@ -138,6 +138,7 @@ def test_yolo_allows_everything():
         ("lsp_diagnostics", {"path": "a.py"}, Decision.ALLOW),
         ("memory_read", {}, Decision.ALLOW),
         ("memory_search", {"query": "x"}, Decision.ALLOW),
+        ("ask_user", {"questions": []}, Decision.ALLOW),
         ("write", {"path": "a.py"}, Decision.DENY),
         ("edit", {"path": "a.py"}, Decision.DENY),
         ("bash", {"command": "ls"}, Decision.DENY),

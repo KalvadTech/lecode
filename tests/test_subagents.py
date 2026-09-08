@@ -129,7 +129,29 @@ async def test_child_uses_agent_prompt_and_lean_registry(tmp_path, monkeypatch):
     assert request["messages"][1] == {"role": "user", "content": "scan"}
     tool_names = {t["function"]["name"] for t in request["tools"]}
     assert "task" not in tool_names  # no recursion
+    assert "ask_user" not in tool_names  # children decide themselves
     assert {"read", "grep", "list_dir"} <= tool_names
+
+
+async def test_child_ctx_drops_question_callback(tmp_path, monkeypatch):
+    """The child ctx (dataclasses.replace of the parent's) must not inherit the
+    interactive question callback even if the parent has one installed."""
+    provider = FakeProvider([{"text": "done"}])
+    runtime = make_runtime(tmp_path, monkeypatch, provider)
+    runtime.ctx.question_callback = object()  # sentinel: must not leak
+    captured = {}
+    real_runner = subagents.AgentRunner
+
+    class SpyRunner(real_runner):
+        def __init__(self, provider, registry, ctx, **kwargs):
+            captured["ctx"] = ctx
+            captured["registry"] = registry
+            super().__init__(provider, registry, ctx, **kwargs)
+
+    monkeypatch.setattr(subagents, "AgentRunner", SpyRunner)
+    await run_subagent(runtime.ctx, runtime.registry, runtime.agents, name="explore", prompt="x")
+    assert "ask_user" not in captured["registry"].names()
+    assert captured["ctx"].question_callback is None
 
 
 async def test_usage_totals_propagate(tmp_path, monkeypatch):
