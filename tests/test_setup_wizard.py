@@ -446,6 +446,115 @@ def test_import_from_opencode_no_model(tmp_path):
     assert import_from_opencode(tmp_path) == {}
 
 
+def test_import_from_opencode_mcp_servers(tmp_path):
+    _write(
+        tmp_path / ".config" / "opencode" / "opencode.json",
+        {
+            "model": "openrouter/moonshotai/kimi-k2.6",
+            "mcp": {
+                "filesystem": {
+                    "type": "local",
+                    "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+                    "environment": {"FOO": "bar"},
+                    "timeout": 5000,
+                },
+                "internal": {
+                    "type": "remote",
+                    "url": "https://mcp.internal.example/mcp",
+                    "headers": {"Authorization": "Bearer tok"},
+                },
+                "legacy": {
+                    "type": "remote",
+                    "url": "https://mcp.remote.example/sse",
+                    "enabled": False,
+                },
+                "broken": {"type": "local"},  # no command → skipped
+            },
+        },
+    )
+    answers = import_from_opencode(tmp_path)
+    assert answers["provider"] == "openrouter"
+    assert answers["mcp_servers"] == {
+        "filesystem": {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+            "env": {"FOO": "bar"},
+            "timeout_s": 5.0,
+        },
+        "internal": {
+            "transport": "http",
+            "url": "https://mcp.internal.example/mcp",
+            "headers": {"Authorization": "Bearer tok"},
+        },
+        "legacy": {
+            "transport": "sse",
+            "url": "https://mcp.remote.example/sse",
+            "enabled": False,
+        },
+    }
+
+
+def test_import_from_opencode_mcp_only(tmp_path):
+    """MCP servers import even when the provider/model doesn't map."""
+    _write(
+        tmp_path / ".config" / "opencode" / "opencode.json",
+        {"mcp": {"docs": {"type": "remote", "url": "https://mcp.context7.com/mcp"}}},
+    )
+    assert import_from_opencode(tmp_path) == {
+        "mcp_servers": {"docs": {"transport": "http", "url": "https://mcp.context7.com/mcp"}}
+    }
+
+
+async def test_wizard_opencode_import_writes_mcp_servers(cfg_dir, tmp_path, capsys):
+    home = tmp_path / "home"
+    _write(
+        home / ".config" / "opencode" / "opencode.json",
+        {
+            "model": "openrouter/moonshotai/kimi-k2.6",
+            "mcp": {
+                "filesystem": {
+                    "type": "local",
+                    "command": ["npx", "-y", "server-filesystem"],
+                }
+            },
+        },
+    )
+    _write(
+        home / ".local" / "share" / "opencode" / "auth.json",
+        {"openrouter": {"key": "sk-or-oc"}},
+    )
+    # import pick, provider (default), key (default), model (default), notif
+    session = FakeSession(["1", "", "", "", ""])
+    path = await run_wizard(session, home=home)
+    out = capsys.readouterr().out
+    assert "imported from opencode" in out
+    assert "1 mcp server" in out
+    raw = tomllib.loads(path.read_text())
+    assert raw["llm"]["provider"] == "openrouter"
+    assert raw["mcp"]["servers"]["filesystem"] == {
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "server-filesystem"],
+    }
+
+
+async def test_wizard_opencode_mcp_only_import_still_asks_provider(cfg_dir, tmp_path, capsys):
+    home = tmp_path / "home"
+    _write(
+        home / ".config" / "opencode" / "opencode.json",
+        {"mcp": {"docs": {"type": "remote", "url": "https://mcp.context7.com/mcp"}}},
+    )
+    # import pick, provider, key, model, notif
+    session = FakeSession(["1", "1", "sk-manual", "1", ""])
+    answers = await gather_answers(session, home=home)
+    assert "1 mcp server" in capsys.readouterr().out
+    assert answers["provider"] == "openrouter"
+    assert answers["mcp_servers"] == {
+        "docs": {"transport": "http", "url": "https://mcp.context7.com/mcp"}
+    }
+
+
 async def test_wizard_import_step_prefills_answers(cfg_dir, tmp_path, capsys):
     home = tmp_path / "home"
     _write(
