@@ -176,6 +176,12 @@ async def _run_pty_app(
         session_pt._output = out
         try:
             task = asyncio.ensure_future(app.run(input=inp, output=out))
+            # Gate keystrokes on the first real render: prompt_toolkit only
+            # enters raw mode (and flushes pre-start input) as the app takes
+            # over the terminal — on a slow runner a byte written after a
+            # fixed sleep can land before that and be echoed by the line
+            # discipline instead of delivered to the input.
+            await _wait_for(lambda: _screen_lines(screen), "dir:")
             driven = asyncio.ensure_future(driver(master, screen))
             await asyncio.wait_for(task, timeout=30)
             return await driven
