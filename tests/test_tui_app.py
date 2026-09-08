@@ -293,6 +293,31 @@ async def test_slash_no_match_row_escape_dismisses_and_reopens(tmp_path, monkeyp
         assert await task == 0
 
 
+async def test_personas_trigger_does_not_list_dotfiles(tmp_path, monkeypatch):
+    """A leading '.' belongs to the personas picker: dotfiles don't flood the
+    menu at input start, but they still complete mid-message."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    (tmp_path / ".env").write_text("KEY=1", encoding="utf-8")
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text(".en")
+        await asyncio.sleep(0.4)  # give any spurious path completion time to land
+        state = _buffer(app).complete_state
+        texts = _command_texts(state) if state is not None else []
+        assert all(text.startswith(".") for text in texts), f"personas only, got: {texts}"
+        assert ".env" not in texts, "dotfiles must not complete at input start"
+        inp.send_text("\x15read .en")  # mid-message: the dotfile is a path token again
+        await wait_for(
+            lambda: (
+                _buffer(app).complete_state is not None
+                and ".env" in _command_texts(_buffer(app).complete_state)
+            )
+        )
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
 async def test_slash_menu_mid_message_does_not_open(tmp_path, monkeypatch):
     """The menu only responds to '/' at the start of the input."""
     app, _, _ = make_app(tmp_path, monkeypatch, [])

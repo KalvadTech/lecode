@@ -11,6 +11,7 @@ from prompt_toolkit.document import Document
 from lecode.extras.proc import ProcResult
 from lecode.session import SessionStore
 from lecode.tui.input import (
+    PATH_COMPLETION_LIMIT,
     KillRing,
     PathCompleter,
     SessionHistory,
@@ -184,11 +185,14 @@ def test_path_token_detection():
     assert _path_token_before_cursor(Document("open ~/.con", 11)) == "~/.con"
     assert _path_token_before_cursor(Document("plain word", 10)) is None
     assert _path_token_before_cursor(Document("", 0)) is None
-    # "/..." at buffer start is the slash-command trigger (the / picker owns
-    # it); mid-message absolute paths are still path tokens.
+    # "/..." at buffer start is the slash-command trigger and "...." the
+    # personas trigger (their pickers own them); mid-message both stay path
+    # tokens, and absolute paths complete anywhere after a space.
     assert _path_token_before_cursor(Document("/mod", 4)) is None
     assert _path_token_before_cursor(Document("/", 1)) is None
+    assert _path_token_before_cursor(Document(".per", 4)) is None
     assert _path_token_before_cursor(Document("read /etc/ho", 12)) == "/etc/ho"
+    assert _path_token_before_cursor(Document("read .env", 9)) == ".env"
 
 
 def _fd_result(stdout: str) -> ProcResult:
@@ -216,6 +220,16 @@ async def test_path_completer_plain_word_yields_nothing(tmp_path, monkeypatch):
     )
     completer = PathCompleter(tmp_path)
     assert await _complete(completer, "just a word") == []
+
+
+async def test_path_completer_caps_file_completions(tmp_path, monkeypatch):
+    """The path completer yields at most PATH_COMPLETION_LIMIT matches."""
+    listing = "\n".join(f"logs/file{i:02d}.txt" for i in range(30))
+    monkeypatch.setattr("lecode.tui.input.run_proc", lambda *a, **k: _async(_fd_result(listing)))
+    completer = PathCompleter(tmp_path)
+    completions = await _complete(completer, "logs/")
+    assert len(completions) == PATH_COMPLETION_LIMIT
+    assert completions[0] == "logs/file00.txt"
 
 
 async def test_path_completer_scandir_fallback(tmp_path, monkeypatch):
