@@ -184,6 +184,11 @@ def test_path_token_detection():
     assert _path_token_before_cursor(Document("open ~/.con", 11)) == "~/.con"
     assert _path_token_before_cursor(Document("plain word", 10)) is None
     assert _path_token_before_cursor(Document("", 0)) is None
+    # "/..." at buffer start is the slash-command trigger (the / picker owns
+    # it); mid-message absolute paths are still path tokens.
+    assert _path_token_before_cursor(Document("/mod", 4)) is None
+    assert _path_token_before_cursor(Document("/", 1)) is None
+    assert _path_token_before_cursor(Document("read /etc/ho", 12)) == "/etc/ho"
 
 
 def _fd_result(stdout: str) -> ProcResult:

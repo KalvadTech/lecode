@@ -72,7 +72,25 @@ def _ranked[T](token: str, candidates: list[tuple[str, T]]) -> list[tuple[str, T
     return [(name, payload) for _, name, payload in scored]
 
 
-def _trigger_token(document: Document) -> tuple[str, str] | None:
+def prefix_matches[T](token: str, candidates: list[tuple[str, T]]) -> list[tuple[str, T]]:
+    """Case-insensitive prefix matches, alphabetical (the ``/`` picker)."""
+    prefix = token.lower()
+    return sorted(
+        (name, payload) for name, payload in candidates if name.lower().startswith(prefix)
+    )
+
+
+def command_candidates(skills: SkillRegistry) -> list[tuple[str, str]]:
+    """Built-in commands plus skill-registered ones (first name wins)."""
+    commands = list(BUILTIN_COMMANDS)
+    known = {name for name, _ in commands}
+    for info in skill_commands(skills).values():
+        if info["name"] not in known:
+            commands.append((info["name"], info["description"]))
+    return commands
+
+
+def trigger_token(document: Document) -> tuple[str, str] | None:
     """``(trigger, token)`` for ``@``/``/``/``.``, or ``None`` off-trigger."""
     before = document.text_before_cursor
     word = before.split(" ")[-1] if before else ""
@@ -107,23 +125,12 @@ class TriggerCompleter(Completer):
         self._agents = agents
         self._skills = skills
 
-    # -- candidates ---------------------------------------------------------
-
-    def _command_candidates(self) -> list[tuple[str, str]]:
-        """Built-in commands plus skill-registered ones (first name wins)."""
-        commands = list(BUILTIN_COMMANDS)
-        known = {name for name, _ in commands}
-        for info in skill_commands(self._skills).values():
-            if info["name"] not in known:
-                commands.append((info["name"], info["description"]))
-        return commands
-
     # -- completions ----------------------------------------------------------
 
     async def get_completions_async(
         self, document: Document, complete_event: CompleteEvent
     ) -> AsyncGenerator[Completion, None]:
-        trigger = _trigger_token(document)
+        trigger = trigger_token(document)
         if trigger is None:
             return
         kind, token = trigger
@@ -145,7 +152,7 @@ class TriggerCompleter(Completer):
                     display_meta="file",
                 )
         elif kind == "/":
-            for name, description in _ranked(token, self._command_candidates()):
+            for name, description in prefix_matches(token, command_candidates(self._skills)):
                 yield Completion(
                     f"/{name} ",
                     start_position=-word_len,

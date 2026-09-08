@@ -142,6 +142,23 @@ async def test_slash_includes_skill_commands(lister, agents):
     assert str(completions[0].display_meta_text) == "/deploy <env>"
 
 
+async def test_slash_prefix_filter_is_case_insensitive_and_alphabetical(lister, agents, skills):
+    """Slash completion matches command-name prefixes (not fuzzy), case-insensitively."""
+    completions = await _complete(TriggerCompleter(lister, agents, skills), "/MOD")
+    texts = [c.text for c in completions]
+    assert texts, "several built-ins share the mod prefix"
+    assert texts == sorted(texts), "alphabetical order"
+    assert all(text.lower().startswith("/mod") for text in texts)
+    assert texts == [
+        c.text for c in await _complete(TriggerCompleter(lister, agents, skills), "/mod")
+    ]
+
+
+async def test_slash_requires_prefix_match(lister, agents, skills):
+    """No fuzzy gap matching for slash: "qt" is not a prefix of "quit"."""
+    assert await _complete(TriggerCompleter(lister, agents, skills), "/qt") == []
+
+
 async def test_slash_mid_word_does_not_trigger(lister, agents, skills):
     assert await _complete(TriggerCompleter(lister, agents, skills), "hey /qu") == []
 

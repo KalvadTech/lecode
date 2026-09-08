@@ -212,6 +212,8 @@ def _path_token_before_cursor(document: Document) -> str | None:
     token = before.split(" ")[-1] if before else ""
     if not token:
         return None
+    if token.startswith("/") and before == token:
+        return None  # buffer-start slash-command trigger; the / picker owns it
     if "/" in token or token.startswith(("~", ".")):
         return token
     return None

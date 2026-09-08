@@ -40,6 +40,10 @@ class Theme:
     permission: str
 
 
+#: Slash-dropdown panel colors, part of the one fixed theme.
+SLASH_MENU_BG = "#1c162b"
+SLASH_MENU_SELECTED_BG = "#35264f"
+
 #: The one and only theme: Kalvad purple on dark.
 THEME = Theme(
     name="kalvad",

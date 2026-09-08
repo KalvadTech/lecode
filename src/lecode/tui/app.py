@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import merge_completers
+from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI
@@ -28,12 +29,15 @@ from prompt_toolkit.input import Input
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout import Float, FloatContainer, Layout
 from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.output import Output
 from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.styles import Style
+from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Frame, TextArea
 from rich.console import Console
 
@@ -96,14 +100,20 @@ from lecode.tui.input import (
 )
 from lecode.tui.notify import Notifier
 from lecode.tui.permission import ApprovalPrompt, approval_prompt_text
-from lecode.tui.pickers import TriggerCompleter, persona_names
+from lecode.tui.pickers import (
+    TriggerCompleter,
+    command_candidates,
+    persona_names,
+    prefix_matches,
+    trigger_token,
+)
 from lecode.tui.statusline import (
     CachedGitInfo,
     StatusLineState,
     StatusState,
     render_statusline,
 )
-from lecode.tui.themes import THEME
+from lecode.tui.themes import SLASH_MENU_BG, SLASH_MENU_SELECTED_BG, THEME
 
 if TYPE_CHECKING:
     from lecode.agent.builder import Runtime
@@ -115,6 +125,9 @@ QUEUE_LIMIT = 5
 
 #: Spinner/statusline refresh period while the app runs.
 SPINNER_INTERVAL_S = 0.3
+
+#: Visible rows in a completion dropdown (slash panel and @/./path menu).
+DROPDOWN_MAX_ROWS = 8
 
 #: Timeout for ``!cmd`` shell-outs.
 SHELL_TIMEOUT_S = 120.0
@@ -267,6 +280,9 @@ class TuiApp:
         )
         self._input_area: TextArea | None = None
         self._chatbox: Frame | None = None
+        #: Prefix whose "No matching commands" row Escape dismissed (Tab or
+        #: any edit clears it — see _close_completion_menu / _tab).
+        self._no_match_dismissed: str | None = None
 
     # -- public seams for slash-command handlers -------------------------------
 
@@ -536,14 +552,33 @@ class TuiApp:
         def _deny_escape(event: Any) -> None:
             self._approval.resolve(Deny())
 
+        @kb.add("escape", filter=~approval_pending)
+        def _close_completion_menu(event: Any) -> None:
+            # Approval owns Escape while pending; otherwise dismiss the
+            # dropdown, restoring typed text a navigation overwrote. The
+            # no-match row has no completion state, so its dismissal is
+            # remembered per prefix (any edit or Tab brings it back).
+            # Longer M-* sequences still win over this bare-key handler.
+            buffer = event.current_buffer
+            if buffer.complete_state is not None:
+                buffer.cancel_completion()
+                return
+            prefix = self._slash_prefix()
+            if prefix:
+                self._no_match_dismissed = prefix
+
         @kb.add("enter")
         def _enter(event: Any) -> None:
             if self._approval.is_pending:
                 return  # y/a/n/ESC only while an approval is pending
-            text = event.current_buffer.text
+            buffer = event.current_buffer
+            if buffer.complete_state is not None:
+                self._accept_completion(buffer)
+                return
+            text = buffer.text
             if text.strip():
-                event.current_buffer.append_to_history()
-            event.current_buffer.reset()
+                buffer.append_to_history()
+            buffer.reset()
             self._spawn(self._submit(text))
 
         @kb.add("escape", "enter")
@@ -588,8 +623,12 @@ class TuiApp:
 
         @kb.add("tab")
         def _tab(event: Any) -> None:
-            if event.current_buffer.text:
-                event.current_buffer.start_completion()
+            buffer = event.current_buffer
+            if buffer.complete_state is not None:
+                self._accept_completion(buffer)
+            elif buffer.text:
+                self._no_match_dismissed = None  # Tab reopens a dismissed row
+                buffer.start_completion()
             else:
                 self.cycle_agent()
 
@@ -641,6 +680,44 @@ class TuiApp:
 
         return kb
 
+    @staticmethod
+    def _accept_completion(buffer: Buffer) -> None:
+        """Fill in the highlighted completion (first when none) and close the menu.
+
+        Commands insert ``/name `` — a following Enter submits it. Selecting
+        never submits, so browsing the dropdown can't run a command.
+        """
+        state = buffer.complete_state
+        if state is None:
+            return
+        if state.complete_index is None:
+            buffer.go_to_completion(0)
+        buffer.complete_state = None
+
+    def _slash_prefix(self) -> str | None:
+        """The typed ``/`` prefix while the slash picker owns the input, else ``None``.
+
+        Navigation rewrites the buffer with the candidate text, so an open
+        menu reads the prefix from the document the completion started from.
+        """
+        if self._input_area is None:
+            return None
+        state = self._input_area.buffer.complete_state
+        document = (
+            state.original_document if state is not None else self._input_area.buffer.document
+        )
+        trigger = trigger_token(document)
+        if trigger is None or trigger[0] != "/":
+            return None
+        return trigger[1]
+
+    def _slash_menu_empty(self) -> bool:
+        """Show the inert no-match row: a slash prefix is set, nothing matches it."""
+        prefix = self._slash_prefix()
+        if not prefix or prefix == self._no_match_dismissed:
+            return False
+        return not prefix_matches(prefix, command_candidates(self._runtime.skills))
+
     def _build_app(self, input: Input | None = None, output: Output | None = None) -> Application:
         _register_shift_enter()
         draft = self._input_history.load_draft()
@@ -673,8 +750,108 @@ class TuiApp:
         # The chatbox: a framed input area directly above the statusline.
         # Enter submits the text into the transcript above (see _enter).
         self._chatbox = Frame(self._input_area, title="message")
+        buffer = self._input_area.buffer
+
+        @Condition
+        def slash_menu_visible() -> bool:
+            if buffer.complete_state is not None:
+                return self._slash_prefix() is not None
+            return self._slash_menu_empty()
+
+        def menu_heading() -> str:
+            state = buffer.complete_state
+            count = len(state.completions) if state else 0
+            return f" commands  {count} {'match' if count == 1 else 'matches'}"
+
+        def menu_rows() -> list[tuple[str, str]]:
+            state = buffer.complete_state
+            if state is None:
+                return [("", " No matching commands")]
+            width = max(get_cwidth(c.display_text) for c in state.completions)
+            rows = []
+            for index, completion in enumerate(state.completions):
+                selected = index == state.complete_index
+                style = "class:slash-menu.selected" if selected else "class:slash-menu.command"
+                if index:
+                    rows.append(("", "\n"))
+                rows.extend(
+                    [
+                        (style, "> " if selected else "  "),
+                        (style, completion.display_text),
+                        ("", " " * (width - get_cwidth(completion.display_text) + 2)),
+                        ("", completion.display_meta_text),
+                    ]
+                )
+            return rows
+
+        slash_panel = ConditionalContainer(
+            Frame(
+                HSplit(
+                    [
+                        Window(FormattedTextControl(menu_heading), height=1),
+                        Window(
+                            FormattedTextControl(
+                                menu_rows,
+                                get_cursor_position=lambda: Point(
+                                    0,
+                                    (buffer.complete_state.complete_index or 0)
+                                    if buffer.complete_state
+                                    else 0,
+                                ),
+                            ),
+                            height=Dimension(min=1, max=DROPDOWN_MAX_ROWS),
+                            dont_extend_height=True,
+                            cursorline=Condition(
+                                lambda: (
+                                    buffer.complete_state is not None
+                                    and buffer.complete_state.complete_index is not None
+                                )
+                            ),
+                        ),
+                        Window(
+                            FormattedTextControl(" ↑↓ navigate  Enter/Tab select  Esc close"),
+                            height=1,
+                        ),
+                    ]
+                ),
+                style="class:slash-menu",
+            ),
+            slash_menu_visible,
+        )
+
+        def dropdown_space() -> int:
+            # Rows reserved below the input for the floating @/./path menu:
+            # the app renders at natural height and floats clip past it.
+            # (The slash panel is in-flow and needs no reservation.)
+            state = buffer.complete_state
+            if state is None or slash_menu_visible():
+                return 0
+            return min(DROPDOWN_MAX_ROWS, len(state.completions))
+
+        chat_area = FloatContainer(
+            HSplit([live_area, self._chatbox, slash_panel, Window(height=dropdown_space)]),
+            floats=[
+                Float(
+                    xcursor=True,
+                    ycursor=True,
+                    content=CompletionsMenu(
+                        max_height=DROPDOWN_MAX_ROWS,
+                        extra_filter=~slash_menu_visible,
+                    ),
+                ),
+            ],
+        )
         return Application(
-            layout=Layout(HSplit([live_area, self._chatbox, toolbar])),
+            layout=Layout(HSplit([chat_area, toolbar])),
+            style=Style.from_dict(
+                {
+                    "slash-menu": f"bg:{SLASH_MENU_BG} {self._theme.muted}",
+                    "slash-menu frame.border": self._theme.muted,
+                    "slash-menu.command": self._theme.text,
+                    "slash-menu.selected": f"{self._theme.accent} bold",
+                    "slash-menu cursor-line": f"bg:{SLASH_MENU_SELECTED_BG}",
+                }
+            ),
             key_bindings=self._build_keybindings(),
             full_screen=False,
             mouse_support=False,
