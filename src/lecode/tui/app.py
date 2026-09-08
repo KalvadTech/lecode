@@ -29,11 +29,10 @@ from prompt_toolkit.input import Input
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import Float, FloatContainer, Layout
+from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
-from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.output import Output
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
@@ -113,7 +112,7 @@ from lecode.tui.statusline import (
     StatusState,
     render_statusline,
 )
-from lecode.tui.themes import SLASH_MENU_BG, SLASH_MENU_SELECTED_BG, THEME
+from lecode.tui.themes import PICKER_MENU_BG, PICKER_MENU_SELECTED_BG, THEME
 
 if TYPE_CHECKING:
     from lecode.agent.builder import Runtime
@@ -753,25 +752,38 @@ class TuiApp:
         buffer = self._input_area.buffer
 
         @Condition
-        def slash_menu_visible() -> bool:
-            if buffer.complete_state is not None:
-                return self._slash_prefix() is not None
-            return self._slash_menu_empty()
+        def picker_menu_visible() -> bool:
+            # Every completion in this app comes from the trigger pickers
+            # (@/./commands) or the path completer, so the themed panel owns
+            # them all. Rows stream in asynchronously (the @/path pickers
+            # await the fd listing first), so wait for the first row; the
+            # no-match row adds the empty slash case.
+            state = buffer.complete_state
+            return (state is not None and bool(state.completions)) or self._slash_menu_empty()
 
         def menu_heading() -> str:
             state = buffer.complete_state
             count = len(state.completions) if state else 0
-            return f" commands  {count} {'match' if count == 1 else 'matches'}"
+            if state is None:
+                label = "commands"  # the inert no-match row (slash picker)
+            else:
+                trigger = trigger_token(state.original_document)
+                label = {"@": "context", "/": "commands", ".": "personas"}.get(
+                    trigger[0] if trigger else None, "files"
+                )
+            return f" {label}  {count} {'match' if count == 1 else 'matches'}"
 
         def menu_rows() -> list[tuple[str, str]]:
             state = buffer.complete_state
             if state is None:
                 return [("", " No matching commands")]
+            if not state.completions:
+                return []  # rows still streaming in; nothing to render yet
             width = max(get_cwidth(c.display_text) for c in state.completions)
             rows = []
             for index, completion in enumerate(state.completions):
                 selected = index == state.complete_index
-                style = "class:slash-menu.selected" if selected else "class:slash-menu.command"
+                style = "class:picker-menu.selected" if selected else "class:picker-menu.command"
                 if index:
                     rows.append(("", "\n"))
                 rows.extend(
@@ -784,7 +796,7 @@ class TuiApp:
                 )
             return rows
 
-        slash_panel = ConditionalContainer(
+        picker_panel = ConditionalContainer(
             Frame(
                 HSplit(
                     [
@@ -814,42 +826,19 @@ class TuiApp:
                         ),
                     ]
                 ),
-                style="class:slash-menu",
+                style="class:picker-menu",
             ),
-            slash_menu_visible,
-        )
-
-        def dropdown_space() -> int:
-            # Rows reserved below the input for the floating @/./path menu:
-            # the app renders at natural height and floats clip past it.
-            # (The slash panel is in-flow and needs no reservation.)
-            state = buffer.complete_state
-            if state is None or slash_menu_visible():
-                return 0
-            return min(DROPDOWN_MAX_ROWS, len(state.completions))
-
-        chat_area = FloatContainer(
-            HSplit([live_area, self._chatbox, slash_panel, Window(height=dropdown_space)]),
-            floats=[
-                Float(
-                    xcursor=True,
-                    ycursor=True,
-                    content=CompletionsMenu(
-                        max_height=DROPDOWN_MAX_ROWS,
-                        extra_filter=~slash_menu_visible,
-                    ),
-                ),
-            ],
+            picker_menu_visible,
         )
         return Application(
-            layout=Layout(HSplit([chat_area, toolbar])),
+            layout=Layout(HSplit([live_area, self._chatbox, picker_panel, toolbar])),
             style=Style.from_dict(
                 {
-                    "slash-menu": f"bg:{SLASH_MENU_BG} {self._theme.muted}",
-                    "slash-menu frame.border": self._theme.muted,
-                    "slash-menu.command": self._theme.text,
-                    "slash-menu.selected": f"{self._theme.accent} bold",
-                    "slash-menu cursor-line": f"bg:{SLASH_MENU_SELECTED_BG}",
+                    "picker-menu": f"bg:{PICKER_MENU_BG} {self._theme.muted}",
+                    "picker-menu frame.border": self._theme.muted,
+                    "picker-menu.command": self._theme.text,
+                    "picker-menu.selected": f"{self._theme.accent} bold",
+                    "picker-menu cursor-line": f"bg:{PICKER_MENU_SELECTED_BG}",
                 }
             ),
             key_bindings=self._build_keybindings(),

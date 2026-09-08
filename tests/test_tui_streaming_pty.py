@@ -266,6 +266,33 @@ async def test_slash_menu_renders_and_no_match_row(tmp_path, monkeypatch):
     assert "unknown command: /zzzz" in dump, "enter did not submit normally:\n" + dump
 
 
+async def test_at_files_use_the_themed_panel(tmp_path, monkeypatch):
+    """@ file completions render in the same themed panel as /commands."""
+    (tmp_path / "notes.md").write_text("hello", encoding="utf-8")
+
+    async def drive(master: int, screen: pyte.HistoryScreen) -> list[str]:
+        visible = lambda: screen.display  # noqa: E731
+        try:
+            await asyncio.sleep(0.8)
+            os.write(master, b"@not")
+            await _wait_for(visible, "context  1 match")
+            heading = next(i for i, line in enumerate(screen.display) if "context" in line)
+            row = heading + 1
+            assert "notes.md" in screen.display[row]
+            x = screen.display[row].index("notes.md")
+            meta_x = screen.display[row].index("file")
+            assert screen.buffer[row][x].fg == "ece7f7"  # theme.text
+            assert screen.buffer[row][meta_x].fg == "8a80a3"  # theme.muted
+            assert screen.buffer[row][x].bg == "1c162b"  # panel background
+            assert screen.display[heading - 1].startswith("┌")
+            os.write(master, b"\x15/quit\r")
+            return screen.display[:]
+        finally:
+            os.write(master, b"\x03\x04")
+
+    await _run_pty_app(tmp_path, monkeypatch, [], drive, color_depth=ColorDepth.DEPTH_24_BIT)
+
+
 async def test_slash_panel_is_anchored_compact_and_styled(tmp_path, monkeypatch):
     async def drive(master: int, screen: pyte.HistoryScreen) -> list[str]:
         visible = lambda: screen.display  # noqa: E731

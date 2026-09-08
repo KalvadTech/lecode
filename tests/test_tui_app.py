@@ -88,14 +88,9 @@ async def test_unknown_model_keeps_configured_window(tmp_path, monkeypatch):
 def test_layout_is_chatbox_above_statusline(tmp_path, monkeypatch):
     """The input is a framed chatbox directly above the 3-line statusline;
     the frame's bottom border is the split between them. A conditional live
-    region for streamed text sits above the chatbox, and the completion menu
-    anchors below the input for slash commands."""
-    from prompt_toolkit.layout.containers import (
-        ConditionalContainer,
-        FloatContainer,
-        Window,
-        to_container,
-    )
+    region for streamed text sits above the chatbox, and the themed picker
+    panel anchors below the input for all trigger menus."""
+    from prompt_toolkit.layout.containers import ConditionalContainer, Window, to_container
     from prompt_toolkit.widgets import Frame
 
     app, _, _ = make_app(tmp_path, monkeypatch, [])
@@ -103,17 +98,11 @@ def test_layout_is_chatbox_above_statusline(tmp_path, monkeypatch):
         pt_app = app._build_app(input=inp, output=DummyOutput())
     assert isinstance(app._chatbox, Frame) and app._chatbox.body is app._input_area
     children = pt_app.layout.container.children
-    assert len(children) == 2
-    floats_host = children[0]
-    assert isinstance(floats_host, FloatContainer)
-    assert len(floats_host.floats) == 1  # other trigger menus still follow the cursor
-    inner = floats_host.content.children
-    assert len(inner) == 4
-    assert isinstance(inner[0], ConditionalContainer)  # live stream region
-    assert inner[1] is to_container(app._chatbox)  # Frame unwraps to its HSplit
-    assert isinstance(inner[2], ConditionalContainer)  # slash panel sizes to its rows
-    assert isinstance(inner[3], Window)  # other dropdowns' space reservation
-    assert isinstance(children[1], Window) and children[1].height == 3
+    assert len(children) == 4
+    assert isinstance(children[0], ConditionalContainer)  # live stream region
+    assert children[1] is to_container(app._chatbox)  # Frame unwraps to its HSplit
+    assert isinstance(children[2], ConditionalContainer)  # picker panel sizes to its rows
+    assert isinstance(children[3], Window) and children[3].height == 3
     assert app._live_buffer is not None
 
 
