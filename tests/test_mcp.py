@@ -284,7 +284,7 @@ async def test_attach_captures_auto_servers_without_network(tmp_path, monkeypatc
 
 
 @pytest.fixture
-async def http_port():
+async def http_server():
     """An in-process streamable-HTTP MCP server on a random localhost port."""
     import uvicorn
     from mcp.server.mcpserver import MCPServer
@@ -306,10 +306,15 @@ async def http_port():
             task.cancel()
             raise RuntimeError("uvicorn MCP server did not start")
         await asyncio.sleep(0.02)
-    port = uvicorn_server.servers[0].sockets[0].getsockname()[1]
-    yield port
+    yield uvicorn_server
     uvicorn_server.should_exit = True
     await asyncio.wait_for(task, timeout=10)
+
+
+@pytest.fixture
+async def http_port(http_server):
+    """Just the port of ``http_server``."""
+    yield http_server.servers[0].sockets[0].getsockname()[1]
 
 
 async def test_http_transport_round_trip(http_port):
@@ -331,6 +336,61 @@ async def test_http_transport_round_trip(http_port):
         await mgr.shutdown()
 
 
+async def test_sse_shutdown_sets_process_global_exit_flag(http_server):
+    """[regression 1/2] uvicorn teardown poisons sse-starlette's global exit flag.
+
+    sse-starlette's shutdown watcher (started with the first SSE response in
+    the thread) polls the uvicorn server it captured from the process-global
+    SIGTERM handler table. When this server exits (``should_exit = True``),
+    the watcher sets ``AppStatus.should_exit`` — a module global the library
+    never resets — which makes every LATER EventSourceResponse end its SSE
+    stream immediately (observed with mcp==2.1.1 → sse-starlette 3.4.8 and
+    uvicorn 0.52.4, which installs signal handlers via ``signal.signal``).
+    If this assert ever fails, the leak was fixed upstream: drop this pair
+    and the reset fixture in tests/conftest.py.
+    """
+    from sse_starlette.sse import AppStatus
+
+    port = http_server.servers[0].sockets[0].getsockname()[1]
+    config = Config()
+    config.mcp.enable_exa = False
+    config.mcp.servers["web"] = McpServerConfig(
+        transport="http", url=f"http://127.0.0.1:{port}/mcp", timeout_s=5.0
+    )
+    mgr = McpManager(config)
+    await mgr.connect()
+    try:
+        assert mgr.status()[0].state == "connected"  # an SSE response ran → watcher is live
+    finally:
+        await mgr.shutdown()
+    http_server.should_exit = True
+    await asyncio.sleep(1.0)  # watcher polls every 0.5s; keep this loop alive for one poll
+    assert AppStatus.should_exit is True
+
+
+async def test_http_server_connects_after_earlier_sse_server_shutdown(http_port):
+    """[regression 2/2] the poisoned-flag victim: must stay connected.
+
+    Without the per-test reset in tests/conftest.py, the flag left behind by
+    the previous test's server shutdown cancels this initialize POST's SSE
+    response at birth: "SSE stream ended without a response" and the server
+    side logs "ASGI callable returned without completing response".
+    """
+    config = Config()
+    config.mcp.enable_exa = False
+    config.mcp.servers["web"] = McpServerConfig(
+        transport="http", url=f"http://127.0.0.1:{http_port}/mcp", timeout_s=5.0
+    )
+    mgr = McpManager(config)
+    await mgr.connect()
+    try:
+        assert mgr.status()[0].state == "connected"
+        result = await mgr.call("web", "ping", {})
+        assert result.content == "pong"
+    finally:
+        await mgr.shutdown()
+
+
 # -- /mcp command -----------------------------------------------------------------------
 
 
@@ -342,6 +402,7 @@ async def app_with_mcp(tmp_path, monkeypatch):
     app, _, out = make_app(tmp_path, monkeypatch, [])
     manager = McpManager(mcp_config())
     await manager.connect()
+    manager.bind_registry(app.runtime.registry)
     app.runtime.ctx.extras[MCP_EXTRA] = manager
     yield app, manager, out
     await manager.shutdown()
