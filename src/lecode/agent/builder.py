@@ -17,6 +17,7 @@ from lecode.agent.tools import ToolContext, ToolRegistry, core_tools
 from lecode.config.models import Config, PermissionMode
 from lecode.context.agents import AgentRegistry, load_agents
 from lecode.context.skills import SkillRegistry, load_skills
+from lecode.extras.background import BACKGROUND_EXTRA, BackgroundTaskManager
 from lecode.hooks import HookDispatcher, apply_hooks, dispatcher_from_config
 from lecode.memory import MemoryStore, memory_injection, memory_root, memory_tools
 from lecode.permission import PermissionChecker, SessionPermissions
@@ -118,6 +119,8 @@ def build_runtime(
     ctx.extras["agents"] = agents
     ctx.extras["registry"] = registry
     ctx.extras["hooks"] = hooks
+    # Background-task manager (bash/task run_in_background, tasks_* tools).
+    ctx.extras[BACKGROUND_EXTRA] = BackgroundTaskManager()
 
     extra_parts: list[str] = []
     if agent is not None and agent.body:

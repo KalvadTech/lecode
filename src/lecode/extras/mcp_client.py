@@ -1,12 +1,12 @@
 """The MCP client: connects configured + auto servers and exposes their tools.
 
-Uses the official ``mcp`` SDK over stdio and streamable-HTTP. Each server is
-connected lazily at session start with a ~10s budget; failures are isolated
-per server (one bad server never blocks the others or startup). Discovered
-tools are registered as lecode tools named ``mcp:<server>:<tool>`` — the
-permission system already treats exa/context7/grep-app as read-equivalent,
-every other MCP tool falls back to the mode default (Allow in yolo, Deny in
-readonly).
+Uses the official ``mcp`` SDK over stdio, streamable-HTTP, and SSE. Each
+server is connected lazily at session start with a ~10s budget; failures are
+isolated per server (one bad server never blocks the others or startup).
+Discovered tools are registered as lecode tools named ``mcp:<server>:<tool>``
+— the permission system already treats exa/context7/grep-app as
+read-equivalent, every other MCP tool falls back to the mode default (Allow
+in yolo, Deny in readonly).
 
 Auto-configured servers (``[mcp] enable_exa`` / ``enable_context7``):
 
@@ -16,9 +16,13 @@ Auto-configured servers (``[mcp] enable_exa`` / ``enable_context7``):
   header — Exa's exact header scheme is not pinned down in their docs.
 - **context7** (default off): ``https://mcp.context7.com/mcp``, no auth.
 
-OAuth for HTTP MCP servers is intentionally out of scope: the SDK supports
-it but it needs an interactive browser flow; bearer tokens via
-``[mcp.servers.<name>].headers`` are the supported path.
+Remote servers (``transport = "http"`` or ``"sse"``) can set
+``oauth = true`` for the interactive OAuth authorization-code flow: the
+browser opens (the URL is also surfaced through the manager's ``notify``
+callback), and tokens persist under ``<config_dir>/mcp_auth/`` so headless
+runs work without interaction once authorized. ``/mcp login <name>`` and
+``/mcp logout <name>`` manage that flow explicitly. Static bearer tokens via
+``[mcp.servers.<name>].headers`` remain the non-interactive path.
 
 Failed tool calls get exactly one reconnect attempt (fresh session), then an
 error result. Everything is fail-open: MCP trouble never blocks the agent.
@@ -30,6 +34,7 @@ import asyncio
 import contextlib
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -117,10 +122,19 @@ def _result_text(result: Any) -> str:
 class McpManager:
     """Owns MCP server sessions; bridges their tools into lecode."""
 
-    def __init__(self, config: Config, ctx: ToolContext | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        ctx: ToolContext | None = None,
+        *,
+        notify: Callable[[str], Any] | None = None,
+    ) -> None:
         self._config = config
         self._ctx = ctx
+        #: Async ``(text) -> None`` for user-facing OAuth progress lines.
+        self._notify = notify
         self._servers: dict[str, _Server] = {}
+        self._oauth_listeners: dict[str, Any] = {}
         self._closed = False
 
     # -- connection ------------------------------------------------------------
@@ -143,7 +157,13 @@ class McpManager:
         except Exception as e:
             server.session = None
             server.error = f"{type(e).__name__}: {e}"
+            if server.config.oauth:
+                server.error += (
+                    f" — authorize interactively once: run `lecode` and `/mcp login {server.name}`"
+                )
             log.debug("mcp: %s connect failed: %s", server.name, e)
+        finally:
+            await self._close_oauth_listener(server.name)
 
     async def _open(self, server: _Server) -> None:
         from mcp import ClientSession
@@ -167,17 +187,34 @@ class McpManager:
         self, server: _Server, stack: contextlib.AsyncExitStack
     ) -> tuple[Any, Any]:
         config = server.config
-        if config.transport == "http":
+        if config.transport in ("http", "sse"):
             if not config.url:
-                raise ValueError(f"mcp server {server.name}: http transport needs a url")
+                raise ValueError(
+                    f"mcp server {server.name}: {config.transport} transport needs a url"
+                )
+            auth = await self._oauth_auth(server)
+            if config.transport == "sse":
+                from mcp.client.sse import sse_client
+
+                return await stack.enter_async_context(
+                    sse_client(
+                        config.url,
+                        headers=config.headers or None,
+                        **({"auth": auth} if auth is not None else {}),
+                    )
+                )
             from mcp.client.streamable_http import (
                 create_mcp_http_client,
                 streamable_http_client,
             )
 
-            http_client = create_mcp_http_client(headers=config.headers or None)
+            http_client = create_mcp_http_client(headers=config.headers or None, auth=auth)
             return await stack.enter_async_context(
                 streamable_http_client(config.url, http_client=http_client)
+            )
+        if config.oauth:
+            raise ValueError(
+                f"mcp server {server.name}: oauth = true needs an http or sse transport"
             )
         if not config.command:
             raise ValueError(f"mcp server {server.name}: stdio transport needs a command")
@@ -193,6 +230,36 @@ class McpManager:
         devnull = open(os.devnull, "w")  # noqa: SIM115 — closed via the stack
         stack.callback(devnull.close)
         return await stack.enter_async_context(stdio_client(params, errlog=devnull))
+
+    async def _oauth_notify(self, text: str) -> None:
+        if self._notify is not None:
+            try:
+                result = self._notify(text)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                log.debug("mcp: notify failed: %s", e)
+
+    async def _oauth_auth(self, server: _Server) -> Any | None:
+        """An SDK ``OAuthClientProvider`` for the server, or None when off."""
+        if not server.config.oauth:
+            return None
+        from lecode.extras.mcp_oauth import build_oauth_provider
+
+        await self._close_oauth_listener(server.name)
+        provider = await build_oauth_provider(
+            server.name, server.config.url or "", notify=self._oauth_notify
+        )
+        self._oauth_listeners[server.name] = provider.callback_listener
+        return provider
+
+    async def _close_oauth_listener(self, name: str) -> None:
+        listener = self._oauth_listeners.pop(name, None)
+        if listener is not None:
+            try:
+                await listener.close()
+            except Exception as e:
+                log.debug("mcp: %s oauth listener close failed: %s", name, e)
 
     async def _close_server(self, server: _Server) -> None:
         if server.stack is not None:
@@ -227,6 +294,13 @@ class McpManager:
                 return await self._call_once(server, tool_name, args)
             except Exception as e:
                 log.debug("mcp: %s:%s call failed, reconnecting: %s", server_name, tool_name, e)
+                if server.config.oauth and "401" in str(e):
+                    # Stale/revoked grant: drop it so the reconnect re-authorizes
+                    # (browser flow) instead of looping on the dead token.
+                    self.clear_auth(server_name)
+                    await self._oauth_notify(
+                        f"mcp {server_name}: authorization expired — re-authorizing…"
+                    )
         await self._close_server(server)
         await self._connect_one(server)
         if server.session is None:
@@ -272,6 +346,54 @@ class McpManager:
             await self._connect_one(server)
         return server.status
 
+    async def login(self, name: str) -> ServerStatus | None:
+        """Drop stored OAuth tokens and reconnect so the browser flow reruns."""
+        server = self._servers.get(name)
+        if server is None:
+            return None
+        if not server.config.oauth or server.config.transport not in ("http", "sse"):
+            return ServerStatus(
+                name, "failed", error="no OAuth configuration (needs oauth = true on http/sse)"
+            )
+        from lecode.extras.mcp_oauth import delete_tokens
+
+        delete_tokens(name)
+        await self._oauth_notify(f"mcp {name}: starting OAuth authorization…")
+        return await self.reconnect(name)
+
+    async def logout(self, name: str) -> ServerStatus | None:
+        """Delete one server's stored OAuth tokens and reconnect it.
+
+        A failed reconnect (no browser to complete the re-authorization) wipes
+        the file again: the OAuth dance's dynamic client registration would
+        otherwise leave a half-provisioned record behind.
+        """
+        server = self._servers.get(name)
+        if server is None:
+            return None
+        removed = self.clear_auth(name)
+        status = await self.reconnect(name)
+        if status is not None and status.state != "connected":
+            from lecode.extras.mcp_oauth import delete_tokens
+
+            delete_tokens(name)
+        if removed:
+            await self._oauth_notify(f"mcp {name}: stored OAuth tokens deleted")
+        return status
+
+    def clear_auth(self, name: str) -> bool:
+        """Drop stored OAuth credentials (file + live provider); True if a file existed."""
+        from lecode.extras.mcp_oauth import delete_tokens
+
+        server = self._servers.get(name)
+        session = None if server is None else server.session
+        auth = getattr(getattr(session, "_client", None), "auth", None)
+        context = getattr(auth, "context", None)
+        if context is not None:
+            context.clear_tokens()
+            context.client_info = None
+        return delete_tokens(name)
+
     async def shutdown(self) -> None:
         """Close every server session; idempotent, never raises."""
         if self._closed:
@@ -279,6 +401,8 @@ class McpManager:
         self._closed = True
         for server in self._servers.values():
             await self._close_server(server)
+        for name in list(self._oauth_listeners):
+            await self._close_oauth_listener(name)
 
 
 class McpTool(Tool):
@@ -298,14 +422,21 @@ class McpTool(Tool):
         return await self._manager.call(self._server_name, self._tool_name, args)
 
 
-async def attach_mcp(registry: ToolRegistry, ctx: ToolContext) -> McpManager:
+async def attach_mcp(
+    registry: ToolRegistry,
+    ctx: ToolContext,
+    *,
+    notify: Callable[[str], Any] | None = None,
+) -> McpManager:
     """Connect MCP servers and register their tools into ``registry``.
 
-    Never raises: per-server failures are isolated inside the manager, and a
-    wholesale failure just leaves zero MCP tools registered. The manager is
-    always installed under ``ctx.extras["mcp"]`` so ``/mcp`` can report.
+    ``notify`` receives user-facing lines (OAuth authorization URLs); the TUI
+    passes a feed line, headless a stderr write. Never raises: per-server
+    failures are isolated inside the manager, and a wholesale failure just
+    leaves zero MCP tools registered. The manager is always installed under
+    ``ctx.extras["mcp"]`` so ``/mcp`` can report.
     """
-    manager = McpManager(ctx.config, ctx)
+    manager = McpManager(ctx.config, ctx, notify=notify)
     ctx.extras[MCP_EXTRA] = manager
     try:
         await manager.connect()

@@ -22,7 +22,7 @@ just your terminal, an OpenAI-compatible model, and a sharp set of tools.
 │  – skills       none                                                   │
 │  ✓ agents       primaries: build, plan · custom: researcher            │
 │  ✓ memory       long-term 2.4 KB injected                              │
-│  ✓ tools        15 tools                                               │
+│  ✓ tools        19 tools                                               │
 │  ✓ permissions  mode yolo · custom rules                               │
 │  – hooks        none configured                                        │
 │  – pierre       off                                                    │
@@ -126,7 +126,7 @@ The final answer goes to stdout; a `tokens: <in> in / <out> out · cost:
 $X.XXXX` summary goes to stderr, so scripts can pipe the answer cleanly.
 
 Exit codes: `0` done · `1` error · `2` startup (missing deps, bad flags,
-non-tty `--setup`) · `3` max turns / max loop iterations.
+non-tty `--setup`) · `3` max turns / max loop iterations / context overflow.
 
 ## A tour of the power features
 
@@ -137,7 +137,9 @@ non-tty `--setup`) · `3` max turns / max loop iterations.
   were created in (resume never crosses directories), `/new` `/resume`
   `/undo` `/redo` `/rewind` `/retry` `/compact` `/handoff` `/rename`,
   searchable picker with delete, HTML export (`/export`), secret-gist
-  sharing (`/share`), re-import (`/import`).
+  sharing (`/share`), re-import (`/import`). Approaching the context window,
+  the runner compacts automatically (summary + recent tail; `[compaction]`
+  tunes the trigger, buffer and overflow policy).
 - **Custom agents** — markdown files in `~/.config/lecode/agents/` or
   `.lecode/agents/` with their own model, temperature, prompt and permission
   overlay. Tab cycles primaries; `@agent` or the `task` tool runs subagents.
@@ -147,20 +149,36 @@ non-tty `--setup`) · `3` max turns / max loop iterations.
 - **Memory** — persistent per-project markdown: long-term `MEMORY.md`
   (auto-injected, 32 KB cap), daily logs, scratchpad, named notes.
   `/memory` to inspect; the agent has `memory_*` tools.
-- **Hooks** — shell commands on lifecycle events (`PreToolUse`,
-  `PostToolUse`, `Stop`, …) that return verdicts; they can only narrow
-  permissions. `--hooks-test` dry-runs the pipeline.
+- **Hooks** — shell commands on 15 lifecycle events (`PreToolUse`,
+  `PostToolUse`, `UserPromptSubmit`, `Stop`, …) that return verdicts; they can
+  only narrow permissions. `--hooks-test` dry-runs the pipeline.
 - **Pierre mode** — when enabled, a second model reviews every finished
   task: it compares your request with the agent's result and tells you
   plainly whether it delivered. `/pierre on|off|model`.
-- **MCP** — stdio + streamable-HTTP servers. Exa web search is
-  preconfigured (needs `EXA_API_KEY`); context7 is one flag away.
+- **Structured questions** — the `ask_user` tool lets the agent ask 1-4
+  multiple-choice questions mid-turn instead of guessing; you answer inline
+  with the keyboard (`1`-`4` to pick, `enter` to confirm a multi-select,
+  `esc` to dismiss). Headless, loop, chain, and subagent runs get a
+  "use your best judgment" result instead of a prompt.
+- **Notifications** — sound (afplay/paplay/aplay, terminal bell fallback) and
+  desktop notifications (osascript / notify-send) on turn finish, error, and
+  approval-needed. `/notifications on|off`; channels and per-event toggles in
+  `[notifications]`.
+- **MCP** — stdio, streamable-HTTP, and SSE servers, with optional OAuth
+  (`oauth = true`, browser flow, tokens under `<config_dir>/mcp_auth/`;
+  `/mcp login|logout`). Exa web search is preconfigured (needs `EXA_API_KEY`);
+  context7 is one flag away.
 - **LSP** — diagnostics from real language servers appended to `write`/`edit`
   results; fail-open, never blocks.
 - **Worktrees** — `--worktree <name>` or `/worktree` for isolated branches,
   `/wt-merge` / `/wt-exit` with conflict detection.
 - **Multimodal** — `/add image.png` or `@file.pdf`; capability-checked
   against the model.
+- **Background tasks** — `bash` and `task` accept `run_in_background` and
+  return a task id immediately; the agent inspects them with the `tasks_list`
+  / `tasks_output` / `tasks_wait` / `tasks_stop` tools, you watch them with
+  `/tasks`, and completions land in the feed and in the next turn. Remaining
+  tasks are stopped (SIGTERM, then SIGKILL) when the session exits.
 - **Telemetry (opt-in)** — Sentry/GlitchTip error reports and OpenTelemetry
   metrics (turns, tokens, cost, tool calls) via `[telemetry]`; needs the
   `telemetry` extra, fail-open by design.

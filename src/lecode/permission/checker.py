@@ -82,7 +82,11 @@ READ_TOOLS = frozenset(
         "lsp_diagnostics",
         "memory_read",
         "memory_search",
+        "ask_user",  # only asks; never touches anything itself
         "task",  # dispatches a subagent; its own calls are gated individually
+        "tasks_list",
+        "tasks_output",
+        "tasks_wait",
     }
 )
 

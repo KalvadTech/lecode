@@ -39,6 +39,8 @@ from rich.console import Console
 
 from lecode.agent.runner import (
     AgentRunner,
+    CompactionFinished,
+    CompactionStarted,
     Done,
     Error,
     LlmCall,
@@ -54,12 +56,23 @@ from lecode.agent.runner import (
 from lecode.config.models import PermissionMode
 from lecode.context.agents import parse_mentions
 from lecode.context.resources import load_text
+from lecode.extras.background import BACKGROUND_EXTRA
 from lecode.extras.chain import run_chain
 from lecode.extras.loop_mode import run_plan_loop
 from lecode.extras.mcp_client import MCP_EXTRA, attach_mcp
 from lecode.extras.proc import run_proc
 from lecode.extras.status_signals import START, STOP, StatusEmitter
 from lecode.extras.subagents import SubagentError, SubagentOutcome, run_subagent
+from lecode.hooks import (
+    INTERRUPT,
+    NOTIFICATION,
+    SESSION_END,
+    SESSION_START,
+    USER_PROMPT_SUBMIT,
+    MergedVerdict,
+    build_envelope,
+    dispatch_event,
+)
 from lecode.multimodal import (
     AttachmentStore,
     MessageContent,
@@ -97,6 +110,7 @@ from lecode.tui.input import (
 from lecode.tui.notify import Notifier
 from lecode.tui.permission import ApprovalPrompt, approval_prompt_text
 from lecode.tui.pickers import TriggerCompleter, persona_names
+from lecode.tui.question import QuestionPrompt, question_prompt_text
 from lecode.tui.statusline import (
     CachedGitInfo,
     StatusLineState,
@@ -177,7 +191,10 @@ class TuiApp:
         # only while the interactive loop runs (:meth:`run` installs the
         # callback); headless turns keep the default "requires approval".
         self._approval = ApprovalPrompt()
-        self._notifier = Notifier(config.notifications)
+        #: Inline structured-question prompt (the ``ask_user`` tool): the
+        #: callback is installed by :meth:`run` alongside the approval one.
+        self._question = QuestionPrompt()
+        self._notifier = Notifier(config.notifications, session_name=session.name)
         self._last_response = ""
         #: Active worktree isolation (``/worktree``, ``--worktree``).
         self._worktree: Any | None = None  # WorktreeInfo
@@ -214,6 +231,10 @@ class TuiApp:
         # inline through the feed; installed here so tests driving _submit
         # directly get it too.
         self._runtime.ctx.extras["subagent_events"] = self._on_child_event
+        # Background-task completions surface as feed info lines as they land.
+        background = self._runtime.ctx.extras.get(BACKGROUND_EXTRA)
+        if background is not None:
+            background.notify = self._feed.info
 
         self._status = StatusState(
             session_name=session.name,
@@ -361,6 +382,7 @@ class TuiApp:
         self._session_lock = new_lock
         if old_lock is not None:
             old_lock.release()
+        old_session = self._session
         self._session = session
         self._runner.session = session
         self._runtime.ctx.session = session
@@ -381,6 +403,11 @@ class TuiApp:
         self._status.session_name = session.name
         self._status.agent = self._agent_name
         self._invalidate()
+        hooks = self._runtime.hooks
+        if hooks is not None and (
+            hooks.handlers.get(SESSION_END) or hooks.handlers.get(SESSION_START)
+        ):
+            self._spawn(self._switch_hooks(old_session, session))
         return True
 
     def _reload_history(self) -> None:
@@ -517,6 +544,7 @@ class TuiApp:
     def _build_keybindings(self) -> KeyBindings:
         kb = KeyBindings()
         approval_pending = Condition(lambda: self._approval.is_pending)
+        question_pending = Condition(lambda: self._question.is_pending)
 
         @kb.add("y", filter=approval_pending)
         def _approve_once(event: Any) -> None:
@@ -536,10 +564,36 @@ class TuiApp:
         def _deny_escape(event: Any) -> None:
             self._approval.resolve(Deny())
 
+        @kb.add("1", filter=question_pending)
+        def _question_1(event: Any) -> None:
+            self._on_question_key(self._question.select(0))
+
+        @kb.add("2", filter=question_pending)
+        def _question_2(event: Any) -> None:
+            self._on_question_key(self._question.select(1))
+
+        @kb.add("3", filter=question_pending)
+        def _question_3(event: Any) -> None:
+            self._on_question_key(self._question.select(2))
+
+        @kb.add("4", filter=question_pending)
+        def _question_4(event: Any) -> None:
+            self._on_question_key(self._question.select(3))
+
+        @kb.add("escape", filter=question_pending)
+        def _question_dismiss(event: Any) -> None:
+            self._question.dismiss()
+            self._invalidate()
+
         @kb.add("enter")
         def _enter(event: Any) -> None:
             if self._approval.is_pending:
                 return  # y/a/n/ESC only while an approval is pending
+            if self._question.is_pending:
+                # A filtered binding would lose to this unfiltered one
+                # (later registration wins), so confirm is handled here.
+                self._on_question_key(self._question.confirm())
+                return
             text = event.current_buffer.text
             if text.strip():
                 event.current_buffer.append_to_history()
@@ -548,7 +602,7 @@ class TuiApp:
 
         @kb.add("escape", "enter")
         def _alt_enter(event: Any) -> None:
-            if self._approval.is_pending:
+            if self._approval.is_pending or self._question.is_pending:
                 return
             text = event.current_buffer.text
             if text.strip():
@@ -568,7 +622,11 @@ class TuiApp:
             if self._approval.is_pending:
                 self._approval.resolve(Deny())
                 return
+            if self._question.is_pending:
+                self._question.dismiss()
+                return
             if self.cancel_turn():
+                self._spawn(self._fire_hook(INTERRUPT))
                 return
             if self.cancel_action():
                 return
@@ -690,6 +748,8 @@ class TuiApp:
         self._status.git = await self._git.get(self._cwd)
         self._app = self._build_app(input=input, output=output)
         self._runtime.ctx.approval_callback = self._request_approval
+        self._runtime.ctx.question_callback = self._request_question
+        await self._fire_hook(SESSION_START)
         # MCP attaches in the background so the chat opens immediately;
         # per-server status lands in the feed when the connect finishes.
         if self._runtime.ctx.extras.get(MCP_EXTRA) is None:
@@ -703,9 +763,12 @@ class TuiApp:
                 except (EOFError, KeyboardInterrupt):
                     self._quit = True  # e.g. stdin EOF on a non-tty
         finally:
+            await self._fire_hook(SESSION_END)
             self._spinner_task.cancel()
             self._approval.cancel()
             self._runtime.ctx.approval_callback = None
+            self._question.cancel()
+            self._runtime.ctx.question_callback = None
             self.cancel_turn()
             if self._turn_task is not None:
                 await asyncio.gather(self._turn_task, return_exceptions=True)
@@ -715,6 +778,9 @@ class TuiApp:
             lsp = self._runtime.ctx.extras.get("lsp")
             if lsp is not None:
                 await lsp.shutdown()
+            background = self._runtime.ctx.extras.get(BACKGROUND_EXTRA)
+            if background is not None:
+                await background.shutdown()
             mcp = self._runtime.ctx.extras.get(MCP_EXTRA)
             if mcp is not None:
                 await mcp.shutdown()
@@ -729,7 +795,9 @@ class TuiApp:
 
     async def _attach_mcp(self) -> None:
         """Background MCP connect; per-server status reported into the feed."""
-        manager = await attach_mcp(self._runtime.registry, self._runtime.ctx)
+        manager = await attach_mcp(
+            self._runtime.registry, self._runtime.ctx, notify=self._feed.info
+        )
         for status in manager.status():
             if status.state == "connected":
                 self._feed.info(f"mcp {status.name}: connected · {status.tools} tools")
@@ -766,6 +834,30 @@ class TuiApp:
 
     # -- submissions ----------------------------------------------------------
 
+    async def _fire_hook(self, event: str, **payload: Any) -> MergedVerdict | None:
+        """Dispatch a lifecycle hook event; ``None`` when nothing is configured.
+
+        Observational callers ignore the verdict; only ``UserPromptSubmit``
+        enforces a deny. Handler failures never raise here — the dispatcher
+        converts them into verdicts (deny-safe on the enforced events).
+        """
+        hooks = self._runtime.hooks
+        if hooks is None or not hooks.handlers.get(event):
+            return None
+        return await hooks.fire(event, **payload)
+
+    async def _switch_hooks(self, old: Session, new: Session) -> None:
+        """SessionEnd for the session switched away from, SessionStart for the
+        new one — spawned by :meth:`switch_session` (a sync method)."""
+        hooks = self._runtime.hooks
+        if hooks is None:
+            return
+        end_handlers = hooks.handlers.get(SESSION_END, [])
+        if end_handlers:
+            envelope = build_envelope(SESSION_END, hooks.cwd, session=old)
+            await dispatch_event(SESSION_END, envelope, end_handlers)
+        await hooks.fire(SESSION_START)
+
     async def _submit(self, text: str, *, steer: bool = False) -> None:
         """Route one submitted line: shell-outs, slash commands, or LLM input."""
         text = text.rstrip("\n")
@@ -782,6 +874,12 @@ class TuiApp:
         else:
             if self.loop_running():
                 self._feed.info("a plan loop is running — /loop stop first")
+                return
+            verdict = await self._fire_hook(USER_PROMPT_SUBMIT, prompt=text)
+            if verdict is not None and verdict.verdict == "deny":
+                self._feed.info(
+                    f"prompt blocked by hook: {verdict.reason or 'UserPromptSubmit hook'}"
+                )
                 return
             mentions, cleaned = parse_mentions(text, self._runtime.agents)
             invocable = {a.name for a in self._runtime.agents.subagents()}
@@ -961,11 +1059,41 @@ class TuiApp:
         future = self._approval.request(tool_name, target, reason)
         self._status.state = StatusLineState.AWAITING_APPROVAL
         self._invalidate()
-        self._spawn(self._notifier.approval_needed())
+        self._spawn(self._notifier.approval_needed(tool_name))
+        self._spawn(self._fire_hook(NOTIFICATION, kind="approval", tool_name=tool_name))
         try:
             return await future
         finally:
             self._approval.cancel()
+            self._status.state = StatusLineState.RUNNING
+            self._invalidate()
+
+    def _render_question(self) -> None:
+        """Print the current question block (numbered options) to the feed."""
+        pending = self._question.pending
+        question = self._question.current()
+        if pending is None or question is None:
+            return
+        self._feed.permission(question_prompt_text(question, pending.selection))
+
+    def _on_question_key(self, outcome: str) -> None:
+        """After a question keypress: render the advance/toggle and repaint."""
+        if outcome in ("advanced", "toggled"):
+            self._render_question()
+        self._invalidate()
+
+    async def _request_question(self, questions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """``ctx.question_callback``: inline 1-4/enter/ESC ask during a turn."""
+        future = self._question.request(questions)
+        self._render_question()
+        self._status.state = StatusLineState.QUESTION
+        self._invalidate()
+        self._spawn(self._notifier.approval_needed("ask_user"))
+        self._spawn(self._fire_hook(NOTIFICATION, kind="approval", tool_name="ask_user"))
+        try:
+            return await future
+        finally:
+            self._question.cancel()
             self._status.state = StatusLineState.RUNNING
             self._invalidate()
 
@@ -1074,6 +1202,8 @@ class TuiApp:
                 turns=result.turns,
                 elapsed_s=result.elapsed_s,
             )
+            if result.stop_reason == "context_overflow":
+                self._feed.error("context full even after compaction — /compact or /new")
         if self._pending_review is not None:
             self._feed.review(self._pending_review.model, self._pending_review.feedback)
             self._pending_review = None
@@ -1230,7 +1360,8 @@ class TuiApp:
             self._activity("thinking")
         elif isinstance(event, Error):
             self._feed.error(event.message)
-            self._spawn(self._notifier.error())
+            self._spawn(self._notifier.error(event.message))
+            self._spawn(self._fire_hook(NOTIFICATION, kind="error", reason=event.message))
         elif isinstance(event, Retrying):
             self._feed.retrying(event.attempt, event.delay)
         elif isinstance(event, QueuedMessage):
@@ -1255,6 +1386,14 @@ class TuiApp:
         elif isinstance(event, Done):
             self._feed.stream_end()
             self._spawn(self._notifier.task_finish())
+            self._spawn(self._fire_hook(NOTIFICATION, kind="finish"))
+        elif isinstance(event, CompactionStarted):
+            self._feed.info(
+                f"context near the window ({event.context_tokens}/{event.threshold} tokens) "
+                "— compacting…"
+            )
+        elif isinstance(event, CompactionFinished):
+            self._feed.info(f"compacted into a {event.summary_chars}-char summary")
         elif isinstance(event, Review):
             # Rendered after the stats line in _run_turn, not mid-stream.
             self._pending_review = event

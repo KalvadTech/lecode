@@ -26,6 +26,7 @@ from lecode.auth import AuthError, resolve_api_key
 from lecode.config.loader import config_dir, find_config_file, load_config
 from lecode.config.models import AuthPolicy, Config
 from lecode.deps import find_missing_binaries, format_missing_error
+from lecode.extras.background import BACKGROUND_EXTRA
 from lecode.extras.chain import ChainResult, run_chain
 from lecode.extras.loop_mode import (
     DEFAULT_MAX_ITERATIONS,
@@ -37,7 +38,12 @@ from lecode.extras.status_signals import START, STOP, StatusEmitter
 from lecode.extras.worktree import WorktreeError, WorktreeInfo, WorktreeManager
 from lecode.hooks import (
     EVENTS,
+    INTERRUPT,
+    SESSION_END,
+    SESSION_START,
+    USER_PROMPT_SUBMIT,
     HookDispatcher,
+    MergedVerdict,
     build_envelope,
     dispatch_event,
     dispatcher_from_config,
@@ -190,10 +196,16 @@ async def _run_with_mcp(
     """Headless run with MCP servers attached (tools registered, shut down after)."""
     from lecode.extras.mcp_client import attach_mcp
 
-    manager = await attach_mcp(runtime.registry, runtime.ctx)
+    async def _notify(text: str) -> None:
+        print(text, file=sys.stderr)
+
+    manager = await attach_mcp(runtime.registry, runtime.ctx, notify=_notify)
     try:
         return await _run_headless(provider, runner, messages)
     finally:
+        background = runtime.ctx.extras.get(BACKGROUND_EXTRA)
+        if background is not None:
+            await background.shutdown()
         await manager.shutdown()
 
 
@@ -201,6 +213,20 @@ async def _aclose(provider: Any) -> None:
     aclose = getattr(provider, "aclose", None)
     if aclose is not None:
         await aclose()
+
+
+def _fire_cli_hook(
+    dispatcher: HookDispatcher | None, event: str, **payload: Any
+) -> MergedVerdict | None:
+    """Fire a lifecycle hook from sync CLI code; ``None`` when nothing ran.
+
+    Needs its own event loop (the CLI entry points are sync between
+    ``asyncio.run`` calls). Only ``UserPromptSubmit``'s verdict is enforced;
+    everything else is observational.
+    """
+    if dispatcher is None or not dispatcher.handlers.get(event):
+        return None
+    return asyncio.run(dispatcher.fire(event, **payload))
 
 
 def _apply_cli_overrides(
@@ -318,6 +344,16 @@ def run_headless(
     )
     signals = StatusEmitter(config.signals, session=session.name)
 
+    _fire_cli_hook(runtime.hooks, SESSION_START)
+    prompt_verdict = _fire_cli_hook(runtime.hooks, USER_PROMPT_SUBMIT, prompt=prompt)
+    if prompt_verdict is not None and prompt_verdict.verdict == "deny":
+        typer.echo(
+            f"error: prompt blocked by hook: {prompt_verdict.reason or 'UserPromptSubmit hook'}",
+            err=True,
+        )
+        _fire_cli_hook(runtime.hooks, SESSION_END)
+        return EXIT_ERROR
+
     user_message: ChatMessage = {"role": "user", "content": prompt}
     store.append_message(session, user_message)
     messages: list[ChatMessage] = [
@@ -331,9 +367,11 @@ def run_headless(
         typer.echo(f"error: {e}", err=True)
         return EXIT_ERROR
     except KeyboardInterrupt:
+        _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
         return EXIT_ERROR
     finally:
+        _fire_cli_hook(runtime.hooks, SESSION_END)
         signals.emit(STOP)
         shutdown_telemetry()
 
@@ -348,6 +386,9 @@ def run_headless(
     )
     if wt_info is not None:
         typer.echo(_worktree_exit_note(wt_info), err=True)
+    if result.stop_reason == "context_overflow":
+        typer.echo("error: context full even after compaction — start a new session", err=True)
+        return EXIT_MAX_TURNS
     if result.stop_reason == "max_turns":
         return EXIT_MAX_TURNS
     return EXIT_OK
@@ -438,18 +479,24 @@ def run_loop_mode(
                 on_text=typer.echo,
             )
         finally:
+            background = runtime.ctx.extras.get(BACKGROUND_EXTRA)
+            if background is not None:
+                await background.shutdown()
             await _aclose(client)
 
     signals.emit(START)
+    _fire_cli_hook(runtime.hooks, SESSION_START)
     try:
         result = asyncio.run(_loop())
     except ProviderError as e:
         typer.echo(f"error: {e}", err=True)
         return EXIT_ERROR
     except KeyboardInterrupt:
+        _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
         return EXIT_ERROR
     finally:
+        _fire_cli_hook(runtime.hooks, SESSION_END)
         signals.emit(STOP)
         shutdown_telemetry()
     if result.stop_reason == "error":
@@ -535,18 +582,24 @@ def run_chain_mode(
                 on_phase=on_phase,
             )
         finally:
+            background = runtime.ctx.extras.get(BACKGROUND_EXTRA)
+            if background is not None:
+                await background.shutdown()
             await _aclose(client)
 
     signals.emit(START)
+    _fire_cli_hook(runtime.hooks, SESSION_START)
     try:
         asyncio.run(_chain())
     except ProviderError as e:
         typer.echo(f"error: {e}", err=True)
         return EXIT_ERROR
     except KeyboardInterrupt:
+        _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
         return EXIT_ERROR
     finally:
+        _fire_cli_hook(runtime.hooks, SESSION_END)
         signals.emit(STOP)
         shutdown_telemetry()
     return EXIT_OK

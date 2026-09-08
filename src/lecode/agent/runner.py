@@ -8,7 +8,9 @@ build plan (``Token``/``Reasoning``/``ToolCall``/``ToolResult``/``Error``/
 ``Retrying``/``Done``).
 
 Stop reasons: ``"done"`` (final text answer), ``"empty"`` (the provider
-returned no text and no tool calls three nudges in a row), ``"max_turns"``.
+returned no text and no tool calls three nudges in a row), ``"max_turns"``,
+``"context_overflow"`` (compaction ran and the context still doesn't fit with
+``[compaction] on_overflow = "pause"``).
 Provider errors propagate after an ``Error`` event; cancellation propagates
 after partial state is persisted.
 
@@ -20,6 +22,7 @@ the test ``FakeProvider`` both qualify).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import time
 from collections.abc import AsyncIterator, Callable
@@ -29,7 +32,9 @@ from typing import Any
 from lecode.agent.review import review, user_request
 from lecode.agent.tools.base import ToolContext, ToolRegistry
 from lecode.config.models import Config
-from lecode.providers.catalog import Catalog, ModelNotFoundError
+from lecode.extras.background import BACKGROUND_EXTRA
+from lecode.hooks import STOP
+from lecode.providers.catalog import AmbiguousModelError, Catalog, ModelNotFoundError
 from lecode.providers.openai_compat import ProviderError
 from lecode.providers.retry import retry_async
 from lecode.providers.types import (
@@ -44,6 +49,7 @@ from lecode.providers.types import (
 from lecode.providers.types import (
     Done as StreamDone,
 )
+from lecode.session.compaction import compact_session
 from lecode.telemetry import capture_exception, record_turn
 
 # -- runner events (the plan's taxonomy) --------------------------------------
@@ -119,6 +125,21 @@ class QueuedMessage:
 
 
 @dataclass(frozen=True)
+class CompactionStarted:
+    """Automatic compaction is summarizing the older context."""
+
+    context_tokens: int
+    threshold: int
+
+
+@dataclass(frozen=True)
+class CompactionFinished:
+    """Automatic compaction recorded a summary and rebuilt the history."""
+
+    summary_chars: int
+
+
+@dataclass(frozen=True)
 class Done:
     stop_reason: str
     turns: int
@@ -143,6 +164,8 @@ AgentEvent = (
     | LlmCall
     | LlmResponse
     | QueuedMessage
+    | CompactionStarted
+    | CompactionFinished
     | Done
     | Review
 )
@@ -255,6 +278,8 @@ class AgentRunner:
         history: list[ChatMessage] = list(messages)
         # The live conversation, visible through ctx (subagents, hooks).
         self.ctx.extras["conversation"] = history
+        # Background tasks finished between runs surface at the start.
+        await self._drain_background(history, on_event)
         input_tokens = 0
         output_tokens = 0
         cost_usd = 0.0
@@ -265,6 +290,7 @@ class AgentRunner:
         empty_retries = 0
         final_text = ""
         continuing = False
+        compacted = False
         stop_reason = "done"
         max_turns = self.config.agent.max_turns
 
@@ -277,6 +303,19 @@ class AgentRunner:
                     await self._drain_queues(history, on_event)
                     if self.config.agent.turn_cooldown_ms > 0:
                         await asyncio.sleep(self.config.agent.turn_cooldown_ms / 1000)
+
+                if context_tokens:
+                    hard = self._context_window() - self.config.compaction.buffer_tokens
+                    if (
+                        compacted
+                        and self.config.compaction.on_overflow == "pause"
+                        and context_tokens >= hard
+                    ):
+                        # Even compacted history doesn't fit — stop the run.
+                        stop_reason = "context_overflow"
+                        break
+                    if await self._maybe_compact(history, on_event, context_tokens, turns):
+                        compacted = True
 
                 self._partial = None
                 prompt_chars = _prompt_chars(history)
@@ -333,6 +372,9 @@ class AgentRunner:
             raise
 
         await self._emit(on_event, Done(stop_reason=stop_reason, turns=turns))
+        hooks = self.ctx.extras.get("hooks")
+        if hooks is not None and hooks.handlers.get(STOP):
+            await hooks.fire(STOP, reason=stop_reason)
 
         # Pierre mode: a second model reviews the request vs the result.
         review_text: str | None = None
@@ -541,6 +583,73 @@ class AgentRunner:
                 history.append(message)
                 self._persist_message(message)
                 await self._emit(on_event, QueuedMessage(content=item))
+        await self._drain_background(history, on_event)
+
+    async def _drain_background(self, history: list[ChatMessage], on_event: OnEvent | None) -> None:
+        """Feed background-task completions in as synthetic user messages.
+
+        Drained at run start and between turns so the model hears about a
+        finished background task at the next opportunity.
+        """
+        manager = self.ctx.extras.get(BACKGROUND_EXTRA)
+        if manager is None:
+            return
+        for note in manager.drain_notifications():
+            message: ChatMessage = {"role": "user", "content": note}
+            history.append(message)
+            self._persist_message(message)
+            await self._emit(on_event, QueuedMessage(content=note))
+
+    # -- automatic compaction -----------------------------------------------------
+
+    def _context_window(self) -> int:
+        """Effective window: the catalog's per-model value when known."""
+        if self._catalog is not None:
+            with contextlib.suppress(ModelNotFoundError, AmbiguousModelError):
+                return self._catalog.get(self.model).context_window
+        return self.config.agent.context_window
+
+    async def _maybe_compact(
+        self,
+        history: list[ChatMessage],
+        on_event: OnEvent | None,
+        context_tokens: int,
+        turns: int,
+    ) -> bool:
+        """Compact before the next provider call when the last call's real
+        ``input_tokens`` crossed the trigger; True when a compaction happened."""
+        compaction = self.config.compaction
+        if not compaction.enabled or self.session is None or self.store is None:
+            return False
+        threshold = self._context_window() - compaction.buffer_tokens
+        if compaction.mid_turn_threshold is not None and turns >= 1:
+            # Tool-loop rounds after the first trigger at this absolute count.
+            threshold = int(compaction.mid_turn_threshold)
+        if context_tokens < threshold:
+            return False
+        await self._emit(
+            on_event, CompactionStarted(context_tokens=context_tokens, threshold=threshold)
+        )
+        summary = await compact_session(
+            self.provider,
+            self.store,
+            self.session,
+            self.model,
+            hooks=self.ctx.extras.get("hooks"),
+        )
+        if summary is None:
+            return False  # fail-open: keep going uncompacted
+        # Rebuild in place so ctx.extras["conversation"] stays valid. Leading
+        # system messages (the system prompt, a persona overlay) are never
+        # persisted; keep them ahead of the replayed summary + tail.
+        prefix = []
+        for message in history:
+            if message.get("role") != "system":
+                break
+            prefix.append(message)
+        history[:] = [*prefix, *self.store.load_for_model(self.session)]
+        await self._emit(on_event, CompactionFinished(summary_chars=len(summary)))
+        return True
 
     # -- usage / cost ---------------------------------------------------------------
 

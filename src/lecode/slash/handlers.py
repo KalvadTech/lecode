@@ -12,8 +12,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 
+from lecode.agent.tools.background import format_row
 from lecode.config.models import PermissionMode, ThinkingLevel
 from lecode.context.resources import load_text
+from lecode.extras.background import BACKGROUND_EXTRA
 from lecode.extras.export import ShareError, export_html, share_gist
 from lecode.extras.loop_mode import DEFAULT_MAX_ITERATIONS
 from lecode.extras.proc import run_proc
@@ -27,6 +29,7 @@ from lecode.providers.catalog import (
     AmbiguousModelError,
     ModelNotFoundError,
 )
+from lecode.session.compaction import COMPACT_KEEP_TAIL, compact_session
 from lecode.session.handoff import handoff as handoff_session
 from lecode.session.naming import unique_name, validate_name
 from lecode.session.stats import session_stats
@@ -52,18 +55,6 @@ REWIND_LIST_LIMIT = 10
 
 #: Messages shown by ``/history``.
 HISTORY_LIMIT = 30
-
-#: Recent messages kept raw by ``/compact``; everything older is summarized.
-COMPACT_KEEP_TAIL = 4
-
-#: Chars of transcript sent to the summarizer by ``/compact``.
-COMPACT_TRANSCRIPT_CAP = 100_000
-
-COMPACT_PROMPT = (
-    "Summarize this conversation for continuation by an AI coding agent. "
-    "Capture the goal, decisions made, files touched, and the current state "
-    "of the work. Be compact (a few hundred words at most); plain text."
-)
 
 STUB_MESSAGE = "/{name} is not yet available — it lands in a later release"
 
@@ -349,28 +340,20 @@ async def cmd_compact(app: TuiApp, args: list[str]) -> None:
     if len(messages) <= COMPACT_KEEP_TAIL:
         app.feed.info("not enough history to compact")
         return
-    older, tail = messages[:-COMPACT_KEEP_TAIL], messages[-COMPACT_KEEP_TAIL:]
-    transcript = "\n".join(f"{m.role}: {_text_of(m.message)}" for m in older)
-    transcript = _clip(transcript, COMPACT_TRANSCRIPT_CAP)
-    app.feed.info(f"compacting {len(older)} messages…")
-    try:
-        completed = await app.runner.provider.complete(
-            [
-                {"role": "system", "content": COMPACT_PROMPT},
-                {"role": "user", "content": transcript},
-            ],
-            model=app.config.llm.model,
-        )
-    except Exception as e:
-        app.feed.error(f"compaction failed: {e}")
+    older = len(messages) - COMPACT_KEEP_TAIL
+    app.feed.info(f"compacting {older} messages…")
+    summary = await compact_session(
+        app.runner.provider,
+        app.store,
+        app.session,
+        app.config.llm.model,
+        hooks=app.runtime.hooks,
+    )
+    if summary is None:
+        app.feed.error("compaction failed: provider error or empty summary")
         return
-    summary = (completed.content or "").strip()
-    if not summary:
-        app.feed.error("compaction failed: empty summary")
-        return
-    app.store.compact(app.session, summary, keep_from_seq=tail[0].seq)
     app.reload_history()
-    app.feed.info(f"compacted {len(older)} messages into a {len(summary)}-char summary")
+    app.feed.info(f"compacted {older} messages into a {len(summary)}-char summary")
 
 
 # -- model / provider / thinking -------------------------------------------------
@@ -752,6 +735,16 @@ async def cmd_queue(app: TuiApp, args: list[str]) -> None:
     app.feed.info("\n".join(lines))
 
 
+async def cmd_tasks(app: TuiApp, args: list[str]) -> None:
+    """``/tasks``: background tasks (id, kind, status, age, description)."""
+    manager = app.runtime.ctx.extras.get(BACKGROUND_EXTRA)
+    records = manager.tasks() if manager is not None else []
+    if not records:
+        app.feed.info("(no background tasks)")
+        return
+    app.feed.info("\n".join(format_row(record) for record in records))
+
+
 # -- multimodal attachments ---------------------------------------------------------
 
 
@@ -975,10 +968,26 @@ async def cmd_chain(app: TuiApp, args: list[str]) -> None:
 
 
 async def cmd_mcp(app: TuiApp, args: list[str]) -> None:
-    """``/mcp`` — server states; ``/mcp tools <name>``; ``/mcp reconnect <name>``."""
+    """``/mcp`` — server states; tools/reconnect/login/logout subcommands."""
     manager = app.runtime.ctx.extras.get("mcp")
     if manager is None or not manager.status():
         app.feed.info("no MCP servers configured")
+        return
+    if args and args[0] in ("login", "logout"):
+        if len(args) < 2:
+            app.feed.error(f"usage: /mcp {args[0]} <name>")
+            return
+        action = manager.login if args[0] == "login" else manager.logout
+        status = await action(args[1])
+        if status is None:
+            app.feed.error(f"unknown MCP server: {args[1]}")
+            return
+        for wrapper in manager.tool_wrappers():
+            app.runtime.registry.register(wrapper)
+        if status.state == "connected":
+            app.feed.info(f"mcp: {status.name} {args[0]} ok — connected ({status.tools} tools)")
+        else:
+            app.feed.error(f"mcp: {status.name} {args[0]} failed: {status.error}")
         return
     if args and args[0] == "reconnect":
         if len(args) < 2:
@@ -1086,10 +1095,12 @@ TUTOR_TOPICS: dict[str, str] = {
     ),
     "chain": "/chain <topic> runs brainstorm → plan → code → review as one turn.",
     "mcp": (
-        "MCP servers are configured under [mcp.servers] (stdio or http); Exa web "
-        "search is auto-configured when EXA_API_KEY is set, context7 with "
-        "enable_context7 = true. /mcp shows state, /mcp tools <name>, /mcp "
-        "reconnect <name>. Tools appear as mcp:<server>:<tool>."
+        "MCP servers are configured under [mcp.servers] (stdio, http, or sse); "
+        "Exa web search is auto-configured when EXA_API_KEY is set, context7 "
+        "with enable_context7 = true. Remote servers can use oauth = true for "
+        "browser authorization (tokens persist under <config_dir>/mcp_auth/). "
+        "/mcp shows state, /mcp tools|reconnect|login|logout <name>. Tools "
+        "appear as mcp:<server>:<tool>."
     ),
     "memory": (
         "Persistent markdown memory: MEMORY.md (auto-injected), daily logs, "
@@ -1160,7 +1171,7 @@ async def cmd_review(app: TuiApp, args: list[str]) -> None:
 
 
 async def cmd_notifications(app: TuiApp, args: list[str]) -> None:
-    """``/notifications [on|off]``: show or toggle audio notifications."""
+    """``/notifications [on|off]``: show or toggle notifications."""
     cfg = app.config.notifications
     if args:
         if args[0] not in ("on", "off"):
@@ -1276,7 +1287,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ),
     ("Permissions", ["permissions", "mode", "toggle"]),
     ("Worktrees", ["worktree", "wt-merge", "wt-exit"]),
-    ("Power features", ["loop", "chain", "mcp", "review"]),
+    ("Power features", ["loop", "chain", "mcp", "review", "tasks"]),
     (
         "Interface",
         [
@@ -1336,6 +1347,7 @@ _HANDLERS = {
     "hooks": cmd_hooks,
     "agents": cmd_agents,
     "queue": cmd_queue,
+    "tasks": cmd_tasks,
     "btw": cmd_btw,
     "copy": cmd_copy,
     "help": cmd_help,
@@ -1387,7 +1399,7 @@ ARG_HINTS = {
     "wt-exit": "[--delete] [--force]",
     "loop": "<plan-file> [max-iterations]",
     "chain": "<topic>",
-    "mcp": "[tools|reconnect <name>]",
+    "mcp": "[tools|reconnect|login|logout <name>]",
     "tutor": "<topic>",
     "review": "[file…]",
     "notifications": "[on|off]",
