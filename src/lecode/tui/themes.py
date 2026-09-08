@@ -40,6 +40,10 @@ class Theme:
     permission: str
 
 
+#: Picker-dropdown panel colors, part of the one fixed theme.
+PICKER_MENU_BG = "#1c162b"
+PICKER_MENU_SELECTED_BG = "#35264f"
+
 #: The one and only theme: Kalvad purple on dark.
 THEME = Theme(
     name="kalvad",

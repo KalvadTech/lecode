@@ -88,8 +88,9 @@ async def test_unknown_model_keeps_configured_window(tmp_path, monkeypatch):
 def test_layout_is_chatbox_above_statusline(tmp_path, monkeypatch):
     """The input is a framed chatbox directly above the 3-line statusline;
     the frame's bottom border is the split between them. A conditional live
-    region for streamed text sits above the chatbox."""
-    from prompt_toolkit.layout.containers import ConditionalContainer, Window
+    region for streamed text sits above the chatbox, and the themed picker
+    panel anchors below the input for all trigger menus."""
+    from prompt_toolkit.layout.containers import ConditionalContainer, Window, to_container
     from prompt_toolkit.widgets import Frame
 
     app, _, _ = make_app(tmp_path, monkeypatch, [])
@@ -97,11 +98,237 @@ def test_layout_is_chatbox_above_statusline(tmp_path, monkeypatch):
         pt_app = app._build_app(input=inp, output=DummyOutput())
     assert isinstance(app._chatbox, Frame) and app._chatbox.body is app._input_area
     children = pt_app.layout.container.children
-    # Frame unwraps to its internal container; the statusline stays last.
-    assert len(children) == 3
+    assert len(children) == 4
     assert isinstance(children[0], ConditionalContainer)  # live stream region
-    assert isinstance(children[2], Window) and children[2].height == 3
+    assert children[1] is to_container(app._chatbox)  # Frame unwraps to its HSplit
+    assert isinstance(children[2], ConditionalContainer)  # picker panel sizes to its rows
+    assert isinstance(children[3], Window) and children[3].height == 3
     assert app._live_buffer is not None
+
+
+def _buffer(app):
+    return app._input_area.buffer
+
+
+def _command_texts(state) -> list[str]:
+    return [c.text for c in state.completions]
+
+
+async def test_slash_menu_opens_with_all_commands(tmp_path, monkeypatch):
+    """Typing '/' at input start opens the dropdown with every command."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("/")
+        await wait_for(lambda: _buffer(app).complete_state is not None)
+        texts = _command_texts(_buffer(app).complete_state)
+        assert "/quit " in texts and "/queue " in texts
+        assert len([t for t in texts if t.startswith("/model")]) > 1  # several model-* rows
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_slash_menu_prefix_filters_while_typing(tmp_path, monkeypatch):
+    """'/cop' narrows to commands starting with 'cop'."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("/cop")
+        await wait_for(
+            lambda: (
+                _buffer(app).complete_state is not None
+                and "/copy " in _command_texts(_buffer(app).complete_state)
+            )
+        )
+        for text in _command_texts(_buffer(app).complete_state):
+            assert text.lower().startswith("/cop")
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_slash_menu_enter_fills_without_submitting(tmp_path, monkeypatch):
+    """Enter fills the first match; only a second Enter submits it."""
+    app, provider, out = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("/cop")
+        await wait_for(
+            lambda: (
+                _buffer(app).complete_state is not None
+                and "/copy " in _command_texts(_buffer(app).complete_state)
+            )
+        )
+        inp.send_text("\r")  # accept: fill, do not submit
+        await wait_for(
+            lambda: _buffer(app).text == "/copy " and _buffer(app).complete_state is None
+        )
+        assert provider.requests == []
+        assert "nothing to copy" not in out.getvalue()
+        inp.send_text("\r")  # now submit the filled command
+        await wait_for(lambda: "nothing to copy" in out.getvalue())
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_slash_menu_arrows_navigate_and_wrap(tmp_path, monkeypatch):
+    """Up/Down move through matches (Down = first, Up past first selects last)."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("/mod")
+        await wait_for(
+            lambda: (
+                _buffer(app).complete_state is not None
+                and "/mode " in _command_texts(_buffer(app).complete_state)
+            )
+        )
+        state = _buffer(app).complete_state
+        first, last = state.completions[0].text, state.completions[-1].text
+        inp.send_text("\x1b[B")  # Down -> first
+        await wait_for(lambda: _buffer(app).text == first)
+        inp.send_text("\x1b[A")  # Up from first -> deselect, restores what was typed
+        await wait_for(lambda: _buffer(app).text == "/mod")
+        inp.send_text("\x1b[A")  # Up again -> wrap to last
+        await wait_for(lambda: _buffer(app).text == last)
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_slash_menu_tab_accepts_first_match(tmp_path, monkeypatch):
+    """Tab fills the first match like Enter does."""
+    app, provider, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("/mod")
+        await wait_for(
+            lambda: (
+                _buffer(app).complete_state is not None
+                and "/mode " in _command_texts(_buffer(app).complete_state)
+            )
+        )
+        inp.send_text("\t")
+        await wait_for(lambda: _buffer(app).text == "/mode ")
+        assert provider.requests == []
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_slash_menu_tab_accepts_navigated_match_without_submitting(tmp_path, monkeypatch):
+    app, provider, out = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("/mod")
+        await wait_for(lambda: _buffer(app).complete_state is not None)
+        inp.send_text("\x1b[B\x1b[B")
+        await wait_for(lambda: _buffer(app).text == "/model ")
+        inp.send_text("\t")
+        await wait_for(lambda: _buffer(app).complete_state is None)
+        assert _buffer(app).text == "/model "
+        assert provider.requests == []
+        assert out.getvalue() == ""
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_slash_menu_escape_dismisses_and_restores(tmp_path, monkeypatch):
+    """Escape closes the menu and restores the typed text; later tabs reopen it."""
+    app, provider, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("/mod")
+        await wait_for(lambda: _buffer(app).complete_state is not None)
+        inp.send_text("\x1b[B")  # navigate: text becomes '/mode ' ... first
+        await wait_for(lambda: _buffer(app).text != "/mod")
+        inp.send_text("\x1b")  # Escape: restore '/mod', close menu
+        await wait_for(lambda: _buffer(app).text == "/mod" and _buffer(app).complete_state is None)
+        inp.send_text("\t")  # Tab reopens the menu
+        await wait_for(lambda: _buffer(app).complete_state is not None)
+        inp.send_text("\x1b")  # Escape again: dismiss without filling
+        await wait_for(lambda: _buffer(app).complete_state is None and _buffer(app).text == "/mod")
+        assert provider.requests == []
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_slash_menu_closes_after_command_name(tmp_path, monkeypatch):
+    """A space after the command closes the menu and it stays closed."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("/mod")
+        await wait_for(lambda: _buffer(app).complete_state is not None)
+        inp.send_text(" ")
+        await wait_for(lambda: _buffer(app).text == "/mod ")
+        await asyncio.sleep(0.3)  # give any spurious recompletion time to fire
+        assert _buffer(app).complete_state is None
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_slash_no_match_row_escape_dismisses_and_reopens(tmp_path, monkeypatch):
+    """Escape dismisses the inert no-match row; editing or Tab brings it back."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("/zz")
+        await wait_for(lambda: app._slash_menu_empty())
+        inp.send_text("\x1b")  # Escape dismisses the row (no completion state)
+        await wait_for(lambda: not app._slash_menu_empty())
+        inp.send_text("z")  # editing the prefix reopens it
+        await wait_for(lambda: app._slash_menu_empty())
+        inp.send_text("\x1b")  # dismiss again
+        await wait_for(lambda: not app._slash_menu_empty())
+        inp.send_text("\t")  # Tab reopens the dismissed row
+        await wait_for(lambda: app._slash_menu_empty())
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_personas_trigger_does_not_list_dotfiles(tmp_path, monkeypatch):
+    """A leading '.' belongs to the personas picker: dotfiles don't flood the
+    menu at input start, but they still complete mid-message."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    (tmp_path / ".env").write_text("KEY=1", encoding="utf-8")
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text(".en")
+        await asyncio.sleep(0.4)  # give any spurious path completion time to land
+        state = _buffer(app).complete_state
+        texts = _command_texts(state) if state is not None else []
+        assert all(text.startswith(".") for text in texts), f"personas only, got: {texts}"
+        assert ".env" not in texts, "dotfiles must not complete at input start"
+        inp.send_text("\x15read .en")  # mid-message: the dotfile is a path token again
+        await wait_for(
+            lambda: (
+                _buffer(app).complete_state is not None
+                and ".env" in _command_texts(_buffer(app).complete_state)
+            )
+        )
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
+async def test_slash_menu_mid_message_does_not_open(tmp_path, monkeypatch):
+    """The menu only responds to '/' at the start of the input."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("hey /qu")
+        await asyncio.sleep(0.3)
+        assert _buffer(app).complete_state is None
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
 
 
 async def test_resume_restores_status_usage(tmp_path, monkeypatch):

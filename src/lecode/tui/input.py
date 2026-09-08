@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import AsyncGenerator, Callable, Iterable
+from itertools import islice
 from pathlib import Path
 
 from prompt_toolkit.application.run_in_terminal import run_in_terminal
@@ -41,6 +42,9 @@ FILE_CACHE_TTL_S = 2.0
 
 #: Timeout for the fd subprocess itself.
 FD_TIMEOUT_S = 5.0
+
+#: Max path completions offered (same cap as the @ picker's file branch).
+PATH_COMPLETION_LIMIT = 20
 
 #: Word characters for Ctrl-W (kill word back).
 _WORD_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
@@ -212,6 +216,10 @@ def _path_token_before_cursor(document: Document) -> str | None:
     token = before.split(" ")[-1] if before else ""
     if not token:
         return None
+    # Buffer-start trigger chars: "/" (commands) and "." (personas) own the
+    # input — except "./" and "../", which are explicit path prefixes.
+    if before == token and token[0] in "/." and not token.startswith(("./", "../")):
+        return None
     if "/" in token or token.startswith(("~", ".")):
         return token
     return None
@@ -298,9 +306,9 @@ class PathCompleter(Completer):
             return
         # fd lists paths relative to cwd; normalize the user's "./" away.
         prefix = token[2:] if token.startswith("./") else token
-        for path in await self._lister.files():
-            if path.startswith(prefix):
-                yield Completion(path, start_position=-len(token))
+        matches = (path for path in await self._lister.files() if path.startswith(prefix))
+        for path in islice(matches, PATH_COMPLETION_LIMIT):
+            yield Completion(path, start_position=-len(token))
 
     def get_completions(self, document: Document, complete_event: CompleteEvent):
         # Unused: prompt_toolkit drives the async variant.
