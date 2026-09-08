@@ -11,6 +11,8 @@ from lecode.agent.runner import (
     CONTINUE_PROMPT,
     EMPTY_NUDGE,
     AgentRunner,
+    CompactionFinished,
+    CompactionStarted,
     Done,
     Error,
     LlmCall,
@@ -25,7 +27,7 @@ from lecode.agent.tools.base import Tool, ToolRegistry
 from lecode.agent.tools.base import ToolResult as ToolExecResult
 from lecode.providers.openai_compat import ProviderError
 from lecode.providers.types import TokenDelta
-from lecode.session.model import MessageRecord
+from lecode.session.model import EventRecord, MessageRecord
 from lecode.session.storage import SessionStore
 
 
@@ -379,3 +381,211 @@ async def test_steer_queue_drained_before_input_queue(tool_ctx):
     # each drained message is reported, steer first
     drained = [e.content for e in events if isinstance(e, QueuedMessage)]
     assert drained == ["steer me", "regular input"]
+
+
+# -- automatic compaction ---------------------------------------------------------
+
+
+def _compaction_setup(tool_ctx, tmp_path, pairs: int = 5):
+    """A runner with a session seeded with enough history to compact."""
+    store = SessionStore(config_dir=tmp_path / "cfg")
+    session = store.create("auto-compact", tmp_path)
+    for index in range(pairs):
+        store.append_message(session, {"role": "user", "content": f"q{index}"})
+        store.append_message(session, {"role": "assistant", "content": f"a{index}"})
+    # no catalog: the window comes from config.agent.context_window
+    return store, session
+
+
+def _compact_events(store, session):
+    return [
+        r for r in store.read_records(session) if isinstance(r, EventRecord) and r.kind == "compact"
+    ]
+
+
+async def test_auto_compaction_triggers_near_window(tool_ctx, tmp_path):
+    store, session = _compaction_setup(tool_ctx, tmp_path)
+    tool_ctx.config.agent.context_window = 1000
+    tool_ctx.config.compaction.buffer_tokens = 200  # trigger at 800
+    script = [
+        {
+            "tool_calls": [{"id": "c1", "name": "echo", "arguments": "{}"}],
+            "usage": {"input_tokens": 900, "output_tokens": 5},
+        },
+        {"text": "the summary"},  # consumed by the compaction provider call
+        {"text": "done", "usage": {"input_tokens": 100, "output_tokens": 4}},
+    ]
+    provider = FakeProvider(script)
+    runner = AgentRunner(
+        provider, ToolRegistry([EchoTool()]), tool_ctx, session=session, store=store
+    )
+    events, on_event = collect_events()
+
+    result = await runner.run([{"role": "user", "content": "go"}], on_event)
+
+    assert result.stop_reason == "done"
+    assert result.turns == 2
+    compacts = _compact_events(store, session)
+    assert compacts and compacts[-1].data["summary"] == "the summary"
+    started = [e for e in events if isinstance(e, CompactionStarted)]
+    assert [(e.context_tokens, e.threshold) for e in started] == [(900, 800)]
+    finished = [e for e in events if isinstance(e, CompactionFinished)]
+    assert [e.summary_chars for e in finished] == [len("the summary")]
+    # the next call carries the summary plus the kept tail, old turns gone
+    messages = provider.requests[-1]["messages"]
+    assert messages[0] == {"role": "system", "content": "the summary"}
+    contents = [m.get("content") for m in messages]
+    assert "q4" in contents and "q0" not in contents
+
+
+async def test_auto_compaction_disabled(tool_ctx, tmp_path):
+    store, session = _compaction_setup(tool_ctx, tmp_path)
+    tool_ctx.config.agent.context_window = 1000
+    tool_ctx.config.compaction.buffer_tokens = 200
+    tool_ctx.config.compaction.enabled = False
+    script = [
+        {
+            "tool_calls": [{"id": "c1", "name": "echo", "arguments": "{}"}],
+            "usage": {"input_tokens": 900, "output_tokens": 5},
+        },
+        {"text": "done", "usage": {"input_tokens": 950, "output_tokens": 4}},
+    ]
+    provider = FakeProvider(script)
+    runner = AgentRunner(
+        provider, ToolRegistry([EchoTool()]), tool_ctx, session=session, store=store
+    )
+    events, on_event = collect_events()
+
+    result = await runner.run([{"role": "user", "content": "go"}], on_event)
+
+    assert result.stop_reason == "done"
+    assert not _compact_events(store, session)
+    assert not [e for e in events if isinstance(e, CompactionStarted)]
+
+
+async def test_no_compaction_below_threshold(tool_ctx, tmp_path):
+    store, session = _compaction_setup(tool_ctx, tmp_path)
+    tool_ctx.config.agent.context_window = 1000
+    tool_ctx.config.compaction.buffer_tokens = 200  # trigger at 800
+    script = [
+        {
+            "tool_calls": [{"id": "c1", "name": "echo", "arguments": "{}"}],
+            "usage": {"input_tokens": 700, "output_tokens": 5},
+        },
+        {"text": "done", "usage": {"input_tokens": 750, "output_tokens": 4}},
+    ]
+    runner = AgentRunner(
+        FakeProvider(script), ToolRegistry([EchoTool()]), tool_ctx, session=session, store=store
+    )
+    events, on_event = collect_events()
+
+    result = await runner.run([{"role": "user", "content": "go"}], on_event)
+
+    assert result.stop_reason == "done"
+    assert not _compact_events(store, session)
+    assert not [e for e in events if isinstance(e, CompactionStarted)]
+
+
+async def test_pause_on_overflow_stops_run(tool_ctx, tmp_path):
+    store, session = _compaction_setup(tool_ctx, tmp_path)
+    tool_ctx.config.agent.context_window = 1000
+    tool_ctx.config.compaction.buffer_tokens = 200
+    tool_ctx.config.compaction.on_overflow = "pause"
+    script = [
+        {
+            "tool_calls": [{"id": "c1", "name": "echo", "arguments": "{}"}],
+            "usage": {"input_tokens": 900, "output_tokens": 5},
+        },
+        {"text": "the summary"},  # compaction call
+        # still over the hard threshold after compacting → stop the run
+        {
+            "tool_calls": [{"id": "c2", "name": "echo", "arguments": "{}"}],
+            "usage": {"input_tokens": 850, "output_tokens": 4},
+        },
+        {"text": "never reached"},
+    ]
+    provider = FakeProvider(script)
+    runner = AgentRunner(
+        provider, ToolRegistry([EchoTool()]), tool_ctx, session=session, store=store
+    )
+    events, on_event = collect_events()
+
+    result = await runner.run([{"role": "user", "content": "go"}], on_event)
+
+    assert result.stop_reason == "context_overflow"
+    assert result.turns == 2
+    assert _compact_events(store, session)
+    assert isinstance(events[-1], Done) and events[-1].stop_reason == "context_overflow"
+    assert len(provider.requests) == 3  # the run stopped before another call
+
+
+async def test_compaction_skipped_without_session(tool_ctx):
+    tool_ctx.config.agent.context_window = 1000
+    tool_ctx.config.compaction.buffer_tokens = 200
+    script = [
+        {
+            "tool_calls": [{"id": "c1", "name": "echo", "arguments": "{}"}],
+            "usage": {"input_tokens": 900, "output_tokens": 5},
+        },
+        {"text": "done", "usage": {"input_tokens": 950, "output_tokens": 4}},
+    ]
+    runner, provider = make_runner(tool_ctx, script, catalog=None)
+    events, on_event = collect_events()
+
+    result = await runner.run([{"role": "user", "content": "go"}], on_event)
+
+    assert result.stop_reason == "done"
+    assert not [e for e in events if isinstance(e, CompactionStarted)]
+    assert len(provider.requests) == 2  # no compaction call consumed a script entry
+
+
+async def test_compaction_failure_continues(tool_ctx, tmp_path):
+    store, session = _compaction_setup(tool_ctx, tmp_path)
+    tool_ctx.config.agent.context_window = 1000
+    tool_ctx.config.compaction.buffer_tokens = 200
+    script = [
+        {
+            "tool_calls": [{"id": "c1", "name": "echo", "arguments": "{}"}],
+            "usage": {"input_tokens": 900, "output_tokens": 5},
+        },
+        {"error": ProviderError("boom", retryable=False)},  # compaction call fails
+        {"text": "done", "usage": {"input_tokens": 100, "output_tokens": 4}},
+    ]
+    runner = AgentRunner(
+        FakeProvider(script), ToolRegistry([EchoTool()]), tool_ctx, session=session, store=store
+    )
+    events, on_event = collect_events()
+
+    result = await runner.run([{"role": "user", "content": "go"}], on_event)
+
+    # fail-open: the run continues uncompacted
+    assert result.stop_reason == "done"
+    assert not _compact_events(store, session)
+    assert [e for e in events if isinstance(e, CompactionStarted)]
+    assert not [e for e in events if isinstance(e, CompactionFinished)]
+
+
+async def test_mid_turn_threshold_triggers_earlier(tool_ctx, tmp_path):
+    store, session = _compaction_setup(tool_ctx, tmp_path)
+    # hard threshold far away (200000 - 20000); mid-turn threshold at 500
+    tool_ctx.config.compaction.mid_turn_threshold = 500
+    script = [
+        {
+            "tool_calls": [{"id": "c1", "name": "echo", "arguments": "{}"}],
+            "usage": {"input_tokens": 600, "output_tokens": 5},
+        },
+        {"text": "the summary"},  # compaction call
+        {"text": "done", "usage": {"input_tokens": 100, "output_tokens": 4}},
+    ]
+    provider = FakeProvider(script)
+    runner = AgentRunner(
+        provider, ToolRegistry([EchoTool()]), tool_ctx, session=session, store=store
+    )
+    events, on_event = collect_events()
+
+    result = await runner.run([{"role": "user", "content": "go"}], on_event)
+
+    assert result.stop_reason == "done"
+    assert _compact_events(store, session)
+    started = [e for e in events if isinstance(e, CompactionStarted)]
+    assert [(e.context_tokens, e.threshold) for e in started] == [(600, 500)]
