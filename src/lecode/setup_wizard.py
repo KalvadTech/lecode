@@ -118,22 +118,80 @@ def import_from_pi(home: Path) -> dict[str, str]:
     return answers
 
 
-def import_from_opencode(home: Path) -> dict[str, str]:
+def _opencode_mcp_servers(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Translate opencode's ``mcp`` block into lecode ``[mcp.servers]`` entries.
+
+    ``type = "local"`` becomes stdio (the command list splits into command +
+    args, ``environment`` becomes ``env``); ``type = "remote"`` becomes http
+    (or sse when the URL ends in ``/sse``). Entries that don't parse are
+    skipped — import is best-effort.
+    """
+    mcp = cfg.get("mcp")
+    if not isinstance(mcp, dict):
+        return {}
+    servers: dict[str, dict[str, Any]] = {}
+    for name, entry in mcp.items():
+        if not isinstance(entry, dict):
+            continue
+        server: dict[str, Any] = {}
+        kind = entry.get("type")
+        if kind == "local":
+            command = entry.get("command")
+            if isinstance(command, str):
+                command = [command]
+            if (
+                not isinstance(command, list)
+                or not command
+                or not all(isinstance(part, str) for part in command)
+            ):
+                continue
+            server["transport"] = "stdio"
+            server["command"] = command[0]
+            if len(command) > 1:
+                server["args"] = command[1:]
+            env = entry.get("environment")
+            if isinstance(env, dict) and env:
+                server["env"] = {str(k): str(v) for k, v in env.items()}
+        elif kind == "remote":
+            url = entry.get("url")
+            if not isinstance(url, str) or not url:
+                continue
+            server["transport"] = "sse" if url.rstrip("/").endswith("/sse") else "http"
+            server["url"] = url
+            headers = entry.get("headers")
+            if isinstance(headers, dict) and headers:
+                server["headers"] = {str(k): str(v) for k, v in headers.items()}
+        else:
+            continue
+        if entry.get("enabled") is False:
+            server["enabled"] = False
+        timeout = entry.get("timeout")  # opencode uses milliseconds
+        if isinstance(timeout, (int, float)) and timeout > 0:
+            server["timeout_s"] = timeout / 1000
+        servers[name] = server
+    return servers
+
+
+def import_from_opencode(home: Path) -> dict[str, Any]:
     """Map opencode's config onto wizard answers.
 
     ``~/.config/opencode/opencode.json(c)`` gives ``model``
-    (``provider/model``) and per-provider ``baseURL``; auth lives in
-    ``~/.local/share/opencode/auth.json``.
+    (``provider/model``), per-provider ``baseURL``, and the ``mcp`` server
+    block; auth lives in ``~/.local/share/opencode/auth.json``. MCP servers
+    import even when the provider/model doesn't map onto lecode.
     """
     cfg = _load_json(home / ".config" / "opencode" / "opencode.json") or _load_json(
         home / ".config" / "opencode" / "opencode.jsonc"
     )
     auth = _load_json(home / ".local" / "share" / "opencode" / "auth.json")
+    answers: dict[str, Any] = {}
+    mcp_servers = _opencode_mcp_servers(cfg)
+    if mcp_servers:
+        answers["mcp_servers"] = mcp_servers
     model_field = str(cfg.get("model") or "")
     provider, _, model = model_field.partition("/")
     if not provider:
-        return {}
-    answers: dict[str, str] = {}
+        return answers
     if provider == "openrouter":
         answers["provider"] = "openrouter"
         if model:
@@ -142,20 +200,20 @@ def import_from_opencode(home: Path) -> dict[str, str]:
         custom = cfg.get("provider", {}).get(provider, {})
         options = custom.get("options", {}) if isinstance(custom, dict) else {}
         base_url = options.get("baseURL", "") if isinstance(options, dict) else ""
-        if not base_url:
-            return {}
-        answers["provider"] = "custom"
-        answers["base_url"] = base_url
-        if model:
-            answers["model"] = model
-    key = _auth_key(auth, provider)
-    if key:
-        answers["api_key"] = key
+        if base_url:
+            answers["provider"] = "custom"
+            answers["base_url"] = base_url
+            if model:
+                answers["model"] = model
+    if answers.get("provider"):
+        key = _auth_key(auth, provider)
+        if key:
+            answers["api_key"] = key
     return answers
 
 
 #: Import source name → (detector paths relative to home, importer).
-_IMPORT_SOURCES: dict[str, tuple[tuple[str, ...], Callable[[Path], dict[str, str]]]] = {
+_IMPORT_SOURCES: dict[str, tuple[tuple[str, ...], Callable[[Path], dict[str, Any]]]] = {
     "pi": ((".pi/agent/settings.json", ".pi/agent/auth.json"), import_from_pi),
     "opencode": (
         (".config/opencode/opencode.json", ".config/opencode/opencode.jsonc"),
@@ -173,14 +231,20 @@ def detect_import_sources(home: Path) -> list[str]:
     ]
 
 
-def _import_summary(answers: dict[str, str]) -> str:
+def _import_summary(answers: dict[str, Any]) -> str:
     """One-line description of what an import found (key redacted)."""
-    parts = [f"provider {answers['provider']}"]
+    parts = []
+    if answers.get("provider"):
+        parts.append(f"provider {answers['provider']}")
     if answers.get("base_url"):
         parts.append(f"base_url {answers['base_url']}")
     if answers.get("model"):
         parts.append(f"model {answers['model']}")
-    parts.append("api key found" if answers.get("api_key") else "no api key")
+    if answers.get("provider"):
+        parts.append("api key found" if answers.get("api_key") else "no api key")
+    servers = answers.get("mcp_servers") or {}
+    if servers:
+        parts.append(f"{len(servers)} mcp server{'s' if len(servers) != 1 else ''}")
     return " · ".join(parts)
 
 
@@ -304,6 +368,8 @@ def build_config(answers: dict[str, Any]) -> dict[str, Any]:
         "llm": llm,
         "notifications": {"enabled": answers["notifications"]},
     }
+    if answers.get("mcp_servers"):
+        config["mcp"] = {"servers": answers["mcp_servers"]}
     return config
 
 
@@ -324,7 +390,7 @@ async def gather_answers(session: PromptSession, home: Path | None = None) -> di
     exist; imported values become the defaults of the later questions.
     """
     home = home or Path.home()
-    imported: dict[str, str] = {}
+    imported: dict[str, Any] = {}
     sources = detect_import_sources(home)
     if sources:
         choices = [*sources, "skip"]
@@ -388,13 +454,16 @@ async def gather_answers(session: PromptSession, home: Path | None = None) -> di
             if not model:
                 print("error: a model id is required")
     notifications = await _ask_yes_no(session, "Audio notifications?", default=True)
-    return {
+    answers: dict[str, Any] = {
         "provider": provider,
         "base_url": base_url,
         "api_key": api_key,
         "model": model,
         "notifications": notifications,
     }
+    if imported.get("mcp_servers"):
+        answers["mcp_servers"] = imported["mcp_servers"]
+    return answers
 
 
 async def run_wizard(session: PromptSession | None = None, home: Path | None = None) -> Path:
