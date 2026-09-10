@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.0](https://github.com/KalvadTech/lecode/compare/v0.2.0...v0.3.0) (2026-09-10)
+
+
+### Features
+
+* argument pickers for slash commands (/model, /resume, …) ([2419ec5](https://github.com/KalvadTech/lecode/commit/2419ec5e18c08f0e15c36c1fb17fcaec098de698))
+* import MCP servers from opencode in the setup wizard ([a8687c9](https://github.com/KalvadTech/lecode/commit/a8687c9453121a77b6d1bf8c0b5a6f88cedf4aaa))
+* import MCP servers from opencode in the setup wizard ([d3222df](https://github.com/KalvadTech/lecode/commit/d3222dfc1bc7ae34abe2bfb088b317928c727c1b))
+
 ## [0.2.0](https://github.com/KalvadTech/lecode/compare/v0.1.0...v0.2.0) (2026-09-08)
 
 
