@@ -126,7 +126,7 @@ from lecode.tui.pickers import (
     prefix_matches,
     trigger_token,
 )
-from lecode.tui.question import QuestionPrompt, question_prompt_text
+from lecode.tui.question import QuestionPrompt, question_heading, question_hint, question_rows
 from lecode.tui.statusline import (
     CachedGitInfo,
     StatusLineState,
@@ -576,6 +576,20 @@ class TuiApp:
         approval_pending = Condition(lambda: self._approval.is_pending)
         question_pending = Condition(lambda: self._question.is_pending)
 
+        def question_nav() -> bool:
+            # Arrows/space/tab drive the picker while the input is empty and
+            # the user is browsing options; once they start typing a custom
+            # answer (or pick the custom row) they should edit it normally.
+            pending = self._question.pending
+            return (
+                self._input_area is not None
+                and not self._input_area.buffer.text.strip()
+                and pending is not None
+                and not pending.custom
+            )
+
+        question_picker = question_pending & Condition(question_nav)
+
         @kb.add("y", filter=approval_pending)
         def _approve_once(event: Any) -> None:
             self._approval.resolve(AllowOnce())
@@ -594,25 +608,30 @@ class TuiApp:
         def _deny_escape(event: Any) -> None:
             self._approval.resolve(Deny())
 
-        @kb.add("1", filter=question_pending)
-        def _question_1(event: Any) -> None:
-            self._on_question_key(self._question.select(0))
+        @kb.add("up", filter=question_picker)
+        def _question_up(event: Any) -> None:
+            self._on_question_key(self._question.move(-1))
 
-        @kb.add("2", filter=question_pending)
-        def _question_2(event: Any) -> None:
-            self._on_question_key(self._question.select(1))
+        @kb.add("down", filter=question_picker)
+        def _question_down(event: Any) -> None:
+            self._on_question_key(self._question.move(1))
 
-        @kb.add("3", filter=question_pending)
-        def _question_3(event: Any) -> None:
-            self._on_question_key(self._question.select(2))
+        @kb.add(" ", filter=question_picker)
+        def _question_space(event: Any) -> None:
+            self._on_question_key(self._question.activate())
 
-        @kb.add("4", filter=question_pending)
-        def _question_4(event: Any) -> None:
-            self._on_question_key(self._question.select(3))
+        @kb.add("tab", filter=question_picker)
+        def _question_tab(event: Any) -> None:
+            self._on_question_key(self._question.enter())
 
         @kb.add("escape", filter=question_pending)
-        def _question_dismiss(event: Any) -> None:
-            self._question.dismiss()
+        def _question_escape(event: Any) -> None:
+            # Esc while typing a custom answer goes back to the options; from
+            # the options it dismisses the remaining questions. Either way the
+            # half-typed text is dropped.
+            if self._question.back() == "ignored":
+                self._question.dismiss()
+            event.current_buffer.reset()
             self._invalidate()
 
         @kb.add("escape", filter=~approval_pending & ~question_pending)
@@ -641,8 +660,15 @@ class TuiApp:
                 return  # y/a/n/ESC only while an approval is pending
             if self._question.is_pending:
                 # A filtered binding would lose to this unfiltered one
-                # (later registration wins), so confirm is handled here.
-                self._on_question_key(self._question.confirm())
+                # (later registration wins), so enter is handled here. A typed
+                # custom answer wins over the highlighted option.
+                buffer = event.current_buffer
+                text = buffer.text
+                if text.strip():
+                    buffer.reset()
+                    self._on_question_key(self._question.custom(text))
+                else:
+                    self._on_question_key(self._question.enter())
                 return
             buffer = event.current_buffer
             if buffer.complete_state is not None:
@@ -884,12 +910,14 @@ class TuiApp:
 
         @Condition
         def picker_menu_visible() -> bool:
-            # Every completion in this app comes from the trigger pickers
-            # (@/./commands), a command's argument picker, or the path
-            # completer, so the themed panel owns them all. Rows stream in
-            # asynchronously (the @/path pickers await the fd listing
-            # first), so wait for the first row; the no-match rows (slash
-            # and argument pickers) render without completion state.
+            # The themed panel owns every completion in this app (@/./commands,
+            # a command's argument picker, the path completer) and, mid-turn,
+            # the ask_user question picker. Completion rows stream in
+            # asynchronously (the @/path pickers await the fd listing first),
+            # so wait for the first row; the no-match rows (slash and argument
+            # pickers) render without completion state.
+            if self._question.is_pending:
+                return True
             state = buffer.complete_state
             return (
                 (state is not None and bool(state.completions))
@@ -898,6 +926,10 @@ class TuiApp:
             )
 
         def menu_heading() -> str:
+            if self._question.is_pending:
+                question = self._question.current()
+                if question is not None:
+                    return question_heading(question)
             state = buffer.complete_state
             count = len(state.completions) if state else 0
             label = "commands"  # default: the inert no-match row (slash picker)
@@ -916,6 +948,11 @@ class TuiApp:
             return f" {label}  {count} {'match' if count == 1 else 'matches'}"
 
         def menu_rows() -> list[tuple[str, str]]:
+            if self._question.is_pending:
+                pending = self._question.pending
+                question = self._question.current()
+                if pending is not None and question is not None:
+                    return question_rows(question, pending.highlight, pending.selection)
             state = buffer.complete_state
             if state is None:
                 if (no_match := self._arg_no_match()) is not None:
@@ -940,6 +977,27 @@ class TuiApp:
                 )
             return rows
 
+        def menu_cursor() -> Point:
+            pending = self._question.pending
+            if pending is not None:
+                return Point(0, pending.highlight)
+            state = buffer.complete_state
+            return Point(0, (state.complete_index or 0) if state else 0)
+
+        def menu_cursorline() -> bool:
+            if self._question.is_pending:
+                return True
+            state = buffer.complete_state
+            return state is not None and state.complete_index is not None
+
+        def menu_footer() -> str:
+            if self._question.is_pending:
+                pending = self._question.pending
+                question = self._question.current()
+                if pending is not None and question is not None:
+                    return question_hint(question, pending.custom)
+            return " ↑↓ navigate  Enter/Tab select  Esc close"
+
         picker_panel = ConditionalContainer(
             Frame(
                 HSplit(
@@ -948,24 +1006,14 @@ class TuiApp:
                         Window(
                             FormattedTextControl(
                                 menu_rows,
-                                get_cursor_position=lambda: Point(
-                                    0,
-                                    (buffer.complete_state.complete_index or 0)
-                                    if buffer.complete_state
-                                    else 0,
-                                ),
+                                get_cursor_position=menu_cursor,
                             ),
                             height=Dimension(min=1, max=DROPDOWN_MAX_ROWS),
                             dont_extend_height=True,
-                            cursorline=Condition(
-                                lambda: (
-                                    buffer.complete_state is not None
-                                    and buffer.complete_state.complete_index is not None
-                                )
-                            ),
+                            cursorline=Condition(menu_cursorline),
                         ),
                         Window(
-                            FormattedTextControl(" ↑↓ navigate  Enter/Tab select  Esc close"),
+                            FormattedTextControl(menu_footer),
                             height=1,
                         ),
                     ]
@@ -1327,21 +1375,22 @@ class TuiApp:
             self._invalidate()
 
     def _render_question(self) -> None:
-        """Print the current question block (numbered options) to the feed."""
-        pending = self._question.pending
+        """Record the current question in the feed; its options live in the picker panel."""
         question = self._question.current()
-        if pending is None or question is None:
+        if question is None:
             return
-        self._feed.permission(question_prompt_text(question, pending.selection))
+        header = question.get("header")
+        first = f"[{header}] {question['question']}" if header else str(question["question"])
+        self._feed.permission(first)
 
     def _on_question_key(self, outcome: str) -> None:
-        """After a question keypress: render the advance/toggle and repaint."""
-        if outcome in ("advanced", "toggled"):
+        """After a question keypress: record an advance and repaint the panel."""
+        if outcome == "advanced":
             self._render_question()
         self._invalidate()
 
     async def _request_question(self, questions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """``ctx.question_callback``: inline 1-4/enter/ESC ask during a turn."""
+        """``ctx.question_callback``: inline arrow-key picker during a turn."""
         future = self._question.request(questions)
         self._render_question()
         self._status.state = StatusLineState.QUESTION
