@@ -39,7 +39,6 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Frame, TextArea
 from rich.console import Console
-from rich.text import Text
 
 from lecode.agent.runner import (
     AgentRunner,
@@ -1806,11 +1805,18 @@ class TuiApp:
                 return self._app.output.get_size().columns
         return 80
 
-    def _roster_text(self) -> list[Text]:
+    def _roster_text(self) -> ANSI:
+        """Roster/detail rows as prompt_toolkit text (ANSI via Rich, like the
+        toolbar). Rich ``Text`` objects are unhashable and cannot be the
+        fragments a ``FormattedTextControl`` caches."""
         width = self._term_width()
         if self._detail_run_id is not None:
-            return detail_lines(self._roster.get(self._detail_run_id), self._theme, width)
-        return roster_lines(self._roster, self._theme, width)
+            lines = detail_lines(self._roster.get(self._detail_run_id), self._theme, width)
+        else:
+            lines = roster_lines(self._roster, self._theme, width)
+        with self._console.capture() as capture:
+            self._console.print(*lines, sep="\n")
+        return ANSI(capture.get())
 
     # -- agents / totals ----------------------------------------------------------
 

@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 import pytest
+from prompt_toolkit.formatted_text import to_formatted_text
 from tests.fakes import FakeProvider
 from tests.test_tui_app import make_app, make_blocking_app, wait_for
 
@@ -600,12 +601,12 @@ async def test_roster_panel_visible_while_child_runs(tmp_path, monkeypatch):
     await wait_for(lambda: provider.child_started.is_set())
 
     assert app._roster_visible()
-    rows = "\n".join(line.plain for line in app._roster_text())
+    rows = "".join(fragment[1] for fragment in to_formatted_text(app._roster_text()))
     assert "Scan repo" in rows
 
     run_id = app.roster.runs()[0].run_id
     assert app.open_agent_run(run_id)
-    detail = "\n".join(line.plain for line in app._roster_text())
+    detail = "".join(fragment[1] for fragment in to_formatted_text(app._roster_text()))
     assert "Scan repo" in detail
 
     app._turn_task.cancel()

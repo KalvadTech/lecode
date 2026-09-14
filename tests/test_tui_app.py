@@ -109,6 +109,33 @@ def test_layout_is_chatbox_above_statusline(tmp_path, monkeypatch):
     assert app._live_buffer is not None
 
 
+def test_roster_panel_renders_as_prompt_toolkit_text(tmp_path, monkeypatch):
+    """A live run must not feed Rich Text into FormattedTextControl: its
+    fragment cache hashes the fragments, and Rich Text is unhashable."""
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    from lecode.agent.runner import LlmCall
+    from lecode.extras.subagents import SubagentProgress
+
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    app._on_child_event(
+        SubagentProgress(
+            run_id="r1",
+            agent="explore",
+            description="Scan src",
+            event=LlmCall(model="m", turn=1),
+        )
+    )
+    for detail in (False, True):
+        if detail:
+            assert app.open_agent_run("r1") is True
+        content = FormattedTextControl(app._roster_text).create_content(80, None)
+        rendered = "".join(
+            fragment[1] for i in range(content.line_count) for fragment in content.get_line(i)
+        )
+        assert "Scan src" in rendered
+
+
 def _buffer(app):
     return app._input_area.buffer
 
