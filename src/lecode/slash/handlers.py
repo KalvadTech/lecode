@@ -739,6 +739,26 @@ async def cmd_queue(app: TuiApp, args: list[str]) -> None:
     app.feed.info("\n".join(lines))
 
 
+async def cmd_runs(app: TuiApp, args: list[str]) -> None:
+    """``/runs [number|id]``: list this session's agent runs, or open one in
+    the live detail panel (Escape closes it)."""
+    if not args:
+        runs = app.roster.runs()
+        if not runs:
+            app.feed.info("(no agent runs this session)")
+            return
+        lines = [f"{run.index}. {run.agent} · {run.description} · {run.status}" for run in runs]
+        lines.append("")
+        lines.append("open: /runs <number|id> · close: Esc")
+        app.feed.info("\n".join(lines))
+        return
+    run = app.roster.resolve(args[0])
+    if run is None:
+        app.feed.error(f"no such agent run: {args[0]}")
+        return
+    app.open_agent_run(run.run_id)
+
+
 async def cmd_tasks(app: TuiApp, args: list[str]) -> None:
     """``/tasks``: background tasks (id, kind, status, age, description)."""
     manager = app.runtime.ctx.extras.get(BACKGROUND_EXTRA)
@@ -1389,6 +1409,15 @@ def _complete_resume(app: TuiApp, args: list[str]) -> list[CompletionRow]:
     return rows
 
 
+def _complete_runs(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args:
+        return []  # one reference only
+    return [
+        (run.run_id, f"{run.index} {run.agent} · {run.description}", run.status)
+        for run in app.roster.runs()
+    ]
+
+
 def _complete_rewind(app: TuiApp, args: list[str]) -> list[CompletionRow]:
     if args:
         return []
@@ -1450,6 +1479,7 @@ _ARG_COMPLETIONS: dict[str, tuple[ArgCompletions, str | None]] = {
     "tutor": (_complete_tutor, None),
     "memory": (_complete_memory, None),
     "wt-exit": (_complete_wt_exit, None),
+    "runs": (_complete_runs, "no agent runs this session"),
 }
 
 
@@ -1490,7 +1520,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ),
     ("Permissions", ["permissions", "mode", "toggle"]),
     ("Worktrees", ["worktree", "wt-merge", "wt-exit"]),
-    ("Power features", ["loop", "chain", "mcp", "review", "tasks"]),
+    ("Power features", ["loop", "chain", "mcp", "review", "tasks", "runs"]),
     (
         "Interface",
         [
@@ -1550,6 +1580,7 @@ _HANDLERS = {
     "hooks": cmd_hooks,
     "agents": cmd_agents,
     "queue": cmd_queue,
+    "runs": cmd_runs,
     "tasks": cmd_tasks,
     "btw": cmd_btw,
     "copy": cmd_copy,
@@ -1606,6 +1637,7 @@ ARG_HINTS = {
     "tutor": "<topic>",
     "review": "[file…]",
     "notifications": "[on|off]",
+    "runs": "[number|id]",
 }
 
 

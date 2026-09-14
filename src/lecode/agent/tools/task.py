@@ -93,6 +93,7 @@ class TaskTool(Tool):
             outcome.text or "(subagent returned no text)",
             metadata={
                 "agent": outcome.agent,
+                "run_id": outcome.run_id,
                 "turns": outcome.turns,
                 "input_tokens": outcome.input_tokens,
                 "output_tokens": outcome.output_tokens,

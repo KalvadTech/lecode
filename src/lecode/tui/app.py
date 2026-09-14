@@ -39,6 +39,7 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Frame, TextArea
 from rich.console import Console
+from rich.text import Text
 
 from lecode.agent.runner import (
     AgentRunner,
@@ -108,6 +109,12 @@ from lecode.slash.registry import (
     CompletionRow,
     SlashCommand,
     UnknownCommandError,
+)
+from lecode.tui.agents import (
+    DETAIL_MAX_ROWS,
+    AgentRoster,
+    detail_lines,
+    roster_lines,
 )
 from lecode.tui.clipboard import copy_to_clipboard
 from lecode.tui.feed import Feed
@@ -255,6 +262,10 @@ class TuiApp:
         # inline through the feed; installed here so tests driving _submit
         # directly get it too.
         self._runtime.ctx.extras["subagent_events"] = self._on_child_event
+        #: Live agent-run roster (compact above the composer; /runs opens detail).
+        self._roster = AgentRoster()
+        self._detail_run_id: str | None = None
+        self._roster_window: Any | None = None
         # Background-task completions surface as feed info lines as they land.
         background = self._runtime.ctx.extras.get(BACKGROUND_EXTRA)
         if background is not None:
@@ -639,14 +650,34 @@ class TuiApp:
             event.current_buffer.reset()
             self._invalidate()
 
+        detail_open = Condition(lambda: self._detail_run_id is not None)
+
+        @kb.add("pageup", filter=detail_open)
+        def _detail_scroll_up(event: Any) -> None:
+            if self._roster_window is not None:
+                self._roster_window.vertical_scroll = max(
+                    0, self._roster_window.vertical_scroll - 5
+                )
+                self._invalidate()
+
+        @kb.add("pagedown", filter=detail_open)
+        def _detail_scroll_down(event: Any) -> None:
+            if self._roster_window is not None:
+                self._roster_window.vertical_scroll += 5
+                self._invalidate()
+
         @kb.add("escape", filter=~approval_pending & ~question_pending)
         def _close_completion_menu(event: Any) -> None:
-            # Approval and question prompts own Escape while pending; otherwise
-            # dismiss the dropdown, restoring typed text a navigation
-            # overwrote. The no-match rows (slash and argument pickers) have
-            # no completion state, so their dismissal is remembered per typed
-            # text (any edit or Tab brings it back). Longer M-* sequences
-            # still win over this bare-key handler.
+            # Approval and question prompts own Escape while pending; an open
+            # detail panel closes before anything else. Then dismiss the
+            # dropdown, restoring typed text a navigation overwrote. The
+            # no-match rows (slash and argument pickers) have no completion
+            # state, so their dismissal is remembered per typed text (any edit
+            # or Tab brings it back). Longer M-* sequences still win over this
+            # bare-key handler.
+            if self._detail_run_id is not None:
+                self.close_agent_run()
+                return
             buffer = event.current_buffer
             if buffer.complete_state is not None:
                 buffer.cancel_completion()
@@ -908,6 +939,15 @@ class TuiApp:
             height=Dimension(min=1, max=10),
         )
         live_area = ConditionalContainer(live_window, Condition(lambda: bool(self._live_text)))
+        # Agent roster / detail panel: compact rows above the composer while
+        # runs are live (or one run is open for inspection).
+        self._roster_window = Window(
+            FormattedTextControl(self._roster_text),
+            wrap_lines=False,
+            dont_extend_height=True,
+            height=Dimension(min=1, max=DETAIL_MAX_ROWS),
+        )
+        roster_area = ConditionalContainer(self._roster_window, Condition(self._roster_visible))
         # The chatbox: a framed input area directly above the statusline.
         # Enter submits the text into the transcript above (see _enter).
         self._chatbox = Frame(self._input_area, title="message")
@@ -1028,7 +1068,7 @@ class TuiApp:
             picker_menu_visible,
         )
         return Application(
-            layout=Layout(HSplit([live_area, self._chatbox, picker_panel, toolbar])),
+            layout=Layout(HSplit([live_area, roster_area, self._chatbox, picker_panel, toolbar])),
             style=Style.from_dict(
                 {
                     "picker-menu": f"bg:{PICKER_MENU_BG} {self._theme.muted}",
@@ -1487,6 +1527,8 @@ class TuiApp:
         except asyncio.CancelledError:
             cancelled = True
             self._feed.info("turn cancelled")
+            for run in self._roster.cancel_running():
+                self._feed.agent_summary(run)
         except ProviderError:
             pass  # already rendered via the Error event
         finally:
@@ -1555,6 +1597,7 @@ class TuiApp:
             self._status.state = StatusLineState.IDLE
             self._status.activity = None
         if outcome is not None:
+            self._roster.finish(outcome.run_id, answer=outcome.text)
             self._feed.assistant_text(outcome.text)
             self._last_response = outcome.text
             self._status.input_tokens += outcome.input_tokens
@@ -1672,6 +1715,10 @@ class TuiApp:
         elif isinstance(event, ToolResult):
             self._status.context_used += self._estimate(event.content)
             self._feed.tool_result(event.name, event.content, event.is_error)
+            run_id = str(event.metadata.get("run_id") or "") if event.metadata else ""
+            if run_id:
+                # A finished task tool run: pair its answer with the roster entry.
+                self._roster.finish(run_id, answer=event.content, is_error=event.is_error)
             self._activity("thinking")
         elif isinstance(event, Error):
             self._feed.error(event.message)
@@ -1714,35 +1761,56 @@ class TuiApp:
             self._pending_review = event
 
     def _on_child_event(self, progress: SubagentProgress) -> None:
-        """Subagent progress → feed rendering, prefixed with the agent.
+        """Subagent progress → the live roster; one summary line when it ends.
 
-        Token/Reasoning are skipped: they would interleave with the parent's
-        own stream.
+        Per-call child detail stays in the roster/detail panel instead of
+        flooding the scrollback; a finished run leaves one attributed summary
+        line. Token/Reasoning are ignored: they would interleave with the
+        parent's own stream.
         """
-        agent = progress.agent
-        event = progress.event
-        if isinstance(event, ToolCall):
-            self._feed.tool_call(f"{agent}/{event.name}", " ".join(event.arguments.split()))
-            self._activity(f"@{agent} running {event.name}")
-        elif isinstance(event, ToolResult):
-            self._feed.tool_result(f"{agent}/{event.name}", event.content, event.is_error)
-            self._activity(f"@{agent} working")
-        elif isinstance(event, Error):
-            self._feed.error(f"{agent}: {event.message}")
-        elif isinstance(event, Retrying):
-            self._feed.retrying(event.attempt, event.delay)
-        elif isinstance(event, LlmCall):
-            self._feed.llm_call(f"{agent} · {event.model}", event.turn)
-        elif isinstance(event, LlmResponse):
-            self._feed.llm_response(
-                f"{agent} · {event.model}",
-                event.turn,
-                event.input_tokens,
-                event.output_tokens,
-                event.cost_usd,
-            )
-        elif isinstance(event, Done):
-            self._feed.info(f"{agent} finished ({event.stop_reason}, {event.turns} turn(s))")
+        run = self._roster.observe(progress)
+        if isinstance(progress.event, (Error, Done)):
+            self._feed.agent_summary(run)
+        self._invalidate()
+
+    # -- agent roster / detail panel -------------------------------------------
+
+    @property
+    def roster(self) -> AgentRoster:
+        return self._roster
+
+    @property
+    def detail_run_id(self) -> str | None:
+        return self._detail_run_id
+
+    def open_agent_run(self, run_id: str) -> bool:
+        """Show one run's live detail panel; ``False`` for an unknown run."""
+        if self._roster.get(run_id) is None:
+            return False
+        self._detail_run_id = run_id
+        if self._roster_window is not None:
+            self._roster_window.vertical_scroll = 0
+        self._invalidate()
+        return True
+
+    def close_agent_run(self) -> None:
+        self._detail_run_id = None
+        self._invalidate()
+
+    def _roster_visible(self) -> bool:
+        return self._detail_run_id is not None or self._roster.has_running()
+
+    def _term_width(self) -> int:
+        if self._app is not None:
+            with contextlib.suppress(Exception):
+                return self._app.output.get_size().columns
+        return 80
+
+    def _roster_text(self) -> list[Text]:
+        width = self._term_width()
+        if self._detail_run_id is not None:
+            return detail_lines(self._roster.get(self._detail_run_id), self._theme, width)
+        return roster_lines(self._roster, self._theme, width)
 
     # -- agents / totals ----------------------------------------------------------
 

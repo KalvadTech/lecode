@@ -26,7 +26,7 @@ import contextlib
 import inspect
 import time
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from lecode.agent.review import review, user_request
@@ -78,6 +78,8 @@ class ToolResult:
     name: str
     content: str
     is_error: bool
+    #: Tool-attached metadata (e.g. the task tool's run id for roster lookup).
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -558,6 +560,7 @@ class AgentRunner:
                     name=call["function"]["name"],
                     content=result.content,
                     is_error=result.is_error,
+                    metadata=result.metadata,
                 ),
             )
         return messages

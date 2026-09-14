@@ -44,6 +44,7 @@ BUILTIN_COMMANDS: list[tuple[str, str]] = [
     ("btw", "Side note to the model mid-turn"),
     ("queue", "Show queued/steered messages"),
     ("tasks", "List background tasks"),
+    ("runs", "Inspect agent runs"),
     ("copy", "Copy the last answer to the clipboard"),
     ("export", "Export the session as HTML"),
     ("import", "Import a session file"),

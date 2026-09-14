@@ -11,7 +11,7 @@ from tests.fakes import FakeProvider
 from tests.test_tui_app import make_app, make_blocking_app, wait_for
 
 from lecode.agent.builder import build_runtime
-from lecode.agent.runner import AgentRunner
+from lecode.agent.runner import AgentRunner, ToolResult
 from lecode.agent.runner import Done as RunDone
 from lecode.agent.tools import ToolRegistry
 from lecode.agent.tools.task import make_tool
@@ -511,9 +511,18 @@ async def test_cancelling_parent_cancels_child(tmp_path, monkeypatch):
 # -- TUI integration -------------------------------------------------------------------
 
 
-async def test_child_events_render_inline(tmp_path, monkeypatch):
+async def test_child_events_feed_roster_and_one_summary_line(tmp_path, monkeypatch):
     script = [
-        {"tool_calls": [{"name": "task", "arguments": '{"prompt": "scan", "agent": "explore"}'}]},
+        {
+            "tool_calls": [
+                {
+                    "name": "task",
+                    "arguments": (
+                        '{"prompt": "scan", "agent": "explore", "description": "Scan repo"}'
+                    ),
+                }
+            ]
+        },
         {"tool_calls": [{"name": "list_dir", "arguments": '{"path": "."}'}]},  # child
         {"text": "scan result"},  # child final
         {"text": "parent final"},  # parent turn 2
@@ -521,11 +530,151 @@ async def test_child_events_render_inline(tmp_path, monkeypatch):
     app, _, out = make_app(tmp_path, monkeypatch, script)
     await app._submit("please scan")
     await app._turn_task
+
+    runs = app.roster.runs()
+    assert len(runs) == 1
+    run = runs[0]
+    assert run.description == "Scan repo"
+    assert run.status == "ok"
+    assert run.answer == "scan result"
+    assert [entry.name for entry in run.activity] == ["list_dir"]
+
     rendered = out.getvalue()
-    assert "⚙ task(" in rendered
-    assert "explore/list_dir" in rendered
-    assert "explore finished" in rendered
+    # Per-call child lines no longer flood the transcript; the run gets one
+    # attributed summary line and stays inspectable through the roster.
+    assert "explore/list_dir" not in rendered
+    assert "Scan repo" in rendered
     assert "parent final" in rendered
+
+
+async def test_task_result_event_carries_run_id_metadata(tmp_path, monkeypatch):
+    provider = FakeProvider(
+        [
+            {
+                "tool_calls": [
+                    {"name": "task", "arguments": '{"prompt": "scan", "agent": "explore"}'}
+                ]
+            },
+            {"text": "scan result"},
+            {"text": "parent final"},
+        ]
+    )
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    store = SessionStore(config_dir=tmp_path / "cfg")
+    session = store.create("agent-run", tmp_path)
+    runtime = build_runtime(Config(), tmp_path, session=session, store=store)
+    runtime.ctx.extras["provider"] = provider
+    events: list[Any] = []
+    runner = AgentRunner(provider, runtime.registry, runtime.ctx)
+    await runner.run([{"role": "user", "content": "go"}], on_event=events.append)
+
+    task_results = [
+        event
+        for event in events
+        if isinstance(event, ToolResult) and event.name == "task" and not event.is_error
+    ]
+    assert task_results
+    run_id = task_results[0].metadata.get("run_id")
+    assert run_id
+    assert run_id == store.load_agent_runs(session)[0]["run_id"]
+
+
+async def test_roster_panel_visible_while_child_runs(tmp_path, monkeypatch):
+    provider = BlockingChildProvider(
+        {
+            "tool_calls": [
+                {
+                    "name": "task",
+                    "arguments": (
+                        '{"prompt": "scan", "agent": "explore", "description": "Scan repo"}'
+                    ),
+                }
+            ]
+        }
+    )
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    app._runner.provider = provider
+    app._runtime.ctx.extras["provider"] = provider
+    await app._submit("go")
+    await wait_for(lambda: provider.child_started.is_set())
+
+    assert app._roster_visible()
+    rows = "\n".join(line.plain for line in app._roster_text())
+    assert "Scan repo" in rows
+
+    run_id = app.roster.runs()[0].run_id
+    assert app.open_agent_run(run_id)
+    detail = "\n".join(line.plain for line in app._roster_text())
+    assert "Scan repo" in detail
+
+    app._turn_task.cancel()
+    await app._turn_task
+    assert app.roster.runs()[0].status == "cancelled"
+    app.close_agent_run()
+    assert not app._roster_visible()
+
+
+async def test_runs_command_lists_and_opens_detail(tmp_path, monkeypatch):
+    script = [
+        {
+            "tool_calls": [
+                {
+                    "name": "task",
+                    "arguments": (
+                        '{"prompt": "scan", "agent": "explore", "description": "Scan repo"}'
+                    ),
+                }
+            ]
+        },
+        {"tool_calls": [{"name": "list_dir", "arguments": '{"path": "."}'}]},
+        {"text": "scan result"},
+        {"text": "parent final"},
+    ]
+    app, _, out = make_app(tmp_path, monkeypatch, script)
+    await app._submit("please scan")
+    await app._turn_task
+    run_id = app.roster.runs()[0].run_id
+
+    await app.handle_command("/runs")
+    assert "Scan repo" in out.getvalue()
+
+    await app.handle_command(f"/runs {run_id}")
+    assert app.detail_run_id == run_id
+    app.close_agent_run()
+    assert app.detail_run_id is None
+
+
+async def test_runs_picker_offers_run_ids(tmp_path, monkeypatch):
+    script = [
+        {"tool_calls": [{"name": "task", "arguments": '{"prompt": "scan", "agent": "explore"}'}]},
+        {"text": "scan result"},
+        {"text": "parent final"},
+    ]
+    app, _, _ = make_app(tmp_path, monkeypatch, script)
+    await app._submit("please scan")
+    await app._turn_task
+    run_id = app.roster.runs()[0].run_id
+
+    from prompt_toolkit.document import Document
+
+    result = app.arg_completion_rows(Document("/runs ", 6))
+    assert result is not None
+    _, _, _, rows = result
+    assert any(insert == run_id for insert, _, _ in rows)
+
+
+async def test_detail_panel_preserves_draft(tmp_path, monkeypatch):
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        app._build_app(input=inp, output=DummyOutput())
+    app._input_area.buffer.text = "half-written"
+    app.open_agent_run("r1")
+    app.close_agent_run()
+    assert app._input_area.buffer.text == "half-written"
 
 
 async def test_at_agent_runs_directly(tmp_path, monkeypatch):

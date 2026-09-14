@@ -88,9 +88,10 @@ async def test_unknown_model_keeps_configured_window(tmp_path, monkeypatch):
 
 def test_layout_is_chatbox_above_statusline(tmp_path, monkeypatch):
     """The input is a framed chatbox directly above the 3-line statusline;
-    the frame's bottom border is the split between them. A conditional live
-    region for streamed text sits above the chatbox, and the themed picker
-    panel anchors below the input for all trigger menus."""
+    the frame's bottom border is the split between them. Conditional regions
+    for streamed text and for the live agent roster/detail panel sit above
+    the chatbox, and the themed picker panel anchors below the input for all
+    trigger menus."""
     from prompt_toolkit.layout.containers import ConditionalContainer, Window, to_container
     from prompt_toolkit.widgets import Frame
 
@@ -99,11 +100,12 @@ def test_layout_is_chatbox_above_statusline(tmp_path, monkeypatch):
         pt_app = app._build_app(input=inp, output=DummyOutput())
     assert isinstance(app._chatbox, Frame) and app._chatbox.body is app._input_area
     children = pt_app.layout.container.children
-    assert len(children) == 4
+    assert len(children) == 5
     assert isinstance(children[0], ConditionalContainer)  # live stream region
-    assert children[1] is to_container(app._chatbox)  # Frame unwraps to its HSplit
-    assert isinstance(children[2], ConditionalContainer)  # picker panel sizes to its rows
-    assert isinstance(children[3], Window) and children[3].height == 3
+    assert isinstance(children[1], ConditionalContainer)  # agent roster/detail panel
+    assert children[2] is to_container(app._chatbox)  # Frame unwraps to its HSplit
+    assert isinstance(children[3], ConditionalContainer)  # picker panel sizes to its rows
+    assert isinstance(children[4], Window) and children[4].height == 3
     assert app._live_buffer is not None
 
 
