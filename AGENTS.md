@@ -2,7 +2,7 @@
 
 ## Development and verification
 
-- Python minimum is 3.12; CI tests 3.13 and 3.14 on Linux/macOS. Use `uv`;
+- Python minimum is 3.13; CI tests 3.13 and 3.14 on Linux/macOS. Use `uv`;
   `uv sync --extra telemetry` includes the optional dependencies exercised in CI.
 - Run checks from the repo root, in CI order:
   ```sh
