@@ -12,6 +12,7 @@ from tests.test_tui_app import make_app, make_blocking_app, wait_for
 
 from lecode.agent.builder import build_runtime
 from lecode.agent.runner import AgentRunner
+from lecode.agent.runner import Done as RunDone
 from lecode.agent.tools import ToolRegistry
 from lecode.agent.tools.task import make_tool
 from lecode.config.models import Config
@@ -22,6 +23,7 @@ from lecode.extras.subagents import (
     run_subagent,
 )
 from lecode.providers.types import Done, TokenDelta, ToolCallDelta
+from lecode.session import SessionStore
 
 
 def make_runtime(tmp_path, monkeypatch, provider, config=None):
@@ -131,6 +133,126 @@ async def test_child_uses_agent_prompt_and_lean_registry(tmp_path, monkeypatch):
     assert "task" not in tool_names  # no recursion
     assert "ask_user" not in tool_names  # children decide themselves
     assert {"read", "grep", "list_dir"} <= tool_names
+
+
+async def test_subagent_progress_carries_run_identity(tmp_path, monkeypatch):
+    """Every forwarded child event is tagged with one run's id, agent, description."""
+    provider = FakeProvider([{"text": "done"}])
+    runtime = make_runtime(tmp_path, monkeypatch, provider)
+    seen: list[Any] = []
+    outcome = await run_subagent(
+        runtime.ctx,
+        runtime.registry,
+        runtime.agents,
+        name="explore",
+        prompt="scan the repo",
+        description="Explore src",
+        on_event=seen.append,
+    )
+    assert outcome.text == "done"
+    assert seen
+    run_ids = {progress.run_id for progress in seen}
+    assert len(run_ids) == 1
+    assert next(iter(run_ids))
+    assert {progress.agent for progress in seen} == {"explore"}
+    assert {progress.description for progress in seen} == {"Explore src"}
+    assert any(isinstance(progress.event, RunDone) for progress in seen)
+
+
+async def test_completed_run_persists_activity_trail(tmp_path, monkeypatch):
+    """A finished child run lands in the session as one bounded record."""
+    provider = FakeProvider(
+        [
+            {"tool_calls": [{"name": "read", "arguments": '{"path": "note.txt"}'}]},
+            {"text": "read it"},
+        ]
+    )
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    store = SessionStore(config_dir=tmp_path / "cfg")
+    session = store.create("agent-run", tmp_path)
+    runtime = build_runtime(Config(), tmp_path, session=session, store=store)
+    runtime.ctx.extras["provider"] = provider
+    (tmp_path / "note.txt").write_text("hello trail", encoding="utf-8")
+
+    outcome = await run_subagent(
+        runtime.ctx,
+        runtime.registry,
+        runtime.agents,
+        name="explore",
+        prompt="read note.txt",
+        description="Read note",
+    )
+
+    assert outcome.run_id
+    runs = store.load_agent_runs(session)
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["run_id"] == outcome.run_id
+    assert run["agent"] == "explore"
+    assert run["description"] == "Read note"
+    assert run["status"] == "ok"
+    assert run["answer"] == "read it"
+    assert run["turns"] == 2
+    assert run["tool_calls"][0]["name"] == "read"
+    assert "hello trail" in run["tool_calls"][0]["result"]
+    assert run["tool_calls"][0]["is_error"] is False
+
+
+async def test_cancelled_run_persists_cancelled_status(tmp_path, monkeypatch):
+    provider = BlockingChildProvider({"text": "unused"})
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    store = SessionStore(config_dir=tmp_path / "cfg")
+    session = store.create("agent-run", tmp_path)
+    runtime = build_runtime(Config(), tmp_path, session=session, store=store)
+    runtime.ctx.extras["provider"] = provider
+
+    task = asyncio.ensure_future(
+        run_subagent(
+            runtime.ctx,
+            runtime.registry,
+            runtime.agents,
+            name="explore",
+            prompt="hang",
+            description="Cancelled run",
+        )
+    )
+    await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+
+    runs = store.load_agent_runs(session)
+    assert len(runs) == 1
+    assert runs[0]["status"] == "cancelled"
+    assert runs[0]["description"] == "Cancelled run"
+
+
+async def test_failed_run_persists_error_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(subagents, "SUBAGENT_TIMEOUT_S", 0.05)
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    store = SessionStore(config_dir=tmp_path / "cfg")
+    session = store.create("agent-run", tmp_path)
+    runtime = build_runtime(Config(), tmp_path, session=session, store=store)
+    runtime.ctx.extras["provider"] = NeverProvider()
+
+    with pytest.raises(SubagentError, match="timed out"):
+        await run_subagent(
+            runtime.ctx,
+            runtime.registry,
+            runtime.agents,
+            name="explore",
+            prompt="hang",
+            description="Never finishes",
+        )
+
+    runs = store.load_agent_runs(session)
+    assert len(runs) == 1
+    assert runs[0]["status"] == "error"
+    assert runs[0]["description"] == "Never finishes"
+    assert "timed out" in runs[0]["answer"]
 
 
 async def test_child_ctx_drops_question_callback(tmp_path, monkeypatch):
@@ -417,8 +539,14 @@ async def test_at_agent_runs_directly(tmp_path, monkeypatch):
     request = provider.requests[0]
     assert "read-only exploration agent" in request["messages"][0]["content"]
     assert request["messages"][1] == {"role": "user", "content": "count the files"}
-    # A side query: nothing persisted to the session.
+    # A side query: no message history, but the run itself is persisted.
     assert app.store.load_messages(app.session) == []
+    runs = app.store.load_agent_runs(app.session)
+    assert len(runs) == 1
+    assert runs[0]["agent"] == "explore"
+    assert runs[0]["status"] == "ok"
+    assert runs[0]["prompt"] == "count the files"
+    assert runs[0]["answer"] == "42 files"
     assert app._last_response == "42 files"
     assert app._status.input_tokens == 7
 

@@ -84,6 +84,7 @@ class TaskTool(Tool):
                 agents,
                 name=str(args.get("agent") or DEFAULT_AGENT),
                 prompt=prompt,
+                description=str(args.get("description") or ""),
                 on_event=ctx.extras.get(SUBAGENT_EVENTS_EXTRA),
             )
         except SubagentError as e:
@@ -121,7 +122,13 @@ class TaskTool(Tool):
                 # run_subagent builds fresh child extras itself — the parent's
                 # "conversation" seam is never clobbered.
                 outcome = await run_subagent(
-                    ctx, registry, agents, name=agent_name, prompt=prompt, on_event=on_event
+                    ctx,
+                    registry,
+                    agents,
+                    name=agent_name,
+                    prompt=prompt,
+                    description=description,
+                    on_event=on_event,
                 )
             except SubagentError as e:
                 return f"error: {e}", 1

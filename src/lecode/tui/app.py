@@ -65,7 +65,12 @@ from lecode.extras.loop_mode import run_plan_loop
 from lecode.extras.mcp_client import MCP_EXTRA, attach_mcp
 from lecode.extras.proc import run_proc
 from lecode.extras.status_signals import START, STOP, StatusEmitter
-from lecode.extras.subagents import SubagentError, SubagentOutcome, run_subagent
+from lecode.extras.subagents import (
+    SubagentError,
+    SubagentOutcome,
+    SubagentProgress,
+    run_subagent,
+)
 from lecode.hooks import (
     INTERRUPT,
     NOTIFICATION,
@@ -1525,8 +1530,11 @@ class TuiApp:
             self._turn_task = asyncio.ensure_future(self._run_turn(follow_up))
 
     async def _run_subagent_turn(self, name: str, prompt: str) -> None:
-        """A direct ``@agent`` submission: the subagent answers as a side
-        query — the exchange is not persisted to the session."""
+        """A direct ``@agent`` submission: the subagent answers as a side query.
+
+        The exchange never enters the message history the model replays, but
+        the run's activity record is persisted for resume/inspection.
+        """
         self._status.state = StatusLineState.RUNNING
         self._activity(f"@{name} working")
         outcome: SubagentOutcome | None = None
@@ -1705,12 +1713,14 @@ class TuiApp:
             # Rendered after the stats line in _run_turn, not mid-stream.
             self._pending_review = event
 
-    def _on_child_event(self, agent: str, event: Any) -> None:
-        """Subagent runner event → feed rendering, prefixed with the agent.
+    def _on_child_event(self, progress: SubagentProgress) -> None:
+        """Subagent progress → feed rendering, prefixed with the agent.
 
         Token/Reasoning are skipped: they would interleave with the parent's
         own stream.
         """
+        agent = progress.agent
+        event = progress.event
         if isinstance(event, ToolCall):
             self._feed.tool_call(f"{agent}/{event.name}", " ".join(event.arguments.split()))
             self._activity(f"@{agent} running {event.name}")
