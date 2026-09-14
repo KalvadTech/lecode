@@ -158,9 +158,11 @@ non-tty `--setup`) · `3` max turns / max loop iterations / context overflow.
   task: it compares your request with the agent's result and tells you
   plainly whether it delivered. `/pierre on|off|model`.
 - **Structured questions** — the `ask_user` tool lets the agent ask 1-4
-  multiple-choice questions mid-turn instead of guessing; you answer inline
-  with the keyboard (`1`-`4` to pick, `enter` to confirm a multi-select,
-  `esc` to dismiss). Headless, loop, chain, and subagent runs get a
+  multiple-choice questions mid-turn instead of guessing; you pick with the
+  arrow-key picker (`↑`/`↓` to move, `enter` to select/confirm, `space` to
+  toggle a multi-select, `esc` to dismiss). The picker's last row,
+  "Type your own answer…", switches to a free-text answer that you type and
+  submit with `enter`. Headless, loop, chain, and subagent runs get a
   "use your best judgment" result instead of a prompt.
 - **Notifications** — sound (afplay/paplay/aplay, terminal bell fallback) and
   desktop notifications (osascript / notify-send) on turn finish, error, and
