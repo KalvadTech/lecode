@@ -2066,7 +2066,8 @@ class TuiApp:
         if self._worker_manager is None:
             raise RuntimeError("workers are unavailable")
         note = await self._worker_manager.submit(worker_id)
-        await self._on_worker_notification(note)
+        if note["new"] and note["deliver"]:
+            await self._on_worker_notification(note)
         return note
 
     @property

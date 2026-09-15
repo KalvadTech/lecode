@@ -46,6 +46,10 @@ async def test_agent_submit_wakes_root_once(tmp_path, monkeypatch):
         message["content"] == "Worker updates are available."
         for message in provider.requests[-1]["messages"]
     )
+    wake_task = app._worker_wake_task
+    await app.handle_command("/agent 1 submit")
+    assert app._worker_wake_task is wake_task
+    assert len(provider.requests) == 2
     await manager.shutdown()
 
 

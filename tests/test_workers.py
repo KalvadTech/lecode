@@ -546,10 +546,22 @@ async def test_completion_delivery_background_only_and_human_submit(setup, check
         await manager.wait(human.id)
         assert notifications[-1]["worker_id"] == human.id
         assert manager.drain_notifications() == []
-        await manager.submit(human.id)
+        assert (await manager.submit(human.id))["new"]
         assert [n["worker_id"] for n in manager.drain_notifications()] == [human.id]
-        await manager.submit(human.id)
+        assert not (await manager.submit(human.id))["new"]
         assert manager.drain_notifications() == []
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_submit_rejects_delegated_worker(setup, checker_contract):
+    manager, ctx, _, _, _ = setup
+    try:
+        worker = await manager.start(ctx, agent="explore", prompt="delegated")
+        await manager.wait(worker.id)
+        with pytest.raises(SubagentError, match="only human workers"):
+            await manager.submit(worker.id)
     finally:
         await manager.shutdown()
 

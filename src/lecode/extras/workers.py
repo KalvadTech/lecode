@@ -716,13 +716,16 @@ class WorkerManager:
             "deliver": submitted or (worker.origin == "delegated" and worker.background),
         }
         existing = self.store.load_events(self.session, "worker_notification")
-        if not any(item["id"] == note["id"] for item in existing):
+        is_new = not any(item["id"] == note["id"] for item in existing)
+        if is_new:
             self.store.append_event(self.session, "worker_notification", note)
-        return note
+        return {**note, "new": is_new}
 
     async def submit(self, id: str) -> dict[str, Any]:
         """Explicitly make a human-origin result available to its parent."""
         worker = self.get(id)
+        if worker.origin != "human":
+            raise SubagentError("only human workers can be submitted")
         if worker.state != "completed" or worker.result is None:
             raise SubagentError("only completed workers can be submitted")
         return self._notification(worker, submitted=True)
