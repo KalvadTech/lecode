@@ -7,6 +7,7 @@ from io import StringIO
 from typing import Any, ClassVar
 
 import pytest
+from prompt_toolkit.formatted_text import to_formatted_text
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from rich.console import Console
@@ -26,6 +27,8 @@ from lecode.tui.statusline import StatusLineState
 def make_app(tmp_path, monkeypatch, script, config=None):
     """A TuiApp over a FakeProvider with a recorded console."""
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    monkeypatch.chdir(tmp_path)
     config = config or Config()
     config.notifications.enabled = False  # never play sounds in tests
     store = SessionStore()
@@ -167,6 +170,44 @@ async def test_worker_focus_preserves_drafts_and_routes_composer(tmp_path, monke
             message["content"] == "follow up"
             for message in app.store.load_for_model(worker.session)
         )
+        notes = app.store.load_events(app.session, "worker_notification")
+        assert any(
+            note.get("kind") == "human_message"
+            and note["worker_id"] == worker.id
+            and note["content"] == "follow up"
+            for note in notes
+        )
+    await manager.shutdown()
+
+
+async def test_worker_detail_renders_persisted_child_transcript(tmp_path, monkeypatch):
+    """Worker detail reads the child session, not just the bounded live trail."""
+    (tmp_path / "note.txt").write_text("persisted tool result", encoding="utf-8")
+    app, _, _ = make_app(
+        tmp_path,
+        monkeypatch,
+        [
+            {"tool_calls": [{"name": "read", "arguments": '{"path": "note.txt"}'}]},
+            {"text": "persisted child answer"},
+        ],
+    )
+    manager = app.worker_manager
+    assert manager is not None
+    worker = await manager.start(
+        app.runtime.ctx,
+        agent="explore",
+        prompt="inspect the child transcript",
+        origin="human",
+        background=True,
+    )
+    await manager.wait(worker.id)
+
+    assert app.open_agent_run(worker.id)
+    detail = "".join(fragment[1] for fragment in to_formatted_text(app._roster_text()))
+    assert "inspect the child transcript" in detail
+    assert "read" in detail
+    assert "persisted tool result" in detail
+    assert "persisted child answer" in detail
     await manager.shutdown()
 
 
@@ -482,6 +523,8 @@ async def test_slash_menu_mid_message_does_not_open(tmp_path, monkeypatch):
 async def test_resume_restores_status_usage(tmp_path, monkeypatch):
     """A session with stored usage opens with the statusline pre-filled."""
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    monkeypatch.chdir(tmp_path)
     config = Config()
     config.notifications.enabled = False
     store = SessionStore()

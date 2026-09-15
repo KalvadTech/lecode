@@ -20,7 +20,7 @@ from lecode.agent.builder import build_runtime
 from lecode.agent.runner import AgentRunner, LlmResponse, RunResult, UsageTotals
 from lecode.agent.tools.base import ToolContext
 from lecode.config.models import Config
-from lecode.extras.subagents import SubagentError
+from lecode.extras.subagents import SUBAGENT_EVENTS_EXTRA, SubagentError, SubagentProgress
 from lecode.extras.worktree import WorktreeError, WorktreeInfo, WorktreeManager
 from lecode.session.model import EventRecord, MessageRecord
 from lecode.session.storage import Session, SessionStore
@@ -599,7 +599,7 @@ class WorkerManager:
             worker.state = "running"
             self._record(worker)
 
-    def _event(self, worker, event):
+    async def _event(self, worker, event):
         if isinstance(event, LlmResponse):
             old = worker.usage_totals
             worker.usage_totals = UsageTotals(
@@ -617,6 +617,11 @@ class WorkerManager:
                 },
             )
             self._record(worker)
+        callback = self.root_ctx.extras.get(SUBAGENT_EVENTS_EXTRA)
+        if callback is not None:
+            result = callback(SubagentProgress(worker.id, worker.agent, worker.description, event))
+            if inspect.isawaitable(result):
+                await result
 
     async def wait(self, id: str) -> RunResult:
         worker = self.get(id)

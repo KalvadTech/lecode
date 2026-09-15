@@ -31,11 +31,14 @@ class PendingApproval:
     #: Attribution for "[w2 bash]" style prompts; None = the main turn.
     worker: str | None = None
     conversation: str = "main"
+    allow_always: bool = True
 
 
-def approval_prompt_text(tool_name: str, target: str) -> str:
+def approval_prompt_text(tool_name: str, target: str, *, allow_always: bool = True) -> str:
     """The one-line ask: ``allow bash 'ls'? (y)once (a)lways (n)deny — ESC denies``."""
     shown = target if len(target) <= _TARGET_MAX_LEN else target[: _TARGET_MAX_LEN - 1] + "…"
+    if not allow_always:
+        return f"confirm {tool_name} '{shown}'? (y)es (n)o — ESC denies"
     return f"allow {tool_name} '{shown}'? (y)once (a)lways (n)deny — ESC denies"
 
 
@@ -61,9 +64,12 @@ class ApprovalPrompt:
         *,
         worker: str | None = None,
         conversation: str = "main",
+        allow_always: bool = True,
     ) -> asyncio.Future[ApprovalDecision]:
         future: asyncio.Future[ApprovalDecision] = asyncio.get_running_loop().create_future()
-        entry = PendingApproval(tool_name, target, reason, future, worker, conversation)
+        entry = PendingApproval(
+            tool_name, target, reason, future, worker, conversation, allow_always
+        )
         self._queue.append(entry)
         future.add_done_callback(partial(self._on_future_done, entry))
         return future

@@ -9,7 +9,15 @@ import pytest
 from tests.fakes import FakeProvider
 
 from lecode.agent.builder import build_runtime
-from lecode.agent.runner import AgentRunner, RunResult, UsageTotals
+from lecode.agent.runner import (
+    AgentRunner,
+    LlmCall,
+    LlmResponse,
+    RunResult,
+    Token,
+    UsageTotals,
+)
+from lecode.agent.runner import Done as RunnerDone
 from lecode.config.models import Config
 from lecode.context.agents import AgentDefinition, AgentRegistry
 from lecode.extras.subagents import SubagentError
@@ -144,6 +152,39 @@ async def test_background_task_tool_delivers_worker_notification(setup, checker_
         assert manager.consume(None, history)
         assert worker_id in history[0]["content"]
         assert "first" in history[0]["content"]
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_task_uses_worker_manager_when_tui_events_are_installed(setup, checker_contract):
+    manager, ctx, _, _, _ = setup
+    ctx.extras["subagent_events"] = lambda event: None
+    try:
+        _, result = await ctx.extras["registry"].dispatch_result(
+            "task", "task", '{"prompt":"scan"}', ctx
+        )
+        assert not result.is_error
+        assert result.metadata["worker_id"] == manager.list()[0].id
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_worker_forwards_all_runner_events_to_tui_callback(setup, checker_contract):
+    manager, ctx, _, _, _ = setup
+    seen = []
+    ctx.extras["subagent_events"] = seen.append
+    try:
+        worker = await manager.start(ctx, agent="explore", prompt="scan")
+        await manager.wait(worker.id)
+        assert {type(progress.event) for progress in seen} == {
+            LlmCall,
+            Token,
+            LlmResponse,
+            RunnerDone,
+        }
+        assert {progress.run_id for progress in seen} == {worker.id}
     finally:
         await manager.shutdown()
 

@@ -13,26 +13,18 @@ merge is left in progress (standard git flow) and the conflicted paths are
 reported — no auto-resolution, ``git merge --abort`` stays available.
 
 Worker worktrees: ``create_worker`` pins a base commit and a destination
-(path + branch) in a sidecar under ``.lecode/worktrees/<name>.json``;
-``integrate`` validates the worker tree and merges it into that pinned
-destination. ``discover`` returns the *main* repository root even when
-called from inside a linked worktree, so worktrees and sidecars agree
-across restarts.
+(path + branch) in a sidecar under ``.lecode/worktrees/<name>.json`` for a
+future explicit integration workflow. ``discover`` returns the *main*
+repository root even when called from inside a linked worktree, so worktrees
+and sidecars agree across restarts.
 """
 
 from __future__ import annotations
 
-import asyncio
-import fcntl
-import hashlib
-import inspect
 import json
 import os
 import re
-from collections.abc import Callable
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +33,6 @@ from lecode.extras.proc import run_proc
 #: Per-git-command timeout.
 GIT_TIMEOUT_S = 30.0
 
-#: Validation output kept in the returned :class:`IntegrationResult`.
-_VALIDATION_OUTPUT_LIMIT = 4000
-
 #: Worktree directory, relative to the repo root.
 WORKTREE_ROOT = ".lecode/worktrees"
 
@@ -51,13 +40,6 @@ WORKTREE_ROOT = ".lecode/worktrees"
 BRANCH_PREFIX = "lecode/"
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-
-
-def _clip_validation(text: str) -> str:
-    """Keep validation output bounded; the tail usually holds the failure."""
-    if len(text) <= _VALIDATION_OUTPUT_LIMIT:
-        return text
-    return "[… output clipped …]\n" + text[-_VALIDATION_OUTPUT_LIMIT:]
 
 
 class WorktreeError(Exception):
@@ -101,20 +83,6 @@ class WorktreeInspection:
     dirty: bool
     merge_in_progress: bool
     sidecar: dict[str, Any] | None
-
-
-@dataclass(frozen=True)
-class IntegrationResult:
-    """The outcome of integrating a worker into its pinned destination.
-
-    ``status`` is one of ``integrated``, ``paused``, ``blocked``,
-    ``conflict``, or ``validation_failed``.
-    """
-
-    status: str
-    detail: str
-    conflicts: list[str]
-    validation_output: str
 
 
 class WorktreeManager:
@@ -374,7 +342,7 @@ class WorktreeManager:
     async def inspect(self, name: str) -> WorktreeInspection:
         """Best-effort worker state; absent worktrees never raise."""
         info = self._info(name)
-        sidecar = self.read_sidecar(name)
+        sidecar = self._validated_sidecar(name, info)
         if not info.path.is_dir():
             return WorktreeInspection(
                 present=False, info=info, dirty=False, merge_in_progress=False, sidecar=sidecar
@@ -439,234 +407,6 @@ class WorktreeManager:
             timeout=GIT_TIMEOUT_S,
         )
         return [line for line in result.stdout.splitlines() if line.strip()]
-
-    async def _destination_problem(
-        self, dest_path: Path, dest_branch: str, common_dir: Path
-    ) -> str | None:
-        """Check the pinned checkout without mutating it."""
-        if not dest_path.is_dir():
-            raise WorktreeError(f"destination missing: {dest_path}")
-        root = await run_proc(
-            ["git", "rev-parse", "--show-toplevel"], cwd=dest_path, timeout=GIT_TIMEOUT_S
-        )
-        if root.exit_code != 0:
-            raise WorktreeError(f"destination is not a git repository: {dest_path}")
-        if Path(root.stdout.strip()).resolve() != dest_path:
-            raise WorktreeError(f"destination path was replaced: {dest_path}")
-        if await self._common_dir(dest_path) != common_dir:
-            raise WorktreeError(f"destination repository was replaced: {dest_path}")
-        ref = await run_proc(
-            ["git", "show-ref", "--verify", f"refs/heads/{dest_branch}"],
-            cwd=dest_path,
-            timeout=GIT_TIMEOUT_S,
-        )
-        if ref.exit_code != 0:
-            raise WorktreeError(f"destination branch missing: {dest_branch}")
-        branch = await self._git("rev-parse", "--abbrev-ref", "HEAD", cwd=dest_path)
-        if branch != dest_branch:
-            return f"destination is on '{branch}', expected '{dest_branch}'"
-        if await self._git("status", "--porcelain", cwd=dest_path):
-            return "destination has uncommitted changes"
-        return None
-
-    async def _worker_state(self, info: WorktreeInfo, common_dir: Path) -> tuple[str, bool]:
-        """Return the worker HEAD and dirty state after proving its identity."""
-        if not info.path.is_dir():
-            raise WorktreeError(f"worker path missing: {info.path}")
-        if await self._common_dir(info.path) != common_dir:
-            raise WorktreeError(f"worker repository was replaced: {info.path}")
-        ref = await run_proc(
-            ["git", "show-ref", "--verify", f"refs/heads/{info.branch}"],
-            cwd=info.path,
-            timeout=GIT_TIMEOUT_S,
-        )
-        if ref.exit_code != 0:
-            raise WorktreeError(f"worker branch missing: {info.branch}")
-        branch = await self._git("rev-parse", "--abbrev-ref", "HEAD", cwd=info.path)
-        if branch != info.branch:
-            raise WorktreeError(
-                f"worker branch changed: expected '{info.branch}', found '{branch}'"
-            )
-        return (
-            await self._commit("HEAD", cwd=info.path),
-            bool(await self._git("status", "--porcelain", cwd=info.path)),
-        )
-
-    @asynccontextmanager
-    async def _integration_lock(self, common_dir: Path, dest_path: Path, dest_branch: str):
-        """Hold a persistent per-destination flock for the whole integration."""
-        if not common_dir.is_dir():
-            raise WorktreeError(f"destination git directory missing: {common_dir}")
-        digest = hashlib.sha256(f"{dest_path}\0{dest_branch}".encode()).hexdigest()
-        lock = (common_dir / f"lecode-integrate-{digest}.lock").open("a+")
-        try:
-            await asyncio.to_thread(fcntl.flock, lock.fileno(), fcntl.LOCK_EX)
-            yield
-        finally:
-            await asyncio.to_thread(fcntl.flock, lock.fileno(), fcntl.LOCK_UN)
-            lock.close()
-
-    async def _is_ancestor(self, ancestor: str, descendant: str, *, cwd: Path) -> bool:
-        result = await run_proc(
-            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
-            cwd=cwd,
-            timeout=GIT_TIMEOUT_S,
-        )
-        return result.exit_code == 0
-
-    async def integrate(
-        self,
-        name: str,
-        *,
-        validation: list[str],
-        validation_runner: Callable[[str, Path], Any] | None = None,
-        allow_unvalidated: bool = False,
-        reviewed_head: str | None = None,
-    ) -> IntegrationResult:
-        """Validate a pinned candidate, then fast-forward its destination only."""
-        if not validation and not allow_unvalidated:
-            return IntegrationResult("blocked", "validation required", [], "")
-        if validation and validation_runner is None:
-            raise WorktreeError("validation runner required")
-        if any(not isinstance(cmd, str) or not cmd for cmd in validation):
-            raise WorktreeError("validation commands must be nonempty strings")
-
-        info = self._require(name)
-        sidecar = self._validated_sidecar(name, info)
-        if sidecar is None:
-            return IntegrationResult("paused", "no destination recorded", [], "")
-        dest_path = Path(sidecar["dest_path"])
-        dest_branch = sidecar["dest_branch"]
-        common_dir = Path(sidecar["dest_common_dir"])
-        if common_dir != await self._common_dir(self.repo_root):
-            raise WorktreeError("worker sidecar belongs to a different repository")
-
-        async with self._integration_lock(common_dir, dest_path, dest_branch):
-            # Re-read after acquiring the stable lock so a replaced sidecar cannot retarget us.
-            if self._validated_sidecar(name, info) != sidecar:
-                raise WorktreeError(f"sidecar changed while integrating '{name}'")
-            problem = await self._destination_problem(dest_path, dest_branch, common_dir)
-            if problem is not None:
-                return IntegrationResult("paused", problem, [], "")
-            worker_head, worker_dirty = await self._worker_state(info, common_dir)
-            if worker_dirty:
-                return IntegrationResult("blocked", "uncommitted changes", [], "")
-            if reviewed_head is not None and worker_head != reviewed_head:
-                raise WorktreeError("worker head differs from reviewed head")
-            base_commit = await self._commit(sidecar["base_commit"], cwd=info.path)
-            if not await self._is_ancestor(base_commit, worker_head, cwd=info.path):
-                raise WorktreeError("worker branch no longer descends from its pinned base")
-            dest_head = await self._commit("HEAD", cwd=dest_path)
-
-            if not await self._is_ancestor(dest_head, worker_head, cwd=info.path):
-                merge = await run_proc(
-                    ["git", "merge", "--no-edit", dest_head], cwd=info.path, timeout=GIT_TIMEOUT_S
-                )
-                if merge.exit_code != 0:
-                    conflicts = await self._conflicted_files(cwd=info.path)
-                    if conflicts:
-                        return IntegrationResult(
-                            "conflict",
-                            f"conflicts merging {dest_branch} into {info.branch}",
-                            conflicts,
-                            "",
-                        )
-                    return IntegrationResult(
-                        "blocked", merge.stderr.strip() or "merge failed", [], ""
-                    )
-            candidate, worker_dirty = await self._worker_state(info, common_dir)
-            if worker_dirty:
-                return IntegrationResult("blocked", "uncommitted changes", [], "")
-
-            validation_output = ""
-            for cmd in validation:
-                result = validation_runner(cmd, info.path)  # type: ignore[misc]
-                if inspect.isawaitable(result):
-                    result = await result
-                try:
-                    exit_code, output = result
-                except (TypeError, ValueError) as error:
-                    raise WorktreeError(
-                        "validation runner must return (exit_code, output)"
-                    ) from error
-                if not isinstance(exit_code, int) or not isinstance(output, str):
-                    raise WorktreeError("validation runner must return (int, str)")
-                validation_output += output
-                if exit_code != 0:
-                    return IntegrationResult(
-                        "validation_failed",
-                        f"validation failed: {cmd}",
-                        [],
-                        _clip_validation(validation_output),
-                    )
-            validation_output = _clip_validation(validation_output)
-
-            problem = await self._destination_problem(dest_path, dest_branch, common_dir)
-            if problem is not None:
-                return IntegrationResult("paused", problem, [], validation_output)
-            if await self._commit("HEAD", cwd=dest_path) != dest_head:
-                return IntegrationResult(
-                    "paused", "destination changed during validation", [], validation_output
-                )
-            current_worker, worker_dirty = await self._worker_state(info, common_dir)
-            if worker_dirty or current_worker != candidate:
-                return IntegrationResult(
-                    "blocked", "worker changed during validation", [], validation_output
-                )
-            if not await self._is_ancestor(dest_head, candidate, cwd=info.path):
-                raise WorktreeError("validated candidate does not contain the pinned destination")
-
-            merge = await run_proc(
-                ["git", "merge", "--ff-only", candidate], cwd=dest_path, timeout=GIT_TIMEOUT_S
-            )
-            if merge.exit_code != 0:
-                return IntegrationResult(
-                    "blocked", merge.stderr.strip() or "fast-forward failed", [], validation_output
-                )
-            integrated_head = await self._commit("HEAD", cwd=dest_path)
-            if integrated_head != candidate:
-                return IntegrationResult(
-                    "blocked", "destination changed while fast-forwarding", [], validation_output
-                )
-            sidecar["integrated_at"] = datetime.now(UTC).isoformat()
-            sidecar["integrated_head"] = integrated_head
-            self.write_sidecar(name, sidecar)
-            return IntegrationResult(
-                "integrated", f"fast-forwarded {dest_branch} to {candidate}", [], validation_output
-            )
-
-    async def cleanup_worker(self, name: str, *, discard: bool = False) -> WorktreeInfo:
-        """Remove an integrated worker, or explicitly discard one."""
-        info = self._require(name)
-        if discard:
-            await self._git("worktree", "remove", "--force", str(info.path))
-            await self._git("branch", "-D", info.branch)
-            return info
-
-        sidecar = self._validated_sidecar(name, info)
-        if sidecar is None or sidecar.get("integrated_at") is None:
-            raise WorktreeError(
-                f"worktree '{name}' is not integrated (use discard=True to discard)"
-            )
-        dest_path = Path(sidecar["dest_path"])
-        dest_branch = sidecar["dest_branch"]
-        common_dir = Path(sidecar["dest_common_dir"])
-        problem = await self._destination_problem(dest_path, dest_branch, common_dir)
-        if problem is not None:
-            raise WorktreeError(problem)
-        _worker_head, worker_dirty = await self._worker_state(info, common_dir)
-        if worker_dirty:
-            raise WorktreeError(
-                f"worktree '{name}' has uncommitted changes (use discard=True to discard)"
-            )
-        dest_head = await self._commit("HEAD", cwd=dest_path)
-        if not await self._is_ancestor(info.branch, dest_head, cwd=dest_path):
-            raise WorktreeError(
-                f"worktree '{name}' is not fully integrated (use discard=True to discard)"
-            )
-        await self._git("worktree", "remove", str(info.path))
-        await self._git("branch", "-d", info.branch, cwd=dest_path)
-        return info
 
     async def exit_worktree(
         self, name: str, *, delete_branch: bool = False, force: bool = False

@@ -78,6 +78,17 @@ def test_session_runtime_installs_workers(cwd, tmp_path):
     assert runtime.ctx.extras["workers"].session is session
 
 
+def test_workers_schema_omits_unimplemented_integration_actions(cwd, tmp_path):
+    from lecode.session.storage import SessionStore
+
+    store = SessionStore(config_dir=tmp_path / "cfg")
+    session = store.create("workers", cwd)
+    runtime = build_runtime(Config(), cwd, session=session, store=store)
+    actions = runtime.registry.get("workers").parameters["properties"]["action"]["enum"]
+    assert "integrate" not in actions
+    assert "cleanup" not in actions
+
+
 def test_agent_name_applies_overlay(cwd):
     runtime = build_runtime(Config(), cwd, agent_name="plan")
     checker = runtime.ctx.permission_checker

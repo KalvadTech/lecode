@@ -77,12 +77,7 @@ class TaskTool(Tool):
         agents = ctx.extras.get(AGENTS_EXTRA)
         if registry is None or agents is None:
             return ToolResult("error: subagents are unavailable in this context", is_error=True)
-        # The TUI still owns its transient roster through run_subagent.
-        manager = (
-            None
-            if ctx.extras.get(SUBAGENT_EVENTS_EXTRA) is not None
-            else ctx.extras.get(WORKER_EXTRA)
-        )
+        manager = ctx.extras.get(WORKER_EXTRA)
         if manager is not None:
             return await self._start_worker(args, ctx, manager, prompt)
         if args.get("run_in_background"):

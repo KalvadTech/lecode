@@ -251,23 +251,29 @@ class PermissionChecker:
         ):
             absolute = os.path.abspath(self._cwd / target)
             targets = (target, absolute, os.path.relpath(absolute, self._cwd))
-        result = self._policy_decision(tool_name, targets)
+        result = self._policy_decision(tool_name, args, targets)
         return self._apply_doom_loop(tool_name, args, result)
 
     # -- pipeline steps ------------------------------------------------------
 
-    def _policy_decision(self, tool_name: str, targets: tuple[str, ...]) -> CheckResult:
+    def _policy_decision(
+        self, tool_name: str, args: dict[str, Any], targets: tuple[str, ...]
+    ) -> CheckResult:
         """Intersect every policy layer without recording an ancestor call."""
-        results = [self._base_decision(tool_name, targets, None)]
+        results = [self._base_decision(tool_name, args, targets, None)]
         if self._overlay is not None:
-            results.append(self._base_decision(tool_name, targets, self._overlay))
+            results.append(self._base_decision(tool_name, args, targets, self._overlay))
         if self._parent is not None:
-            results.append(self._parent._policy_decision(tool_name, targets))
+            results.append(self._parent._policy_decision(tool_name, args, targets))
         priority = {Decision.ALLOW: 0, Decision.ASK: 1, Decision.DENY: 2}
         return max(results, key=lambda result: priority[result.decision])
 
     def _base_decision(
-        self, tool_name: str, targets: tuple[str, ...], overlay: AgentOverlay | None
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        targets: tuple[str, ...],
+        overlay: AgentOverlay | None,
     ) -> CheckResult:
         # Deny rules are unbypassable: global table + overlay extras.
         deny = self._last_match(self._rules.deny, tool_name, targets)
@@ -282,7 +288,7 @@ class PermissionChecker:
 
         # Read-only checkers can never be widened by overlay rules, global
         # rules, session grants, or the mode fallback.
-        if self._read_only and not self._is_read_class(tool_name):
+        if self._read_only and not self._is_read_class(tool_name, args):
             return CheckResult(Decision.DENY, f"read-only: {tool_name} is not a read-class tool")
 
         # Overlay extra allow/ask rules first (last match wins within them).
@@ -304,7 +310,7 @@ class PermissionChecker:
 
         # Mode fallback.
         mode = overlay.mode if overlay and overlay.mode else self._mode
-        return self._mode_fallback(mode, tool_name)
+        return self._mode_fallback(mode, tool_name, args)
 
     def _last_match(
         self, table: dict[str, list[PermissionRule]], tool_name: str, targets: tuple[str, ...]
@@ -345,13 +351,19 @@ class PermissionChecker:
 
     # -- mode fallback ---------------------------------------------------------
 
-    def _is_read_class(self, tool_name: str) -> bool:
-        return tool_name in READ_TOOLS or is_read_equiv_mcp(tool_name)
+    def _is_read_class(self, tool_name: str, args: dict[str, Any] | None = None) -> bool:
+        return (
+            tool_name in READ_TOOLS
+            or is_read_equiv_mcp(tool_name)
+            or (tool_name == "workers" and args is not None and args.get("action") == "question")
+        )
 
-    def _mode_fallback(self, mode: PermissionMode, tool_name: str) -> CheckResult:
+    def _mode_fallback(
+        self, mode: PermissionMode, tool_name: str, args: dict[str, Any]
+    ) -> CheckResult:
         reason = f"mode: {mode}"
         if mode == "yolo":
             return CheckResult(Decision.ALLOW, reason)
         # readonly: read-class tools are allowed, everything else is denied.
-        decision = Decision.ALLOW if self._is_read_class(tool_name) else Decision.DENY
+        decision = Decision.ALLOW if self._is_read_class(tool_name, args) else Decision.DENY
         return CheckResult(decision, reason)

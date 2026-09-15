@@ -8,7 +8,7 @@ from lecode.agent.tools.base import Tool, ToolContext, ToolResult
 from lecode.extras.subagents import SubagentError
 from lecode.extras.workers import WORKER_CURRENT_EXTRA, WORKER_EXTRA
 
-_ACTIONS = ("list", "send", "stop", "resume", "submit", "question", "integrate", "cleanup")
+_ACTIONS = ("list", "send", "stop", "resume", "submit", "question")
 
 
 class WorkersTool(Tool):
@@ -50,8 +50,6 @@ class WorkersTool(Tool):
             "resume": {"action", "id", "text"},
             "submit": {"action", "id"},
             "question": {"action", "text"},
-            "integrate": {"action"},
-            "cleanup": {"action"},
         }
         if action not in _ACTIONS or set(args) - allowed[action]:
             return "invalid workers action or arguments"
@@ -73,8 +71,6 @@ class WorkersTool(Tool):
         if manager is None:
             return ToolResult("error: workers are unavailable in this context", is_error=True)
         action = args["action"]
-        if action in {"integrate", "cleanup"}:
-            return ToolResult(f"error: workers {action} is unavailable", is_error=True)
         current = ctx.extras.get(WORKER_CURRENT_EXTRA)
         if action == "list":
             workers = (

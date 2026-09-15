@@ -593,7 +593,10 @@ class TuiApp:
         if worker is None:
             return
         run = self._roster.sync_worker(worker, context_window=self._status.context_window)
-        self._feed.agent_summary(run)
+        if note.get("kind") == "human_message":
+            self._feed.info(f"[human → @{worker.agent} {worker.id[:8]}] {note['content']}")
+        else:
+            self._feed.agent_summary(run)
         if (
             (note["origin"] == "delegated" or note["deliver"])
             and note["parent_id"] is None
@@ -745,6 +748,8 @@ class TuiApp:
         @kb.add("a", filter=approval_pending)
         def _approve_always(event: Any) -> None:
             pending = self._approval.pending
+            if pending is not None and not pending.allow_always:
+                return
             pattern = pending.target if pending is not None else "*"
             self._resolve_approval(AllowAlways(pattern=pattern))
 
@@ -1231,6 +1236,8 @@ class TuiApp:
         self._app = self._build_app(input=input, output=output)
         self._runtime.ctx.approval_callback = self._request_approval
         self._runtime.ctx.question_callback = self._request_question
+        if self._worker_manager is not None:
+            self._worker_manager.confirm = self._confirm_worker_worktree
         await self._fire_hook(SESSION_START)
         # MCP attaches in the background so the chat opens immediately;
         # per-server status lands in the feed when the connect finishes.
@@ -1254,6 +1261,8 @@ class TuiApp:
             self._spinner_task.cancel()
             self._approval.cancel()
             self._runtime.ctx.approval_callback = None
+            if self._worker_manager is not None:
+                self._worker_manager.confirm = None
             self._question.cancel()
             self._runtime.ctx.question_callback = None
             self.cancel_turn()
@@ -1593,7 +1602,12 @@ class TuiApp:
         attribution = (
             f"[worker {pending.worker[:8]} · {pending.conversation}] " if pending.worker else ""
         )
-        self._feed.permission(attribution + approval_prompt_text(pending.tool_name, pending.target))
+        self._feed.permission(
+            attribution
+            + approval_prompt_text(
+                pending.tool_name, pending.target, allow_always=pending.allow_always
+            )
+        )
 
     def _resolve_approval(self, decision: ApprovalDecision) -> None:
         self._approval.resolve(decision)
@@ -1624,6 +1638,48 @@ class TuiApp:
         self._spawn(self._fire_hook(NOTIFICATION, kind="approval", tool_name=tool_name))
         try:
             return await future
+        finally:
+            self._approval.cancel(future)
+            self._shown_approval = None
+            self._show_approval_head()
+            self._status.state = (
+                StatusLineState.AWAITING_APPROVAL
+                if self._approval.is_pending
+                else StatusLineState.RUNNING
+            )
+            self._invalidate()
+
+    async def _confirm_worker_worktree(self, *args: Any, **kwargs: Any) -> bool:
+        """Ask the TUI user before a dirty write worker gets a separate worktree."""
+        question = str(
+            kwargs.get("question") or next((arg for arg in args if isinstance(arg, str)), "")
+        )
+        worker = kwargs.get("worker")
+        worktree = kwargs.get("worktree") or kwargs.get("cwd")
+        for arg in args:
+            if not isinstance(arg, str) and worker is None:
+                worker = arg
+            elif not isinstance(arg, str) and worktree is None:
+                worktree = arg
+        worker_id = getattr(worker, "id", None) or getattr(worker, "worker_id", None) or "new"
+        agent = getattr(worker, "agent", None) or kwargs.get("agent") or "write"
+        path = getattr(worktree, "path", worktree) or self._cwd
+        target = f"@{agent} worker {str(worker_id)[:8]} in {path}"
+        future = self._approval.request(
+            "dirty worktree",
+            target,
+            question,
+            worker=str(worker_id),
+            conversation=str(path),
+            allow_always=False,
+        )
+        self._show_approval_head()
+        if question:
+            self._feed.info(question)
+        self._status.state = StatusLineState.AWAITING_APPROVAL
+        self._invalidate()
+        try:
+            return isinstance(await future, AllowOnce)
         finally:
             self._approval.cancel(future)
             self._shown_approval = None
@@ -2046,7 +2102,15 @@ class TuiApp:
         fragments a ``FormattedTextControl`` caches."""
         width = self._term_width()
         if self._detail_run_id is not None:
-            lines = detail_lines(self._roster.get(self._detail_run_id), self._theme, width)
+            run = self._roster.get(self._detail_run_id)
+            transcript = None
+            if run is not None and run.session_id is not None:
+                with contextlib.suppress(Exception):
+                    child = self._store.open(run.session_id)
+                    transcript = [
+                        record.message for record in self._store.load_messages(child)
+                    ] or None
+            lines = detail_lines(run, self._theme, width, transcript)
         else:
             lines = roster_lines(self._roster, self._theme, width)
         with self._console.capture() as capture:

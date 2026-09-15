@@ -104,6 +104,7 @@ class AgentRun:
     elapsed_s: float = 0.0
     subtree_cost_usd: float = 0.0
     subtree_usage_incomplete: bool = False
+    session_id: str | None = None
 
     @property
     def current(self) -> str:
@@ -175,12 +176,17 @@ class AgentRoster:
             self._runs[run.run_id] = run
             self._order.append(run.run_id)
         run.status = {"completed": "done", "failed": "error"}.get(worker.state, worker.state)
+        run.parent_id = worker.parent_id
+        run.depth = worker.depth
+        run.worker = True
+        run.origin = worker.origin
         run.error = worker.error or ""
         run.answer = worker.result.final_text if worker.result is not None else ""
         run.cost_usd = worker.usage_totals.cost_usd
         run.usage_incomplete = worker.usage_incomplete
         run.context_used = worker.usage_totals.context_tokens
         run.context_window = context_window
+        run.session_id = getattr(worker, "session_id", None)
         started_at = getattr(worker, "started_at", "")
         now = datetime.now(UTC)
         with suppress(TypeError, ValueError):
@@ -335,7 +341,29 @@ def _preview(text: str, width: int, limit: int = RESULT_PREVIEW_LINES) -> list[s
     return shown
 
 
-def detail_lines(run: AgentRun | None, theme: Theme, width: int) -> list[Text]:
+def _message_lines(message: dict, theme: Theme) -> list[Text]:
+    role = str(message.get("role", "unknown"))
+    name = str(message.get("name") or "")
+    label = f"    [{role}{f' {name}' if name else ''}]"
+    lines = [Text(label, style=theme.muted)]
+    content = message.get("content")
+    if content not in (None, ""):
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=True)
+        lines.extend(Text(f"      {row}", style=theme.text) for row in text.splitlines() or [""])
+    for call in message.get("tool_calls") or []:
+        function = call.get("function", call)
+        name = str(function.get("name", "tool"))
+        args = str(function.get("arguments", ""))
+        lines.append(Text(f"      ⚙ {name} {args}", style=theme.tool))
+    return lines
+
+
+def detail_lines(
+    run: AgentRun | None,
+    theme: Theme,
+    width: int,
+    transcript: list[dict] | None = None,
+) -> list[Text]:
     """The per-run detail panel: identity, tool trail, answer/error."""
     if run is None:
         return []
@@ -362,6 +390,11 @@ def detail_lines(run: AgentRun | None, theme: Theme, width: int) -> list[Text]:
                 style=theme.muted,
             )
         )
+    if transcript is not None:
+        lines.append(Text("    transcript:", style=theme.muted))
+        for message in transcript:
+            lines.extend(_message_lines(message, theme))
+        return lines
     if not run.activity:
         lines.append(Text("    (no tool calls yet)", style=theme.muted))
     for entry in run.activity:

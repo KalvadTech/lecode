@@ -213,14 +213,6 @@ class MemoryConfig(BaseModel):
     max_bytes: int = 32768
 
 
-class WorktreeConfig(BaseModel):
-    """``[worktree]`` -- worker worktree integration checks."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    validation: list[str] = Field(default_factory=list)
-
-
 class PierreConfig(BaseModel):
     """``[pierre]`` — post-task reviewer: a second model compares the request
     with the result and gives feedback after every completed task."""
@@ -284,7 +276,6 @@ class Config(BaseModel):
     mcp: McpConfig = Field(default_factory=McpConfig)
     lsp: LspConfig = Field(default_factory=LspConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
-    worktree: WorktreeConfig = Field(default_factory=WorktreeConfig)
     pierre: PierreConfig = Field(default_factory=PierreConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     hooks: dict[str, list[str]] = Field(default_factory=dict)

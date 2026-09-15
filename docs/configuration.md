@@ -180,22 +180,6 @@ trouble never blocks the agent.
 
 See [memory.md](memory.md).
 
-## `[worktree]`
-
-| field | default | meaning |
-|---|---|---|
-| `validation` | `[]` | commands a human-approved caller runs in the worker tree before fast-forward integration |
-
-For example:
-
-```toml
-[worktree]
-validation = ["uv run ruff check", "uv run python -m pytest"]
-```
-
-The worktree helper does not execute these commands itself. Its caller supplies
-the approved command runner; an empty list requires explicit human authorization.
-
 ## `[pierre]`
 
 Post-task reviewer: after every completed task, a second model compares the

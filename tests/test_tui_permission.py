@@ -47,6 +47,8 @@ def make_ctx(tmp_path, monkeypatch, callback=None, mode="yolo", tool_name="bash"
     rule for ``tool_name`` to drive the approval-prompt flows.
     """
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    monkeypatch.chdir(tmp_path)
     config = Config()
     config.notifications.enabled = False  # never play sounds in tests
     if ask:
@@ -296,6 +298,8 @@ async def test_shutdown_cancels_all_outstanding():
 
 def make_app(tmp_path, monkeypatch, script):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    monkeypatch.chdir(tmp_path)
     config = Config()
     config.notifications.enabled = False  # never play sounds in tests
     # the two modes never Ask by themselves; gate bash with an ask rule
@@ -358,6 +362,27 @@ async def test_worker_approval_is_attributed_at_fifo_head(tmp_path, monkeypatch)
     app._resolve_approval(Deny())
     assert await second == Deny()
     assert "[worker worker-1 · w] allow bash 'ls'?" in out.getvalue()
+
+
+async def test_dirty_worker_confirmation_is_one_shot(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    app, out = make_app(tmp_path, monkeypatch, [])
+    task = asyncio.ensure_future(
+        app._confirm_worker_worktree(
+            "Uncommitted changes will not enter the worker's committed-HEAD worktree. Continue?",
+            worker=SimpleNamespace(id="worker-1234", agent="build"),
+            worktree=tmp_path / "worker-tree",
+        )
+    )
+    await wait_for(lambda: app._approval.pending is not None)
+    pending = app._approval.pending
+    assert pending is not None and pending.allow_always is False
+    assert "@build worker worker-1" in out.getvalue()
+    assert "worker-tree" in out.getvalue()
+    assert "(y)es (n)o" in out.getvalue()
+    app._resolve_approval(AllowAlways(pattern="*"))
+    assert await task is False
 
 
 async def test_pipe_approval_y_runs_asked_tool(tmp_path, monkeypatch):

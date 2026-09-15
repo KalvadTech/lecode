@@ -289,6 +289,24 @@ def test_read_only_denies_writes_even_in_yolo():
     assert "read-only" in checker.check("bash", {"command": "ls"}).reason
 
 
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ({"action": "question", "text": "Need a choice"}, Decision.ALLOW),
+        ({"action": "list"}, Decision.DENY),
+        ({"action": "send", "id": "w", "text": "continue"}, Decision.DENY),
+        ({"action": "stop", "id": "w"}, Decision.DENY),
+        ({"action": "resume", "id": "w"}, Decision.DENY),
+        ({"action": "submit", "id": "w"}, Decision.DENY),
+        ({"action": "integrate"}, Decision.DENY),
+        ({"action": "cleanup"}, Decision.DENY),
+    ],
+)
+def test_strict_readonly_allows_only_workers_question(args, expected):
+    checker = _checker({"mode": "yolo"}, read_only=True)
+    assert checker.check("workers", args).decision == expected
+
+
 def test_read_only_not_widened_by_overlay_allow_rule():
     overlay = AgentOverlay(extra_rules=_ruleset(allow={"bash": [{"pattern": "*"}]}))
     checker = _checker({"mode": "yolo"}, read_only=True).for_agent(overlay)

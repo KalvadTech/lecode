@@ -31,6 +31,7 @@ def make_runtime(tmp_path, monkeypatch, provider, config=None):
     """A built runtime with the provider seam installed on the context."""
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    monkeypatch.chdir(tmp_path)
     config = config or Config()
     runtime = build_runtime(config, tmp_path)
     runtime.ctx.extras["provider"] = provider
@@ -105,7 +106,9 @@ class BlockingChildProvider:
 
     def stream_chat(self, messages, model, tools=None, **kwargs):
         self.requests.append({"messages": [dict(m) for m in messages], "model": model})
-        is_child = not any(t["function"]["name"] == "task" for t in tools or [])
+        is_child = not any(t["function"]["name"] == "task" for t in tools or []) or (
+            getattr(self, "worker_requests_are_children", False) and len(self.requests) > 1
+        )
         if is_child:
             return self._child_stream()
         return _scripted_stream(self.parent_entry)
@@ -536,7 +539,8 @@ async def test_child_events_feed_roster_and_one_summary_line(tmp_path, monkeypat
     assert len(runs) == 1
     run = runs[0]
     assert run.description == "Scan repo"
-    assert run.status == "ok"
+    assert run.status == "done"
+    assert run.worker
     assert run.answer == "scan result"
     assert [entry.name for entry in run.activity] == ["list_dir"]
 
@@ -595,6 +599,7 @@ async def test_roster_panel_visible_while_child_runs(tmp_path, monkeypatch):
             ]
         }
     )
+    provider.worker_requests_are_children = True
     app, _, _ = make_app(tmp_path, monkeypatch, [])
     app._runner.provider = provider
     app._runtime.ctx.extras["provider"] = provider
@@ -680,7 +685,10 @@ async def test_detail_panel_preserves_draft(tmp_path, monkeypatch):
 
 
 async def test_at_agent_runs_directly(tmp_path, monkeypatch):
-    script = [{"text": "42 files", "usage": {"input_tokens": 7, "output_tokens": 3}}]
+    script = [
+        {"text": "42 files", "usage": {"input_tokens": 7, "output_tokens": 3}},
+        {"text": "parent answer"},
+    ]
     app, provider, out = make_app(tmp_path, monkeypatch, script)
     await app._submit("@explore count the files")
     task = app._turn_task
@@ -699,6 +707,9 @@ async def test_at_agent_runs_directly(tmp_path, monkeypatch):
     assert app.store.load_agent_runs(app.session) == []
     assert "42 files" not in rendered  # completion notifies until /agent submit
     assert app._status.input_tokens == 7
+    await app._submit("continue as parent")
+    await app._turn_task
+    assert "parent answer" in out.getvalue()
 
 
 async def test_at_primary_mention_degrades_to_note(tmp_path, monkeypatch):
