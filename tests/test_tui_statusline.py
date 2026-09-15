@@ -75,7 +75,15 @@ def test_line2_omits_reasoning_at_baseline(state, theme):
 
 def test_line3_session_agent_tokens_state(state, theme):
     line3 = render_statusline(state, theme, width=200).plain.splitlines()[2]
-    assert line3 == "session: my-session · agent: default · in: 1.2k · out: 0.4k · ready"
+    assert line3 == (
+        "session: my-session · agent: default · in: 1.2k · out: 0.4k · avg tok/s: — · ready"
+    )
+
+
+def test_average_speed(state, theme):
+    state.timed_output_tokens = 150
+    state.model_elapsed_s = 6.0
+    assert "out: 0.4k · avg tok/s: 25.0" in render_statusline(state, theme, width=200).plain
 
 
 def test_renders_exactly_three_lines(state, theme):

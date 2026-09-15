@@ -111,6 +111,20 @@ def test_llm_response_closes_streamed_line(theme):
     assert "← m (round 1)" in lines[1]
 
 
+@pytest.mark.parametrize(
+    ("output_tokens", "elapsed_s", "speed"),
+    [(15, 2.0, "7.5 tok/s"), (15, 0.0, None), (15, -1.0, None), (0, 2.0, None)],
+)
+def test_llm_response_speed(theme, output_tokens, elapsed_s, speed):
+    feed, out = make_feed(theme)
+    feed.llm_response("m", 1, 10, output_tokens, 0.001, elapsed_s=elapsed_s)
+    rendered = out.getvalue()
+    if speed is None:
+        assert "tok/s" not in rendered
+    else:
+        assert speed in rendered
+
+
 def test_assistant_text_renders_markdown(theme):
     feed, out = make_feed(theme)
     feed.assistant_text("# Title\n\nsome **bold** text")
