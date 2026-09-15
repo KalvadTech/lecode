@@ -9,8 +9,7 @@ build plan (``Token``/``Reasoning``/``ToolCall``/``ToolResult``/``Error``/
 
 Stop reasons: ``"done"`` (final text answer), ``"empty"`` (the provider
 returned no text and no tool calls three nudges in a row), ``"max_turns"``,
-``"context_overflow"`` (compaction ran and the context still doesn't fit with
-``[compaction] on_overflow = "pause"``).
+``"context_overflow"`` (the request cannot safely fit the current model budget).
 Provider errors propagate after an ``Error`` event; cancellation propagates
 after partial state is persisted.
 
@@ -22,11 +21,10 @@ the test ``FakeProvider`` both qualify).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import inspect
 import time
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from lecode.agent.review import review, user_request
@@ -49,7 +47,12 @@ from lecode.providers.types import (
 from lecode.providers.types import (
     Done as StreamDone,
 )
-from lecode.session.compaction import compact_session
+from lecode.session.compaction import (
+    compact_session,
+    context_limits,
+    estimate_request,
+    request_size,
+)
 from lecode.telemetry import capture_exception, record_turn
 
 # -- runner events (the plan's taxonomy) --------------------------------------
@@ -200,6 +203,11 @@ CONTINUE_PROMPT = "Please continue."
 #: How many empty-turn nudges before giving up with stop_reason "empty".
 EMPTY_NUDGE_LIMIT = 3
 
+
+class ContextPaused(Exception):
+    """A request cannot safely use the current context."""
+
+
 #: Finish reasons that mean the answer was truncated and should continue.
 LENGTH_FINISH_REASONS = frozenset({"length", "max_tokens"})
 
@@ -214,6 +222,7 @@ class UsageTotals:
     #: Prompt size of the last API call — the real context fill (the
     #: accumulated ``input_tokens`` double-counts across tool-call rounds).
     context_tokens: int = 0
+    unknown_usage_calls: int = 0
 
 
 @dataclass(frozen=True)
@@ -265,35 +274,47 @@ class AgentRunner:
         self.steer_queue = steer_queue
         self.input_queue = input_queue
         self._catalog: Catalog | None = catalog
-        #: Recomputes the live system prompt at the start of every run.
+        #: Recomputes the live system prompt at each request boundary.
         self._refresh_prompt = refresh_prompt
         #: Partially collected turn, for cancellation-safe persistence.
         self._partial: CompletedMessage | None = None
+        self._bytes_per_token = 3.0
+        self._calibration_model = self.model
         # Subagent seam: child runners reach the provider through ctx.
         self.ctx.extras["provider"] = provider
+        self._seen_generation = self.memory_generation()
+        self._request_generation = self._seen_generation
 
     async def run(
         self,
         messages: list[ChatMessage],
         on_event: OnEvent | None = None,
+        *,
+        expected_generation: int | None = None,
     ) -> RunResult:
         """Run the loop from ``messages`` until done, empty, or max turns."""
         history: list[ChatMessage] = list(messages)
-        if self._refresh_prompt is not None:
-            # Recompute the live prompt and replace the leading system message
-            # rather than appending another one.
-            prompt: ChatMessage = {"role": "system", "content": self._refresh_prompt()}
-            if history and history[0].get("role") == "system":
-                history[0] = prompt
-            else:
-                history.insert(0, prompt)
+        if self._refresh_prompt is not None and self.store is not None and self.session is not None:
+            replay = self.store.load_for_model(self.session)
+            if replay and replay[0].get("role") == "system" and history[:1] == replay[:1]:
+                history.insert(0, {"role": "system", "content": ""})
         # The live conversation, visible through ctx (subagents, hooks).
         self.ctx.extras["conversation"] = history
-        # Background tasks finished between runs surface at the start.
-        await self._drain_background(history, on_event)
         input_tokens = 0
         output_tokens = 0
         cost_usd = 0.0
+        unknown_usage_calls = 0
+
+        def memory_usage(usage: dict | None) -> None:
+            nonlocal input_tokens, output_tokens, cost_usd, unknown_usage_calls
+            if usage is None:
+                unknown_usage_calls += 1
+            else:
+                in_tok, out_tok, cost = self._usage_cost(self.model, usage)
+                input_tokens += in_tok
+                output_tokens += out_tok
+                cost_usd += cost
+
         context_tokens = 0
         turns = 0
         tool_calls = 0
@@ -301,11 +322,20 @@ class AgentRunner:
         empty_retries = 0
         final_text = ""
         continuing = False
-        compacted = False
         stop_reason = "done"
         max_turns = self.config.agent.max_turns
 
         try:
+            self._sync_memory(
+                history,
+                force=self.memory_generation() > 0,
+                expected_generation=expected_generation,
+                fresh_request=messages[-1]
+                if messages and messages[-1].get("role") == "user"
+                else None,
+            )
+            self._request_generation = self._seen_generation
+            await self._drain_background(history, on_event)
             while True:
                 if turns >= max_turns:
                     stop_reason = "max_turns"
@@ -315,26 +345,49 @@ class AgentRunner:
                     if self.config.agent.turn_cooldown_ms > 0:
                         await asyncio.sleep(self.config.agent.turn_cooldown_ms / 1000)
 
-                if context_tokens:
-                    hard = self._context_window() - self.config.compaction.buffer_tokens
-                    if (
-                        compacted
-                        and self.config.compaction.on_overflow == "pause"
-                        and context_tokens >= hard
-                    ):
-                        # Even compacted history doesn't fit — stop the run.
-                        stop_reason = "context_overflow"
+                self._sync_memory(history, expected_generation=expected_generation)
+                self._refresh_system(history)
+                specs = self.registry.openai_tool_specs() or None
+                window, headroom = context_limits(self.model, self.config, self._catalog)
+                estimated = estimate_request(history, specs, bytes_per_token=self._bytes_per_token)
+                while await self._maybe_compact(history, on_event, estimated, turns, memory_usage):
+                    updated = estimate_request(
+                        history, specs, bytes_per_token=self._bytes_per_token
+                    )
+                    if updated >= estimated:
+                        estimated = updated
                         break
-                    if await self._maybe_compact(history, on_event, context_tokens, turns):
-                        compacted = True
+                    estimated = updated
+                if estimated + headroom > window:
+                    await self._emit(
+                        on_event,
+                        Error(
+                            message=(
+                                "Context cannot safely fit the current model's input "
+                                "and output budget; paused."
+                            )
+                        ),
+                    )
+                    stop_reason = "context_overflow"
+                    break
 
                 self._partial = None
+                self._request_generation = self._seen_generation
                 prompt_chars = _prompt_chars(history)
+                source_version = (
+                    self.store.source_version(self.session)
+                    if self.store is not None and self.session is not None
+                    else None
+                )
                 await self._emit(on_event, LlmCall(model=self.model, turn=turns + 1))
-                completed = await self._stream_turn(history, on_event)
+                completed = await self._stream_turn(history, on_event, source_version)
                 turns += 1
 
                 in_tok, out_tok, cost = self._turn_cost(completed)
+                if in_tok:
+                    self._bytes_per_token = min(
+                        self._bytes_per_token, request_size(history, specs) / in_tok
+                    )
                 await self._emit(
                     on_event,
                     LlmResponse(
@@ -350,6 +403,15 @@ class AgentRunner:
                 output_tokens += out_tok
                 cost_usd += cost
                 context_tokens = in_tok or context_tokens
+                self._check_generation()
+                if (
+                    self.store is not None
+                    and self.session is not None
+                    and self.store.source_version(self.session) != source_version
+                ):
+                    raise ContextPaused(
+                        "Session sources changed during the request; response discarded."
+                    )
                 history.append(completed.as_message())
                 self._persist_assistant(completed, in_tok, out_tok, cost)
 
@@ -378,6 +440,10 @@ class AgentRunner:
                 final_text = (final_text if continuing else "") + completed.content
                 stop_reason = "done"
                 break
+        except ContextPaused as exc:
+            final_text = ""
+            stop_reason = "context_overflow"
+            await self._emit(on_event, Error(message=str(exc)))
         except asyncio.CancelledError:
             self._persist_partial(history)
             raise
@@ -386,11 +452,15 @@ class AgentRunner:
         hooks = self.ctx.extras.get("hooks")
         if hooks is not None and hooks.handlers.get(STOP):
             await hooks.fire(STOP, reason=stop_reason)
+        if self.memory_generation() != self._request_generation:
+            final_text = ""
+            stop_reason = "context_overflow"
 
         # Pierre mode: a second model reviews the request vs the result.
         review_text: str | None = None
         pierre = self.config.pierre
         if pierre.enabled and stop_reason == "done" and final_text:
+            review_generation = self.memory_generation()
             outcome = await review(
                 self.provider,
                 pierre.model or self.model,
@@ -398,6 +468,10 @@ class AgentRunner:
                 response=final_text,
                 cwd=self.ctx.cwd,
             )
+            if self.memory_generation() != review_generation:
+                outcome = None
+                final_text = ""
+                stop_reason = "context_overflow"
             if outcome is not None:
                 review_text = outcome.feedback
                 in_tok, out_tok, cost = self._usage_cost(outcome.model, outcome.usage or {})
@@ -420,6 +494,10 @@ class AgentRunner:
                     )
                 await self._emit(on_event, Review(feedback=outcome.feedback, model=outcome.model))
 
+        if self.memory_generation() != self._request_generation:
+            final_text = ""
+            review_text = None
+            stop_reason = "context_overflow"
         elapsed_s = time.monotonic() - started_at
         record_turn(
             model=self.model,
@@ -439,6 +517,7 @@ class AgentRunner:
                 output_tokens=output_tokens,
                 cost_usd=cost_usd,
                 context_tokens=context_tokens,
+                unknown_usage_calls=unknown_usage_calls,
             ),
             tool_calls=tool_calls,
             elapsed_s=elapsed_s,
@@ -447,16 +526,87 @@ class AgentRunner:
 
     # -- one turn --------------------------------------------------------------
 
+    def memory_generation(self) -> int:
+        if self.ctx.recall_context is not None:
+            return self.ctx.recall_context.generation()
+        facts = self.ctx.extras.get("facts")
+        if facts is not None:
+            return facts.generation()
+        if self.store is not None and self.session is not None:
+            return self.store.memory_generation(self.session.id)
+        return 0
+
+    def _sync_memory(
+        self,
+        history: list[ChatMessage],
+        *,
+        force: bool = False,
+        expected_generation: int | None = None,
+        fresh_request: ChatMessage | None = None,
+    ) -> None:
+        generation = self.memory_generation()
+        if expected_generation is not None and generation != expected_generation:
+            raise ContextPaused("Memory exclusions changed; derived input discarded.")
+        if self.store is None or self.session is None:
+            if generation != self._seen_generation:
+                raise ContextPaused("Memory exclusions changed; discard derived context and retry.")
+            return
+        reset = force or generation != self._seen_generation
+        history[:] = self.store.refresh_model_history(
+            self.session, history, reset=reset, fresh_request=fresh_request
+        )
+        if reset:
+            self._seen_generation = generation
+            self._refresh_system(history)
+
+    def _check_generation(self) -> None:
+        if self.memory_generation() != self._request_generation:
+            raise ContextPaused("Memory exclusions changed during the request; response discarded.")
+
+    def _refresh_system(self, history: list[ChatMessage]) -> None:
+        if self._calibration_model != self.model:
+            self._bytes_per_token = 3.0
+            self._calibration_model = self.model
+        if self._refresh_prompt is not None:
+            prompt: ChatMessage = {"role": "system", "content": self._refresh_prompt()}
+            if history and history[0].get("role") == "system":
+                history[0] = prompt
+            else:
+                history.insert(0, prompt)
+
     async def _stream_turn(
-        self, history: list[ChatMessage], on_event: OnEvent | None
+        self, history: list[ChatMessage], on_event: OnEvent | None, source_version: tuple | None
     ) -> CompletedMessage:
-        tools = self.registry.openai_tool_specs() or None
         thinking = self.config.llm.thinking
         reasoning_effort = None if thinking == "none" else thinking
 
         async def invoke() -> CompletedMessage:
+            self._check_generation()
+            self._refresh_system(history)
+            tools = self.registry.openai_tool_specs() or None
+            window, headroom = context_limits(self.model, self.config, self._catalog)
+            if (
+                estimate_request(history, tools, bytes_per_token=self._bytes_per_token) + headroom
+                > window
+            ):
+                raise ContextPaused("Refreshed context exceeds the current model budget; paused.")
+            if (
+                self.store is not None
+                and self.session is not None
+                and (
+                    source_version is None
+                    or self.store.source_version(self.session) != source_version
+                )
+            ):
+                raise ContextPaused(
+                    "Session changed before provider request; paused. Reload the session."
+                )
             stream = self.provider.stream_chat(
-                history, model=self.model, tools=tools, reasoning_effort=reasoning_effort
+                history,
+                model=self.model,
+                tools=tools,
+                reasoning_effort=reasoning_effort,
+                max_tokens=headroom,
             )
             return await self._collect(stream, on_event)
 
@@ -543,7 +693,7 @@ class AgentRunner:
                     call["id"],
                     call["function"]["name"],
                     call["function"]["arguments"],
-                    self.ctx,
+                    replace(self.ctx, memory_generation=self._request_generation),
                 )
             )
             for call in completed.tool_calls
@@ -608,17 +758,10 @@ class AgentRunner:
         for note in manager.drain_notifications():
             message: ChatMessage = {"role": "user", "content": note}
             history.append(message)
-            self._persist_message(message)
+            self._persist_message(message, derived=True)
             await self._emit(on_event, QueuedMessage(content=note))
 
     # -- automatic compaction -----------------------------------------------------
-
-    def _context_window(self) -> int:
-        """Effective window: the catalog's per-model value when known."""
-        if self._catalog is not None:
-            with contextlib.suppress(ModelNotFoundError, AmbiguousModelError):
-                return self._catalog.get(self.model).context_window
-        return self.config.agent.context_window
 
     async def _maybe_compact(
         self,
@@ -626,39 +769,53 @@ class AgentRunner:
         on_event: OnEvent | None,
         context_tokens: int,
         turns: int,
+        on_usage: Callable[[dict | None], None],
     ) -> bool:
-        """Compact before the next provider call when the last call's real
-        ``input_tokens`` crossed the trigger; True when a compaction happened."""
+        """Compact against the whole outgoing request, including new tool results."""
         compaction = self.config.compaction
         if not compaction.enabled or self.session is None or self.store is None:
             return False
-        threshold = self._context_window() - compaction.buffer_tokens
+        window, headroom = context_limits(self.model, self.config, self._catalog)
+        threshold = window - headroom
         if compaction.mid_turn_threshold is not None and turns >= 1:
             # Tool-loop rounds after the first trigger at this absolute count.
-            threshold = int(compaction.mid_turn_threshold)
+            threshold = min(threshold, int(compaction.mid_turn_threshold))
         if context_tokens < threshold:
             return False
         await self._emit(
             on_event, CompactionStarted(context_tokens=context_tokens, threshold=threshold)
         )
+        source_version = self.store.source_version(self.session, include_derivations=False)
+        replay = self.store.load_for_model(self.session)
         summary = await compact_session(
             self.provider,
             self.store,
             self.session,
             self.model,
             hooks=self.ctx.extras.get("hooks"),
+            config=self.config,
+            catalog=self._catalog,
+            on_usage=on_usage,
+            ctx=self.ctx,
         )
+        if self.store.source_version(self.session, include_derivations=False) != source_version:
+            raise ContextPaused(
+                "Session sources changed during compaction; paused. Reload the session."
+            )
         if summary is None:
             return False  # fail-open: keep going uncompacted
-        # Rebuild in place so ctx.extras["conversation"] stays valid. Leading
-        # system messages (the system prompt, a persona overlay) are never
-        # persisted; keep them ahead of the replayed summary + tail.
-        prefix = []
-        for message in history:
-            if message.get("role") != "system":
-                break
-            prefix.append(message)
-        history[:] = [*prefix, *self.store.load_for_model(self.session)]
+        # Rebuild in place so ctx.extras["conversation"] stays valid.
+        rebuilt = self.store.load_for_model(self.session)
+        remaining = list(history)
+        # Remove only the covered prefix, preserving raw tail and transient ordering.
+        # ponytail: linear searches; index identities if very large tails become costly.
+        for message in replay[: len(replay) - len(rebuilt) + 1]:
+            if message in remaining:
+                remaining.remove(message)
+        split = 0
+        while split < len(remaining) and remaining[split].get("role") == "system":
+            split += 1
+        history[:] = [*remaining[:split], rebuilt[0], *remaining[split:]]
         await self._emit(on_event, CompactionFinished(summary_chars=len(summary)))
         return True
 
@@ -675,7 +832,7 @@ class AgentRunner:
             self._catalog = Catalog.default()
         try:
             pricing = self._catalog.get(model).pricing
-        except ModelNotFoundError:
+        except (ModelNotFoundError, AmbiguousModelError):
             return in_tok, out_tok, 0.0
         return in_tok, out_tok, (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
 
@@ -693,18 +850,33 @@ class AgentRunner:
             usage = {"input_tokens": in_tok, "output_tokens": out_tok, "cost_usd": cost}
         self._persist_message(completed.as_message(), usage)
 
-    def _persist_message(self, message: ChatMessage, usage: dict[str, Any] | None = None) -> None:
+    def _persist_message(
+        self,
+        message: ChatMessage | dict[str, Any],
+        usage: dict[str, Any] | None = None,
+        *,
+        derived: bool = False,
+    ) -> None:
         if self.session is not None and self.store is not None:
-            self.store.append_message(self.session, dict(message), usage=usage)
+            self.store.append_message(
+                self.session,
+                dict(message),
+                usage=usage,
+                memory_generation=(
+                    self._request_generation if derived or message.get("role") != "user" else None
+                ),
+            )
 
     def _persist_partial(self, history: list[ChatMessage]) -> None:
         """On cancellation, keep whatever partial assistant turn exists."""
         partial = self._partial
         self._partial = None
+        if self.memory_generation() != self._request_generation:
+            return
         if partial is None or not (partial.content or partial.tool_calls):
             return
         history.append(partial.as_message())
-        self._persist_message(partial.as_message())
+        self._persist_message({**partial.as_message(), "incomplete": True})
 
     # -- events -------------------------------------------------------------------------
 

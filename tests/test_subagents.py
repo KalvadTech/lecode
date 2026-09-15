@@ -12,13 +12,14 @@ from tests.test_tui_app import make_app, make_blocking_app, wait_for
 
 from lecode.agent.builder import build_runtime
 from lecode.agent.runner import AgentRunner
-from lecode.agent.tools import ToolRegistry
+from lecode.agent.tools import Tool, ToolRegistry, ToolResult
 from lecode.agent.tools.task import make_tool
 from lecode.config.models import Config
 from lecode.extras import subagents
 from lecode.extras.subagents import (
     SUBAGENT_RESPONSE_CAP,
     SubagentError,
+    child_registry,
     run_subagent,
 )
 from lecode.providers.types import Done, TokenDelta, ToolCallDelta
@@ -114,6 +115,50 @@ class BlockingChildProvider:
 
 
 # -- run_subagent -------------------------------------------------------------
+
+
+def test_child_registry_keeps_memory_readers_and_strips_durable_writers():
+    readers = {"memory_read", "memory_search", "memory_recall"}
+    writers = {"memory_write", "memory_edit", "memory_correct", "memory_forget"}
+    parent = ToolRegistry(
+        [Tool(name=name, description="", parameters={}) for name in readers | writers]
+    )
+    child = child_registry(parent)
+    assert set(child.names()) == readers
+    assert set(parent.names()) == readers | writers
+
+
+async def test_child_can_read_shared_facts_with_project_context(tmp_path, monkeypatch):
+    from lecode.session.storage import SessionStore
+
+    provider = FakeProvider([])
+    runtime = make_runtime(tmp_path, monkeypatch, provider)
+    store = SessionStore(tmp_path / "cfg")
+    session = store.create("source", tmp_path)
+    runtime.ctx.session, runtime.ctx.session_store = session, store
+    store.append_message(session, {"role": "user", "content": "shared evidence"})
+    ref = store.source_snapshot(session.id, 1, 1, project_root=tmp_path).ref
+    fact = runtime.ctx.extras["facts"].remember(
+        "shared evidence", ref, sessions=store, project_root=tmp_path
+    )
+
+    class FactReader(Tool):
+        async def run(self, args, ctx):
+            assert ctx.project_root == runtime.ctx.project_root
+            assert ctx.scope == runtime.ctx.scope
+            assert "facts" not in ctx.extras
+            assert ctx.session is None and ctx.session_store is None
+            return ToolResult(ctx.recall_context.recall({"fact_id": fact.id}))
+
+    runtime.registry.register(FactReader(name="memory_read", description="", parameters={}))
+    provider.script = [
+        {"tool_calls": [{"name": "memory_read", "arguments": "{}"}]},
+        {"text": "done"},
+    ]
+    await run_subagent(runtime.ctx, runtime.registry, runtime.agents, name="explore", prompt="read")
+    tool_messages = [msg for msg in provider.requests[1]["messages"] if msg["role"] == "tool"]
+    assert json.loads(tool_messages[0]["content"])["fact_text"] == "shared evidence"
+    runtime.ctx.extras["facts"].close()
 
 
 async def test_child_uses_agent_prompt_and_lean_registry(tmp_path, monkeypatch):

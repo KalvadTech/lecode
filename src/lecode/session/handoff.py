@@ -69,12 +69,13 @@ def handoff(source: Session, store: SessionStore, new_name: str) -> Session:
     """Create a new named session seeded with a brief of ``source``."""
     from lecode.session.naming import unique_name
 
-    prompt = build_handoff_prompt(store.load_messages(source))
+    generation = store.memory_generation(source.id)
+    prompt = build_handoff_prompt(store.visible_messages(source))
     session = store.create(
         name=unique_name(new_name, store),
         cwd=source.meta.cwd,
         model=source.meta.model,
         agent=source.meta.agent,
     )
-    store.append_message(session, {"role": "user", "content": prompt})
+    store.append_message(session, {"role": "user", "content": prompt}, memory_generation=generation)
     return session

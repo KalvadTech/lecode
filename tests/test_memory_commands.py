@@ -97,3 +97,41 @@ def test_injection_present_when_memory_exists(cwd):
 def test_injection_absent_when_memory_empty(cwd):
     runtime = build_runtime(Config(), cwd)
     assert "## Memory" not in runtime.system_prompt
+
+
+async def test_memory_command_fallback_keeps_project_root_after_cwd_switch(cwd, monkeypatch):
+    from tests.test_tui_app import make_app
+
+    app, _, out = make_app(cwd, monkeypatch, [])
+    app.runtime.ctx.extras["memory"].write_long_term("durable project note")
+    checkout = cwd / "checkout"
+    checkout.mkdir()
+    app.set_cwd(checkout)
+    app.runtime.ctx.extras.pop("memory")
+    await app.handle_command("/memory show")
+    assert "durable project note" in out.getvalue()
+
+
+async def test_memory_correct_forget_commands_dispatch_with_explicit_evidence(cwd, monkeypatch):
+    from tests.test_tui_app import make_app
+
+    app, provider, out = make_app(cwd, monkeypatch, [])
+    facts = app.runtime.ctx.extras["facts"]
+    source = app.store.append_message(app.session, {"role": "user", "content": "old"})
+    ref = app.store.source_snapshot(app.session.id, source.seq, source.seq, project_root=cwd).ref
+    fact = facts.remember("old", ref, sessions=app.store, project_root=cwd)
+    evidence = app.store.append_message(app.session, {"role": "user", "content": "new value"})
+    await app.handle_command(
+        f"/memory correct {fact.id} 1 {app.session.id} {evidence.seq} {evidence.seq} new value"
+    )
+    assert facts.get(fact.id).text == "new value", out.getvalue()
+    app.set_permission_mode("readonly")
+    await app.handle_command(f"/memory forget {fact.id}")
+    assert facts.get(fact.id) is not None
+    assert "denied" in out.getvalue()
+    app.set_permission_mode("yolo")
+    await app.handle_command(f"/memory forget {fact.id}")
+    assert facts.get(fact.id) is None
+    assert "forgotten" in out.getvalue()
+    assert not provider.requests
+    facts.close()

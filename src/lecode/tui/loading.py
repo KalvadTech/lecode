@@ -180,6 +180,7 @@ def build_load_report(
 ) -> list[LoadStep]:
     """Collect the per-subsystem lines describing what this session loaded."""
     from lecode.memory import memory_root  # deferred: pulls in the store layer
+    from lecode.memory.store import resolve_project_root
 
     steps: list[LoadStep] = []
 
@@ -226,7 +227,9 @@ def build_load_report(
 
     # memory
     if config.memory.enabled:
-        memory_file = memory_root(cwd) / "MEMORY.md"
+        memory_file = (
+            memory_root(runtime.ctx.project_root or resolve_project_root(cwd)) / "MEMORY.md"
+        )
         if memory_file.is_file():
             size = memory_file.stat().st_size
             steps.append(LoadStep("memory", f"long-term {size / 1024:.1f} KB injected"))

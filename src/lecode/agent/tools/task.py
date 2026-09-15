@@ -130,7 +130,9 @@ class TaskTool(Tool):
             return text, 0
 
         try:
-            record = manager.start("agent", description, body)
+            record = manager.start(
+                "agent", description, body, memory_generation=ctx.memory_generation
+            )
         except BackgroundError as e:
             return ToolResult(f"error: {e}", is_error=True)
         return ToolResult(f"background task {record.id} started ({agent_name}): {description}")

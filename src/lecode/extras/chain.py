@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from lecode.context.resources import load_text
+from lecode.providers.openai_compat import ProviderError
 
 #: The chain's phases, in order.
 PHASES = ("brainstorm", "plan", "code", "review")
@@ -49,6 +50,7 @@ async def run_chain(
     """
     outputs: list[tuple[str, str]] = []
     context: list[str] = []
+    generation: int | None = None
     for phase in phases:
         template = load_text("prompts", f"chain/{phase}.md", cwd=cwd)
         prompt = template.replace("{topic}", topic).strip()
@@ -58,7 +60,14 @@ async def run_chain(
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
-        result = await runner_factory().run(messages)
+        runner = runner_factory()
+        if generation is None:
+            generation = runner.memory_generation()
+        result = await runner.run(messages, expected_generation=generation)
+        if result.stop_reason == "context_overflow":
+            raise ProviderError(
+                f"chain paused during {phase}: context cannot safely fit", retryable=False
+            )
         outputs.append((phase, result.final_text))
         context.append(f"## {phase}\n\n{result.final_text}")
         if on_phase is not None:

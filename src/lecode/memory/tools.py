@@ -1,19 +1,42 @@
-"""The four memory tools: memory_write / memory_edit / memory_read / memory_search.
+"""Markdown memory tools and bounded, source-linked memory_recall.
 
 Targets are ``long_term`` (MEMORY.md), ``daily``, ``scratchpad``, and
 ``note:<name>``. The store lives on ``ctx.extras["memory"]`` (put there by
-``build_runtime`` when ``[memory] enabled = true``); all four tools return an
+``build_runtime`` when ``[memory] enabled = true``); tools return an
 explanatory error when memory is disabled or no store is attached.
 """
 
 from __future__ import annotations
 
+import json
+import re
+from contextlib import contextmanager
 from typing import Any
 
 from lecode.agent.tools.base import Tool, ToolContext, ToolResult
-from lecode.memory.store import MemoryStore
+from lecode.memory.facts import FactStore
+from lecode.memory.recall import RecallContext
+from lecode.memory.store import MemoryStore, resolve_project_root
+from lecode.session.storage import SourceRef
 
 TARGETS = ("long_term", "daily", "scratchpad", "note:<name>")
+
+
+@contextmanager
+def _markdown_guard(ctx: ToolContext):
+    if not ctx.config.memory.enabled:
+        yield
+        return
+    facts = ctx.extras.get("facts")
+    if ctx.recall_context is not None or (
+        ctx.memory_generation is not None and not isinstance(facts, FactStore)
+    ):
+        raise ValueError("durable modification requires a parent context")
+    if isinstance(facts, FactStore):
+        with facts.guard_generation(ctx.memory_generation):
+            yield
+    else:
+        yield  # Human-authored Markdown-only contexts have no managed fact store.
 
 
 def _store(ctx: ToolContext) -> MemoryStore | None:
@@ -65,6 +88,13 @@ class MemoryWriteTool(Tool):
         )
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        try:
+            with _markdown_guard(ctx):
+                return self._mutate(args, ctx)
+        except ValueError as e:
+            return ToolResult(f"error: {e}", is_error=True)
+
+    def _mutate(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         store = _store(ctx)
         if store is None:
             return _unavailable(ctx)
@@ -124,6 +154,13 @@ class MemoryEditTool(Tool):
         )
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        try:
+            with _markdown_guard(ctx):
+                return self._mutate(args, ctx)
+        except ValueError as e:
+            return ToolResult(f"error: {e}", is_error=True)
+
+    def _mutate(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         store = _store(ctx)
         if store is None:
             return _unavailable(ctx)
@@ -229,6 +266,150 @@ class MemorySearchTool(Tool):
         return ToolResult("\n".join(lines), metadata={"hits": len(hits)})
 
 
+class MemoryRecallTool(Tool):
+    def __init__(self, *, listing: bool = False) -> None:
+        super().__init__(
+            name="memory_list" if listing else "memory_recall",
+            description=(
+                "List project fact IDs, revisions, sources and validation status. "
+                "Bounded; page by offset."
+                if listing
+                else "Recall exact source evidence by fact ID or explicit session ID and "
+                "bounded sequence range. No global session scan."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "fact_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "start_seq": {"type": "integer"},
+                    "end_seq": {"type": "integer"},
+                    "offset": {"type": "integer"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        )
+        if listing:
+            self.parameters = {
+                "type": "object",
+                "properties": {"offset": {"type": "integer", "minimum": 0}},
+                "additionalProperties": False,
+            }
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if not ctx.config.memory.enabled:
+            return _unavailable(ctx)
+        recall = ctx.recall_context
+        if recall is None and ctx.session_store is not None:
+            recall = RecallContext(
+                ctx.session_store,
+                ctx.extras.get("facts"),
+                ctx.project_root or resolve_project_root(ctx.cwd),
+                session_id=ctx.session.id if ctx.session is not None else None,
+            )
+        if recall is None:
+            return _unavailable(ctx)
+        try:
+            return ToolResult(
+                recall.list_facts(args) if self.name == "memory_list" else recall.recall(args)
+            )
+        except ValueError as e:
+            return ToolResult(f"error: {e}", is_error=True)
+
+
+class MemoryChangeTool(Tool):
+    """Explicit selected-fact mutations, routed through normal permissions and hooks."""
+
+    def __init__(self, action: str) -> None:
+        properties: dict[str, Any] = {"fact_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+        if action == "correct":
+            properties.update(
+                {
+                    "text": {"type": "string"},
+                    "expected_revision": {"type": "integer", "minimum": 1},
+                    "source_snapshot": {
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string"},
+                            "seqs": {"type": "array", "items": {"type": "integer"}},
+                            "digest": {"type": "string"},
+                        },
+                        "required": ["session_id", "seqs", "digest"],
+                        "additionalProperties": False,
+                    },
+                }
+            )
+        super().__init__(
+            name=f"memory_{action}",
+            description=(
+                "Correct one fact by ID and expected revision with an explicit persisted "
+                "source_snapshot (session_id, seqs, digest from memory_recall)."
+                if action == "correct"
+                else "Forget one selected fact and its revisions. Excludes all contributing "
+                "sources from managed memory; raw history and Markdown remain."
+            ),
+            parameters={
+                "type": "object",
+                "properties": properties,
+                "required": list(properties),
+                "additionalProperties": False,
+            },
+        )
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        if not ctx.config.memory.enabled:
+            return _unavailable(ctx)
+        facts = ctx.extras.get("facts")
+        if not isinstance(facts, FactStore) or ctx.session is None or ctx.session_store is None:
+            return ToolResult(
+                "error: durable modification requires a parent session", is_error=True
+            )
+        if set(args) != set(self.parameters["required"]):
+            return ToolResult(
+                "error: supply exactly the required selected-fact arguments", is_error=True
+            )
+        fact_id = args["fact_id"]
+        if not isinstance(fact_id, str) or not re.fullmatch(r"[a-f0-9]{64}", fact_id):
+            return ToolResult("error: invalid fact ID", is_error=True)
+        try:
+            if self.name == "memory_forget":
+                changed = facts.forget(fact_id)
+                for session_id in facts.pending_forget_sessions(fact_id):
+                    ctx.session_store.flush_forgets(
+                        ctx.session if session_id == ctx.session.id else session_id
+                    )
+                return ToolResult(
+                    json.dumps({"fact_id": fact_id, "status": "forgotten", "changed": changed})
+                )
+            data = args["source_snapshot"]
+            if not isinstance(data, dict) or set(data) != {"session_id", "seqs", "digest"}:
+                raise ValueError("invalid source_snapshot")
+            if not isinstance(data["seqs"], list) or not isinstance(data["digest"], str):
+                raise ValueError("invalid source_snapshot")
+            ref = SourceRef(data["session_id"], tuple(data["seqs"]), data["digest"])
+            fact = facts.correct(
+                fact_id,
+                args["text"],
+                expected_revision=args["expected_revision"],
+                ref=ref,
+                sessions=ctx.session_store,
+                project_root=ctx.project_root or resolve_project_root(ctx.cwd),
+                expected_generation=ctx.memory_generation,
+            )
+            return ToolResult(json.dumps({"fact_id": fact.id, "revision": fact.revision}))
+        except (ValueError, KeyError) as e:
+            return ToolResult(f"error: {e}", is_error=True)
+
+
 def memory_tools() -> list[Tool]:
-    """The four memory tools, for registry assembly."""
-    return [MemoryWriteTool(), MemoryEditTool(), MemoryReadTool(), MemorySearchTool()]
+    """Memory readers and writers, for registry assembly."""
+    return [
+        MemoryWriteTool(),
+        MemoryEditTool(),
+        MemoryReadTool(),
+        MemorySearchTool(),
+        MemoryRecallTool(),
+        MemoryRecallTool(listing=True),
+        MemoryChangeTool("correct"),
+        MemoryChangeTool("forget"),
+    ]

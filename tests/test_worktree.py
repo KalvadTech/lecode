@@ -213,12 +213,20 @@ async def make_repo_app(tmp_path, monkeypatch):
 
 async def test_worktree_command_switches_cwd(tmp_path, monkeypatch):
     app, _, out = await make_repo_app(tmp_path, monkeypatch)
+    memory = app.runtime.ctx.extras["memory"]
+    memory.write_long_term("shared across checkouts")
     await app.handle_command("/worktree feat")
     expected = tmp_path / ".lecode" / "worktrees" / "feat"
     assert realpath(app.runtime.ctx.cwd) == realpath(expected)
     assert realpath(app.status.cwd) == realpath(expected)
     assert app._worktree.branch == "lecode/feat"
     assert "branch lecode/feat" in out.getvalue()
+    assert app.runtime.ctx.project_root == tmp_path
+    assert app.runtime.ctx.scope == "lecode/feat"
+    assert app.runtime.ctx.extras["memory"] is memory
+    from lecode.agent.builder import refresh_system_prompt
+
+    assert "shared across checkouts" in refresh_system_prompt(app.runtime)
 
 
 async def test_worktree_command_twice_refused(tmp_path, monkeypatch):
@@ -249,6 +257,8 @@ async def test_wt_exit_restores_cwd(tmp_path, monkeypatch):
     assert realpath(app.runtime.ctx.cwd) == realpath(tmp_path)
     assert app._worktree is None
     assert "left worktree 'feat'" in out.getvalue()
+    assert app.runtime.ctx.project_root == tmp_path
+    assert app.runtime.ctx.scope == str(tmp_path)
 
 
 async def test_wt_merge_command(tmp_path, monkeypatch):
@@ -311,6 +321,9 @@ def test_cli_worktree_flag_switches_cwd(cli_env, monkeypatch):
     assert expected.is_dir()
     session = FakeTui.instances[0].session
     assert realpath(session.meta.cwd) == realpath(expected)
+    ctx = FakeTui.instances[0].runtime.ctx
+    assert ctx.project_root == cli_env
+    assert ctx.scope == "lecode/feat"
     assert "worktree kept at" in result.output
     assert "git merge lecode/feat" in result.output
 

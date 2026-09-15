@@ -72,6 +72,7 @@ class BackgroundTask:
     #: tasks) falls back to cancelling the asyncio task.
     term: Callable[[], None] | None = None
     kill: Callable[[], None] | None = None
+    memory_generation: int = 0
 
     @property
     def age_s(self) -> float:
@@ -106,10 +107,16 @@ async def _await_done(record: BackgroundTask, timeout: float) -> bool:
 class BackgroundTaskManager:
     """Registry + lifecycle for detached tasks (cap, output, stop, shutdown)."""
 
-    def __init__(self, *, notify: Callable[[str], Any] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        notify: Callable[[str], Any] | None = None,
+        generation_reader: Callable[[], int] = lambda: 0,
+    ) -> None:
         self._records: dict[str, BackgroundTask] = {}
         self._counter = 0
-        self._pending: list[str] = []
+        self._pending: list[BackgroundTask] = []
+        self._generation_reader = generation_reader
         self._notify_tasks: set[asyncio.Task[Any]] = set()
         #: Optional completion reporter (the TUI installs ``feed.info``).
         self.notify = notify
@@ -117,7 +124,8 @@ class BackgroundTaskManager:
     # -- inspection -------------------------------------------------------------
 
     def tasks(self) -> list[BackgroundTask]:
-        return list(self._records.values())
+        generation = self._generation_reader()
+        return [r for r in self._records.values() if r.memory_generation == generation]
 
     def get(self, task_id: str) -> BackgroundTask | None:
         return self._records.get(task_id)
@@ -126,6 +134,8 @@ class BackgroundTaskManager:
         record = self._records.get(task_id)
         if record is None:
             raise BackgroundError(f"unknown background task: {task_id}")
+        if record.memory_generation != self._generation_reader():
+            raise BackgroundError("task output invalidated by memory exclusions")
         return record
 
     def output(self, task_id: str, tail_bytes: int = TAIL_CAP_BYTES) -> str:
@@ -149,8 +159,12 @@ class BackgroundTaskManager:
         *,
         term: Callable[[], None] | None = None,
         kill: Callable[[], None] | None = None,
+        memory_generation: int | None = None,
     ) -> BackgroundTask:
         """Spawn ``body`` as a detached task; raises at the live-task cap."""
+        generation = self._generation_reader()
+        if memory_generation is not None and memory_generation != generation:
+            raise BackgroundError("task input invalidated by memory exclusions")
         live = sum(1 for r in self._records.values() if r.status == "running")
         if live >= MAX_LIVE_TASKS:
             raise BackgroundError(
@@ -171,6 +185,7 @@ class BackgroundTaskManager:
             log_path=log_dir / f"{task_id}.log",
             term=term,
             kill=kill,
+            memory_generation=generation,
         )
 
         def emit(chunk: bytes) -> None:
@@ -213,14 +228,14 @@ class BackgroundTaskManager:
         if not await _await_done(record, STOP_GRACE_S):
             self._kill(record)
             await _await_done(record, 2.0)
-        return record
+        return self._require(task_id)
 
     async def wait(self, task_id: str, timeout: float) -> BackgroundTask:
         """Await completion (up to ``timeout``) and return the record."""
         record = self._require(task_id)
         if record.status == "running":
             await _await_done(record, timeout)
-        return record
+        return self._require(task_id)
 
     async def shutdown(self) -> None:
         """Stop every live task (SIGTERM → grace → SIGKILL); used at teardown."""
@@ -246,11 +261,12 @@ class BackgroundTaskManager:
     def drain_notifications(self) -> list[str]:
         """Pop the completion notifications queued since the last drain."""
         pending, self._pending = self._pending, []
-        return pending
+        generation = self._generation_reader()
+        return [notification_text(r) for r in pending if r.memory_generation == generation]
 
     def _announce(self, record: BackgroundTask) -> None:
         message = notification_text(record)
-        self._pending.append(message)
+        self._pending.append(record)
         if self.notify is None:
             return
         try:
@@ -285,6 +301,8 @@ def start_shell_task(
     cwd: Path,
     timeout: float,
     idle_timeout: float,
+    *,
+    memory_generation: int | None = None,
 ) -> BackgroundTask:
     """Spawn a detached shell command with the bash tool's kill discipline."""
     from lecode.agent.tools.bash import _kill_tree, _run_shell
@@ -325,4 +343,6 @@ def start_shell_task(
         if proc is not None:
             _kill_tree(proc)
 
-    return manager.start("bash", command, body, term=term, kill=kill)
+    return manager.start(
+        "bash", command, body, term=term, kill=kill, memory_generation=memory_generation
+    )

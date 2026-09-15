@@ -353,6 +353,15 @@ async def test_compact_too_little_history(tmp_path, monkeypatch):
     assert "not enough history to compact" in out.getvalue()
 
 
+async def test_compact_rejects_busy_turn(tmp_path, monkeypatch):
+    app, provider, out = make_app(tmp_path, monkeypatch, [{"text": "must not call"}])
+    await _fill_session(app, 5)
+    monkeypatch.setattr(app, "turn_busy", lambda: True)
+    await app.handle_command("/compact")
+    assert not provider.requests
+    assert "turn" in out.getvalue() and "running" in out.getvalue()
+
+
 async def test_compact_provider_failure(tmp_path, monkeypatch):
     from lecode.providers.openai_compat import ProviderError
 

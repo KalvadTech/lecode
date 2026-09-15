@@ -38,6 +38,8 @@ class MessageRecord(BaseModel):
     message: dict[str, Any]
     #: Token/cost usage for assistant messages: input_tokens/output_tokens/cost_usd.
     usage: dict[str, Any] | None = None
+    #: Exclusion epoch captured before producing managed derived content.
+    memory_generation: int | None = None
 
 
 class EventRecord(BaseModel):

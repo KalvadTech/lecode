@@ -81,6 +81,8 @@ READ_TOOLS = frozenset(
         "list_dir",
         "lsp_diagnostics",
         "memory_read",
+        "memory_recall",
+        "memory_list",
         "memory_search",
         "ask_user",  # only asks; never touches anything itself
         "task",  # dispatches a subagent; its own calls are gated individually
@@ -172,6 +174,15 @@ class PermissionChecker:
     def set_mode(self, mode: PermissionMode) -> None:
         """Switch the fallback mode (``/permissions``); overlays still win."""
         self._mode = mode
+
+    def allows_memory_learning(self) -> bool:
+        """Background-free compaction learning never prompts or consumes tool doom counters."""
+        if self._mode == "readonly" or (self._overlay and self._overlay.mode == "readonly"):
+            return False
+        return all(
+            self._base_decision(name, "", self._overlay).decision == Decision.ALLOW
+            for name in ("memory_write", "memory_correct")
+        )
 
     def for_agent(self, overlay: AgentOverlay) -> PermissionChecker:
         """A derived checker with the overlay applied (shares doom tracking)."""

@@ -55,9 +55,9 @@ class CompactionConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = True
-    buffer_tokens: int = 20000
+    buffer_tokens: int = Field(default=20000, ge=1)
     on_overflow: Literal["continue", "pause"] = "continue"
-    mid_turn_threshold: float | None = None
+    mid_turn_threshold: float | None = Field(default=None, gt=0)
 
 
 class AgentConfig(BaseModel):
@@ -205,12 +205,14 @@ class LspConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
-    """``[memory]`` — persistent Markdown memory store."""
+    """``[memory]`` — Markdown and optional source-backed durable learning."""
 
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = True
     max_bytes: int = 32768
+    auto_learn: bool = Field(default=False, strict=True)
+    facts_max_bytes: int = Field(default=8192, ge=0, le=65536, strict=True)
 
 
 class PierreConfig(BaseModel):

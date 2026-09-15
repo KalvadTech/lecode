@@ -493,6 +493,11 @@ class TuiApp:
         self._cwd = path
         ctx = self._runtime.ctx
         ctx.cwd = path
+        ctx.scope = (
+            self._worktree.branch
+            if self._worktree is not None and path.resolve() == self._worktree.path.resolve()
+            else str(path.resolve())
+        )
         base = PermissionChecker(
             self._config,
             session_perms=ctx.session_perms,
@@ -1097,13 +1102,17 @@ class TuiApp:
             mcp = self._runtime.ctx.extras.get(MCP_EXTRA)
             if mcp is not None:
                 await mcp.shutdown()
+            self._runtime.close()
             if self._input_area is not None and self._input_area.text.strip():
                 self._input_history.save_draft(self._input_area.text)
             self._app = None
             if self._session_lock is not None:
                 self._session_lock.release()
                 self._session_lock = None
-        self.print_totals()
+        try:
+            self.print_totals()
+        finally:
+            self._runtime.close()  # totals can reopen the session store's lazy fact reader
         return EXIT_OK
 
     async def _attach_mcp(self) -> None:
@@ -1625,6 +1634,7 @@ class TuiApp:
                 self._runtime.registry,
                 self._runtime.ctx,
                 catalog=self.catalog,
+                refresh_prompt=lambda: refresh_system_prompt(self._runtime),
             )
 
         def on_phase(phase: str, output: str) -> None:

@@ -80,6 +80,37 @@ Automatic durable learning stays disabled until phase 5 is green.
   recall, >5-compaction continuity, exact tool-output recovery, interruption
   recovery, and total tokens/cost/latency.
 
+Implementation status (2026-09-15): implemented with offline scripted-provider
+acceptance coverage. **No live-provider evaluation performed; auto-learning stays
+off by default.** This is not a measured recall-quality or cost/latency result.
+
+- Both compaction callers pass live parent context. After a successful summary,
+  one bounded call uses the same provider/current model and newly covered raw
+  text, with strict JSON and captured exact source ranges. Read-only, disabled,
+  child and nonpersistent contexts skip extraction.
+- Promotion accepts a narrow exact-user preference vocabulary and literal local
+  `read`-corroborated file observations. Unsupported claims are rejected;
+  conflicts/corrections become inspectable proposals, not automatic revisions.
+  Comparison is bounded and model-assisted, not semantic contradiction proof.
+- Phase 5 transactions now support automatic remember's generation/source-version
+  recheck and normalized exact-text deduplication against all revisions. Source
+  snapshots precede the await; stale candidates are discarded. Failed learning
+  preserves a successful summary and records call usage separately once.
+- Runtime prompt refresh includes only valid durable evidence, whole facts and
+  revision/source references, within `facts_max_bytes` and the total `max_bytes`
+  budget including scratchpad. `/memory facts` and read-class `memory_list` expose
+  IDs/status and the latest learning proposals. Base prompt edits remain separate
+  from managed injection; runtime/session-store close APIs release fact connections.
+- Scripted public-path checks cover opt-in/off, cross-session injection, six
+  compactions, exact source recall, unsupported/tool-instruction rejection,
+  duplicates/conflicts, await races/failures, source invalidation, corrections,
+  clear/undo/redo, byte bounds and combined usage. Individual files and focused
+   subsets were used during each phase. Final validation below includes the full
+   suite; no live-provider benchmark was run.
+- Actual configuration, conservative acceptance grammar, bounded-context and
+  proposal-inspection limitations, and the paired baseline/hybrid evaluation
+  checklist are in [memory.md](memory.md). The historical comparison is unchanged.
+
 ## Non-goals
 
 No embeddings or vector database, no background worker pool, no framework
@@ -102,5 +133,21 @@ silent legacy-note merging.
 
 ## Validation
 
-Every phase: `uv run python -m pytest` on the touched files plus
-`uv run ruff check`. Full suite once at the end.
+Individual touched test files and focused subsets were run during each phase.
+After the final two-axis review and its fixes, the orchestrator ran:
+
+```bash
+uv sync --locked --extra telemetry
+uv run --no-sync python -m pytest -q
+uv run --no-sync ruff check src tests
+uv run --no-sync ruff format --check src tests
+git diff --check
+```
+
+Result: **1,484 tests passed**; lint, formatting and whitespace checks passed.
+The telemetry extra was already declared and locked; no dependency files changed.
+No standalone typechecker is configured or installed, so no typecheck result is
+claimed. No live-provider recall, cost or latency benchmark was performed.
+
+Final review: no remaining hard Standards findings or Spec findings. A small
+duplicate recall-context construction remains a nonblocking maintainability note.
