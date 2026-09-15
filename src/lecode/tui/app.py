@@ -59,6 +59,7 @@ from lecode.agent.runner import (
 from lecode.config.models import PermissionMode, ThinkingLevel
 from lecode.context.agents import parse_mentions
 from lecode.context.resources import load_text
+from lecode.extras import herdr
 from lecode.extras.background import BACKGROUND_EXTRA
 from lecode.extras.chain import run_chain
 from lecode.extras.loop_mode import run_plan_loop
@@ -441,6 +442,7 @@ class TuiApp:
             hooks.handlers.get(SESSION_END) or hooks.handlers.get(SESSION_START)
         ):
             self._spawn(self._switch_hooks(old_session, session))
+        herdr.report("idle", session_id=session.id)
         return True
 
     def _reload_history(self) -> None:
@@ -1050,6 +1052,7 @@ class TuiApp:
         self._runtime.ctx.approval_callback = self._request_approval
         self._runtime.ctx.question_callback = self._request_question
         await self._fire_hook(SESSION_START)
+        herdr.report("idle", session_id=self._session.id)
         # MCP attaches in the background so the chat opens immediately;
         # per-server status lands in the feed when the connect finishes.
         if self._runtime.ctx.extras.get(MCP_EXTRA) is None:
@@ -1095,6 +1098,7 @@ class TuiApp:
             if self._session_lock is not None:
                 self._session_lock.release()
                 self._session_lock = None
+            herdr.release()
         self.print_totals()
         return EXIT_OK
 
@@ -1362,6 +1366,7 @@ class TuiApp:
         if reason:
             self._feed.info(reason)  # doom-loop coach reasons land here too
         self._feed.permission(approval_prompt_text(tool_name, target))
+        herdr.report("blocked", message=f"approval needed: {tool_name}")
         future = self._approval.request(tool_name, target, reason)
         self._status.state = StatusLineState.AWAITING_APPROVAL
         self._invalidate()
@@ -1372,6 +1377,7 @@ class TuiApp:
         finally:
             self._approval.cancel()
             self._status.state = StatusLineState.RUNNING
+            herdr.report("working")
             self._invalidate()
 
     def _render_question(self) -> None:
@@ -1393,6 +1399,7 @@ class TuiApp:
         """``ctx.question_callback``: inline arrow-key picker during a turn."""
         future = self._question.request(questions)
         self._render_question()
+        herdr.report("blocked", message="answer needed: ask_user")
         self._status.state = StatusLineState.QUESTION
         self._invalidate()
         self._spawn(self._notifier.approval_needed("ask_user"))
@@ -1402,6 +1409,7 @@ class TuiApp:
         finally:
             self._question.cancel()
             self._status.state = StatusLineState.RUNNING
+            herdr.report("working")
             self._invalidate()
 
     # -- turns ------------------------------------------------------------------
@@ -1475,6 +1483,7 @@ class TuiApp:
         self._feed.stream_start()
         self._activity("thinking")
         self._signals.emit(START)
+        herdr.report("working", session_id=self._session.id)
         result = None
         cancelled = False
         try:
@@ -1487,6 +1496,7 @@ class TuiApp:
         finally:
             self._feed.stream_end()
             self._signals.emit(STOP)
+            herdr.report("idle")
             self._status.state = StatusLineState.IDLE
             self._status.activity = None
         if result is not None:
@@ -1529,6 +1539,7 @@ class TuiApp:
         query — the exchange is not persisted to the session."""
         self._status.state = StatusLineState.RUNNING
         self._activity(f"@{name} working")
+        herdr.report("working", session_id=self._session.id)
         outcome: SubagentOutcome | None = None
         try:
             outcome = await run_subagent(
@@ -1545,6 +1556,7 @@ class TuiApp:
             self._feed.info("turn cancelled")
         finally:
             self._status.state = StatusLineState.IDLE
+            herdr.report("idle")
             self._status.activity = None
         if outcome is not None:
             self._feed.assistant_text(outcome.text)
@@ -1572,6 +1584,7 @@ class TuiApp:
 
         async def _loop() -> None:
             self._status.state = StatusLineState.RUNNING
+            herdr.report("working", session_id=self._session.id)
             try:
                 result = await run_plan_loop(
                     run_iteration,
@@ -1589,6 +1602,7 @@ class TuiApp:
             finally:
                 self._feed.stream_end()
                 self._status.state = StatusLineState.IDLE
+                herdr.report("idle")
                 self._status.activity = None
             if result.stop_reason == "done":
                 self._feed.info(f"loop done: plan complete after {result.iterations} iteration(s)")
@@ -1624,6 +1638,7 @@ class TuiApp:
 
         self._status.state = StatusLineState.RUNNING
         self._activity("chain running")
+        herdr.report("working", session_id=self._session.id)
         try:
             result = await run_chain(
                 factory,
@@ -1640,6 +1655,7 @@ class TuiApp:
             return
         finally:
             self._status.state = StatusLineState.IDLE
+            herdr.report("idle")
             self._status.activity = None
         if result.final:
             self._last_response = result.final
