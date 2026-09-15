@@ -163,9 +163,15 @@ class Feed:
         )
 
     def llm_response(
-        self, model: str, turn: int, input_tokens: int, output_tokens: int, cost_usd: float
+        self,
+        model: str,
+        turn: int,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float,
+        elapsed_s: float = 0.0,
     ) -> None:
-        """Log one finished LLM call: ``← model (round N) · ↑in · ↓out · $cost``."""
+        """Log per-call usage and output tok/s over model-call time when available."""
         # The streamed answer text has no trailing newline yet — close it first.
         self._flush_stream()
         line = (
@@ -173,6 +179,8 @@ class Feed:
             f" · ↑{human_tokens(input_tokens)} in · ↓{human_tokens(output_tokens)} out"
             f" · {format_cost(cost_usd)}"
         )
+        if elapsed_s > 0 and output_tokens > 0:
+            line += f" · {output_tokens / elapsed_s:.1f} tok/s"
         self._console.print(Text(line, style=self._theme.muted))
 
     def tool_call(self, name: str, args_preview: str) -> None:
