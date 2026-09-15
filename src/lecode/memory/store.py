@@ -3,7 +3,7 @@
 Layout under ``<config_dir>/memory/<project-slug>/``::
 
     MEMORY.md            long-term memory (auto-injected, capped for injection)
-    daily/YYYY-MM-DD.md  daily logs (compaction summaries land here too)
+    daily/YYYY-MM-DD.md  daily logs
     scratchpad.md        project checklist
     notes/<name>.md      named notes
 

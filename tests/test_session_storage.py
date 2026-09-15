@@ -213,11 +213,44 @@ def test_load_for_model_without_compaction(store, session):
     assert [m["content"] for m in replayed] == ["first", "answer one", "second", "answer two"]
 
 
-def test_compact_then_tombstone_both_apply(store, session):
+def test_compact_then_tombstone_drops_undone_summary(store, session):
     store.compact(session, "S", keep_from_seq=3)
-    store.undo(session)  # hides seq 3+ -> nothing visible from the kept tail
+    store.undo(session)  # hides seq 3+ -> the compact event is undone too
     replayed = store.load_for_model(session)
-    assert [m["content"] for m in replayed] == ["S"]
+    assert [m["content"] for m in replayed] == ["first", "answer one"]
+
+
+def test_summary_intersecting_tombstone_drops_then_redo_restores(store, session):
+    store.append_message(session, {"role": "user", "content": "third"})  # seq 5
+    store.append_message(session, {"role": "assistant", "content": "answer three"})  # seq 6
+    store.compact(session, "S", keep_from_seq=5, source_start_seq=1, source_end_seq=4)  # seq 7
+    store.rewind_to(session, 2)  # hides seq 3+ including part of the covered range
+
+    assert [m["content"] for m in store.load_for_model(session)] == ["first", "answer one"]
+    assert store.redo(session) is True
+    # restored by cancelling the tombstone, no second compaction event
+    assert [m["content"] for m in store.load_for_model(session)] == [
+        "S",
+        "third",
+        "answer three",
+    ]
+    compacts = [
+        r for r in store.read_records(session) if isinstance(r, EventRecord) and r.kind == "compact"
+    ]
+    assert len(compacts) == 1
+
+
+def test_summary_survives_tombstone_outside_covered_range(store, session):
+    store.compact(session, "S", keep_from_seq=3, source_start_seq=1, source_end_seq=2)
+    store.append_message(session, {"role": "user", "content": "third"})  # seq 6
+    store.append_message(session, {"role": "assistant", "content": "answer three"})  # seq 7
+    store.undo(session)  # hides the last turn (seqs 6, 7), not the covered range
+
+    assert [m["content"] for m in store.load_for_model(session)] == [
+        "S",
+        "second",
+        "answer two",
+    ]
 
 
 def test_permission_grant_round_trip(store, session):

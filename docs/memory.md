@@ -10,7 +10,7 @@ project path plus a short hash):
 
 ```
 MEMORY.md            long-term memory — auto-injected into the system prompt
-daily/YYYY-MM-DD.md  daily logs (compaction summaries land here too)
+daily/YYYY-MM-DD.md  daily logs
 scratchpad.md        project checklist
 notes/<name>.md      named notes
 ```

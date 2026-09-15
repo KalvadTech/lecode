@@ -20,7 +20,7 @@ import typer
 from typer.core import TyperGroup, TyperOption
 
 from lecode import __version__
-from lecode.agent.builder import build_runtime
+from lecode.agent.builder import build_runtime, refresh_system_prompt
 from lecode.agent.runner import AgentRunner, RunResult
 from lecode.auth import AuthError, resolve_api_key
 from lecode.config.loader import config_dir, find_config_file, load_config
@@ -341,6 +341,7 @@ def run_headless(
         session=session,
         store=store,
         catalog=models.catalog,
+        refresh_prompt=lambda: refresh_system_prompt(runtime),
     )
     signals = StatusEmitter(config.signals, session=session.name)
 
@@ -455,6 +456,7 @@ def run_loop_mode(
         session=session,
         store=store,
         catalog=models.catalog,
+        refresh_prompt=lambda: refresh_system_prompt(runtime),
     )
     signals = StatusEmitter(config.signals, session=session.name)
 

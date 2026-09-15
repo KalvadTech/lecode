@@ -40,6 +40,7 @@ from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Frame, TextArea
 from rich.console import Console
 
+from lecode.agent.builder import refresh_system_prompt
 from lecode.agent.runner import (
     AgentRunner,
     CompactionFinished,
@@ -245,6 +246,7 @@ class TuiApp:
             steer_queue=self._steer_queue,
             input_queue=self._input_queue,
             catalog=catalog,
+            refresh_prompt=lambda: refresh_system_prompt(self._runtime),
         )
         # Subagent progress (the task tool and direct @agent turns) renders
         # inline through the feed; installed here so tests driving _submit
@@ -423,6 +425,7 @@ class TuiApp:
         if self._runtime.hooks is not None:
             self._runtime.hooks.session = session
         self._agent_name = session.meta.agent or "build"
+        self._runtime.agent_name = self._agent_name
         checker = self._base_checker
         agent = self._runtime.agents.get(self._agent_name)
         if agent is not None and agent.overlay is not None:
@@ -444,7 +447,12 @@ class TuiApp:
         return True
 
     def _reload_history(self) -> None:
-        """Rebuild the in-memory history from the session file."""
+        """Rebuild the in-memory history from the session file.
+
+        The system prompt is recomputed first, so memory writes and context
+        edits made since the last build are visible from the next turn on.
+        """
+        refresh_system_prompt(self._runtime)
         self._history = [{"role": "system", "content": self._runtime.system_prompt}]
         self._history += self._store.load_for_model(self._session)
         # Restore the statusline's context/cost/token lines from history.
@@ -1739,6 +1747,7 @@ class TuiApp:
     def cycle_agent(self) -> str:
         """Tab on empty input: switch to the next primary agent."""
         self._agent_name = self._runtime.agents.cycle(self._agent_name)
+        self._runtime.agent_name = self._agent_name
         agent = self._runtime.agents.get(self._agent_name)
         checker = self._base_checker
         if agent is not None and agent.overlay is not None:

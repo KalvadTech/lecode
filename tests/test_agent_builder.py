@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from lecode.agent.builder import build_runtime
+from lecode.agent.builder import build_runtime, refresh_system_prompt
 from lecode.agent.tools import core_tools
 from lecode.config.models import Config
+from lecode.memory import MemoryStore, memory_root
 from lecode.permission import Decision
 
 
@@ -119,3 +120,29 @@ def test_runtime_exposes_registries(cwd):
     runtime = build_runtime(Config(), cwd)
     assert runtime.agents.get("build") is not None
     assert len(runtime.skills) == 0
+
+
+def test_refresh_system_prompt_rereads_context_and_memory(cwd):
+    runtime = build_runtime(Config(), cwd)
+    (cwd / "AGENTS.md").write_text("# Project rules\n\nAlways run ruff.\n", encoding="utf-8")
+    MemoryStore(memory_root(cwd)).write_long_term("Remember the alpaca.")
+
+    refresh_system_prompt(runtime)
+
+    assert "Always run ruff." in runtime.system_prompt
+    assert "Remember the alpaca." in runtime.system_prompt
+
+
+def test_refresh_system_prompt_keeps_agent_body_and_skills(cwd):
+    pack = cwd / ".agents" / "skills" / "review"
+    pack.mkdir(parents=True)
+    (pack / "SKILL.md").write_text(
+        "---\ndescription: Code review checklist\n---\nReview carefully.\n", encoding="utf-8"
+    )
+    runtime = build_runtime(Config(), cwd, agent_name="plan")
+
+    refresh_system_prompt(runtime)
+
+    assert runtime.system_prompt.startswith("You are lecode")
+    assert "planning mode" in runtime.system_prompt
+    assert "## Available skills" in runtime.system_prompt

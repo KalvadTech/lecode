@@ -83,6 +83,27 @@ async def test_single_turn_done(tool_ctx):
     assert provider.requests[0]["tools"][0]["function"]["name"] == "echo"
 
 
+async def test_run_refreshes_system_prompt_in_place(tool_ctx):
+    provider = FakeProvider([{"text": "done"}])
+    runner = AgentRunner(
+        provider,
+        ToolRegistry([]),
+        tool_ctx,
+        refresh_prompt=lambda: "REFRESHED PROMPT",
+    )
+
+    await runner.run(
+        [
+            {"role": "system", "content": "stale prompt"},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+
+    messages = provider.requests[0]["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]  # replaced, not appended
+    assert messages[0]["content"] == "REFRESHED PROMPT"
+
+
 async def test_llm_call_event_per_round(tool_ctx):
     script = [
         {

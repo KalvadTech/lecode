@@ -154,11 +154,13 @@ async def _fake_editor(tmp_path, monkeypatch, body: str) -> None:
 
 
 async def test_editsys_saves_session_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
     await _fake_editor(tmp_path, monkeypatch, "printf 'CUSTOM SYSTEM PROMPT' > \"$1\"")
     app, _, out = make_app(tmp_path, monkeypatch, [])
     await app.handle_command("/editsys")
     assert app.config.llm.system_prompt.custom == "CUSTOM SYSTEM PROMPT"
     assert app.runtime.system_prompt == "CUSTOM SYSTEM PROMPT"
+    assert app._history[0]["content"] == "CUSTOM SYSTEM PROMPT"
     assert "overridden for this session" in out.getvalue()
 
 

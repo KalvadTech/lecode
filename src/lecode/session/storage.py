@@ -375,6 +375,25 @@ class SessionStore:
     def _is_hidden(self, record_seq: int, tombstones: list[TombstoneRecord]) -> bool:
         return any(t.up_to_seq < record_seq < t.seq for t in tombstones)
 
+    def _visible_messages(
+        self, records: list[Record], tombstones: list[TombstoneRecord]
+    ) -> list[MessageRecord]:
+        """Messages replay sees: tombstones and the latest ``clear`` applied."""
+        clears = [r for r in records if isinstance(r, EventRecord) and r.kind == "clear"]
+        clear_from = clears[-1].seq if clears else None
+        return [
+            r
+            for r in records
+            if isinstance(r, MessageRecord)
+            and not self._is_hidden(r.seq, tombstones)
+            and (clear_from is None or r.seq > clear_from)
+        ]
+
+    def visible_messages(self, session: Session) -> list[MessageRecord]:
+        """The messages compaction may summarize, matching replay visibility."""
+        records = self.read_records(session)
+        return self._visible_messages(records, self._active_tombstones(records))
+
     def load_messages(self, session: Session) -> list[MessageRecord]:
         """The logical message history with tombstones applied."""
         records = self.read_records(session)
@@ -415,19 +434,52 @@ class SessionStore:
 
     # -- compaction ----------------------------------------------------------
 
-    def compact(self, session: Session, summary: str, keep_from_seq: int) -> EventRecord:
-        """Record a compaction: summary + first kept message seq."""
-        return self.append_event(
-            session, "compact", {"summary": summary, "keep_from_seq": keep_from_seq}
-        )
+    def compact(
+        self,
+        session: Session,
+        summary: str,
+        keep_from_seq: int,
+        *,
+        source_start_seq: int | None = None,
+        source_end_seq: int | None = None,
+    ) -> EventRecord:
+        """Record a compaction: summary, first kept seq, and the covered range.
+
+        Legacy events recorded without ``source_start_seq``/``source_end_seq``
+        still load; the range is optional for backwards compatibility.
+        """
+        data: dict[str, Any] = {"summary": summary, "keep_from_seq": keep_from_seq}
+        if source_start_seq is not None and source_end_seq is not None:
+            data["source_start_seq"] = source_start_seq
+            data["source_end_seq"] = source_end_seq
+        return self.append_event(session, "compact", data)
+
+    def _summary_intersects_tombstone(
+        self, compact: EventRecord, tombstones: list[TombstoneRecord]
+    ) -> bool:
+        """Whether an active tombstone undoes the compaction or its coverage.
+
+        A compact event inside a tombstoned suffix was itself undone; legacy
+        events without a recorded source range can only be checked this way.
+        A recorded range intersects when it overlaps the hidden window
+        ``(up_to_seq, tombstone.seq)``.
+        """
+        if self._is_hidden(compact.seq, tombstones):
+            return True
+        start = compact.data.get("source_start_seq")
+        end = compact.data.get("source_end_seq")
+        if start is None or end is None:
+            return False
+        return any(int(start) < t.seq and int(end) > t.up_to_seq for t in tombstones)
 
     def load_for_model(self, session: Session) -> list[dict[str, Any]]:
         """What gets replayed into the model context.
 
-        The latest compact event (if any) contributes a leading system message
-        with the summary plus the kept tail; tombstones still apply. A later
-        ``clear`` event supersedes the compaction: everything before it is
-        hidden and no summary is injected.
+        The latest compact event contributes a leading system message with the
+        summary plus the kept tail, but only while no active tombstone undoes
+        it or intersects its covered range. A later ``clear`` event supersedes
+        the compaction: everything before it is hidden and no summary is
+        injected. Visibility otherwise matches :meth:`visible_messages`.
         """
         records = self.read_records(session)
         tombstones = self._active_tombstones(records)
@@ -438,15 +490,12 @@ class SessionStore:
         out: list[dict[str, Any]] = []
         if compacts and (clear_from is None or compacts[-1].seq > clear_from):
             latest = compacts[-1]
-            keep_from = int(latest.data.get("keep_from_seq", 0))
-            out.append({"role": "system", "content": str(latest.data.get("summary", ""))})
+            if not self._summary_intersects_tombstone(latest, tombstones):
+                keep_from = int(latest.data.get("keep_from_seq", 0))
+                out.append({"role": "system", "content": str(latest.data.get("summary", ""))})
         if clear_from is not None and (keep_from is None or clear_from >= keep_from):
             keep_from = clear_from
-        for r in records:
-            if not isinstance(r, MessageRecord):
-                continue
-            if self._is_hidden(r.seq, tombstones):
-                continue
+        for r in self._visible_messages(records, tombstones):
             if keep_from is not None and r.seq < keep_from:
                 continue
             out.append(dict(r.message))

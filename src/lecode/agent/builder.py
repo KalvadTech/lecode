@@ -38,6 +38,31 @@ class Runtime:
     skills: SkillRegistry = field(default_factory=SkillRegistry)
     hooks: HookDispatcher | None = None
     warnings: list[str] = field(default_factory=list)
+    #: Selected agent, kept so a refresh can re-render its prompt body.
+    agent_name: str | None = None
+
+
+def refresh_system_prompt(runtime: Runtime) -> str:
+    """Recompute the system prompt from live runtime context.
+
+    Re-reads the AGENTS.md walk and the memory store (so writes from a previous
+    turn become visible), re-renders the agent body and skills listing, then
+    assigns the result to ``runtime.system_prompt`` and returns it.
+    """
+    extra_parts: list[str] = []
+    agent = runtime.agents.get(runtime.agent_name) if runtime.agent_name else None
+    if agent is not None and agent.body:
+        extra_parts.append(agent.body)
+    listing = runtime.skills.render_listing()
+    if listing:
+        extra_parts.append(listing)
+    runtime.system_prompt = build_system_prompt(
+        runtime.ctx.config,
+        runtime.ctx.cwd,
+        memory_text=memory_injection(runtime.ctx.config, runtime.ctx.cwd),
+        extra="\n\n".join(extra_parts) or None,
+    )
+    return runtime.system_prompt
 
 
 def build_runtime(
@@ -122,25 +147,15 @@ def build_runtime(
     # Background-task manager (bash/task run_in_background, tasks_* tools).
     ctx.extras[BACKGROUND_EXTRA] = BackgroundTaskManager()
 
-    extra_parts: list[str] = []
-    if agent is not None and agent.body:
-        extra_parts.append(agent.body)
-    listing = skills.render_listing()
-    if listing:
-        extra_parts.append(listing)
-    system_prompt = build_system_prompt(
-        config,
-        cwd,
-        memory_text=memory_injection(config, cwd),
-        extra="\n\n".join(extra_parts) or None,
-    )
-
-    return Runtime(
+    runtime = Runtime(
         registry=registry,
         ctx=ctx,
-        system_prompt=system_prompt,
+        system_prompt="",
         agents=agents,
         skills=skills,
         hooks=hooks,
         warnings=warnings,
+        agent_name=agent_name,
     )
+    refresh_system_prompt(runtime)
+    return runtime

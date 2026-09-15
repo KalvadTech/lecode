@@ -1,10 +1,10 @@
 """Context compaction: summarize old messages, keep the recent tail.
 
 The summarize-and-record core shared by ``/compact`` and the runner's
-automatic trigger. The provider condenses everything older than the last
-few messages; the summary is recorded as an append-only compact event, so
-the full history stays on disk and :meth:`SessionStore.load_for_model`
-replays summary + tail.
+automatic trigger. The provider condenses a bounded prefix of the visible
+messages; the summary and its exact covered range are recorded as an
+append-only compact event, so the full history stays on disk and
+:meth:`SessionStore.load_for_model` replays summary + tail.
 """
 
 from __future__ import annotations
@@ -38,8 +38,28 @@ def _text_of(message: dict) -> str:
     return str(content or "").strip()
 
 
-def _clip(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+def _coverage(messages: list[Any]) -> int:
+    """How many leading visible messages the summarizer can wholly cover.
+
+    Taking a prefix (never truncating from the end) keeps the summarized range
+    equal to the range replay removes. The kept tail never starts on a ``tool``
+    message: the boundary walks back until the assistant that issued the
+    matching tool calls is kept too. Zero when nothing is safely coverable.
+    """
+    limit = len(messages) - COMPACT_KEEP_TAIL
+    if limit <= 0:
+        return 0
+    covered = 0
+    size = 0
+    while covered < limit:
+        line = f"{messages[covered].role}: {_text_of(messages[covered].message)}"
+        size += len(line) + (1 if covered else 0)
+        if size > COMPACT_TRANSCRIPT_CAP:
+            break
+        covered += 1
+    while covered and messages[covered].role == "tool":
+        covered -= 1
+    return covered
 
 
 async def compact_session(
@@ -50,19 +70,21 @@ async def compact_session(
     *,
     hooks: HookDispatcher | None = None,
 ) -> str | None:
-    """Summarize all but the last few messages and record the compaction.
+    """Summarize a prefix of the visible messages and record the compaction.
 
-    Returns the summary, or ``None`` when there is too little history or the
-    provider call failed — callers continue uncompacted (fail-open).
-    ``hooks`` (when given) fires the observational PreCompact/PostCompact
-    events around the summarize-and-record step.
+    The covered prefix is bounded by :data:`COMPACT_TRANSCRIPT_CAP`; the kept
+    tail is everything after it, so ``keep_from_seq`` and the recorded source
+    range exactly partition the visible history. Returns the summary, or
+    ``None`` when nothing is safely coverable or the provider call failed —
+    callers continue uncompacted (fail-open). ``hooks`` (when given) fires the
+    observational PreCompact/PostCompact events around the summarize step.
     """
-    messages = store.load_messages(session)
-    if len(messages) <= COMPACT_KEEP_TAIL:
+    messages = store.visible_messages(session)
+    covered = _coverage(messages)
+    if covered == 0:
         return None
-    older, tail = messages[:-COMPACT_KEEP_TAIL], messages[-COMPACT_KEEP_TAIL:]
-    transcript = "\n".join(f"{m.role}: {_text_of(m.message)}" for m in older)
-    transcript = _clip(transcript, COMPACT_TRANSCRIPT_CAP)
+    prefix, tail = messages[:covered], messages[covered:]
+    transcript = "\n".join(f"{m.role}: {_text_of(m.message)}" for m in prefix)
     if hooks is not None:
         await hooks.fire(PRE_COMPACT)
     try:
@@ -78,7 +100,13 @@ async def compact_session(
     summary = (completed.content or "").strip()
     if not summary:
         return None
-    store.compact(session, summary, keep_from_seq=tail[0].seq)
+    store.compact(
+        session,
+        summary,
+        keep_from_seq=tail[0].seq,
+        source_start_seq=prefix[0].seq,
+        source_end_seq=prefix[-1].seq,
+    )
     if hooks is not None:
         await hooks.fire(POST_COMPACT)
     return summary

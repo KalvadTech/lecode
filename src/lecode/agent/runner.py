@@ -252,6 +252,7 @@ class AgentRunner:
         steer_queue: asyncio.Queue[Any] | None = None,
         input_queue: asyncio.Queue[Any] | None = None,
         catalog: Catalog | None = None,
+        refresh_prompt: Callable[[], str] | None = None,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -264,6 +265,8 @@ class AgentRunner:
         self.steer_queue = steer_queue
         self.input_queue = input_queue
         self._catalog: Catalog | None = catalog
+        #: Recomputes the live system prompt at the start of every run.
+        self._refresh_prompt = refresh_prompt
         #: Partially collected turn, for cancellation-safe persistence.
         self._partial: CompletedMessage | None = None
         # Subagent seam: child runners reach the provider through ctx.
@@ -276,6 +279,14 @@ class AgentRunner:
     ) -> RunResult:
         """Run the loop from ``messages`` until done, empty, or max turns."""
         history: list[ChatMessage] = list(messages)
+        if self._refresh_prompt is not None:
+            # Recompute the live prompt and replace the leading system message
+            # rather than appending another one.
+            prompt: ChatMessage = {"role": "system", "content": self._refresh_prompt()}
+            if history and history[0].get("role") == "system":
+                history[0] = prompt
+            else:
+                history.insert(0, prompt)
         # The live conversation, visible through ctx (subagents, hooks).
         self.ctx.extras["conversation"] = history
         # Background tasks finished between runs surface at the start.

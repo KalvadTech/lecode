@@ -338,7 +338,7 @@ async def cmd_handoff(app: TuiApp, args: list[str]) -> None:
 async def cmd_compact(app: TuiApp, args: list[str]) -> None:
     """``/compact``: summarize all but the last few messages via the provider,
     then record a compaction event."""
-    messages = app.store.load_messages(app.session)
+    messages = app.store.visible_messages(app.session)
     if len(messages) <= COMPACT_KEEP_TAIL:
         app.feed.info("not enough history to compact")
         return
@@ -1231,7 +1231,7 @@ async def cmd_editsys(app: TuiApp, args: list[str]) -> None:
         app.feed.info("unchanged (editor closed without edits, or $EDITOR unset)")
         return
     app.config.llm.system_prompt.custom = edited
-    app.runtime.system_prompt = edited
+    app.reload_history()  # recomputes the live prompt and replaces history[0]
     app.feed.info("system prompt overridden for this session")
 
 
