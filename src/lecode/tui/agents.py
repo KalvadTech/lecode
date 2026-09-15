@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from rich.text import Text
 
 from lecode.agent.runner import Done, Error, ToolCall, ToolResult
 from lecode.extras.subagents import SubagentProgress
 from lecode.permission.patterns import target_of
+from lecode.tui.statusline import format_cost, human_tokens
 from lecode.tui.themes import Theme
 
 #: Rows the compact roster shows before collapsing into ``+N more``.
@@ -32,9 +35,15 @@ DETAIL_MAX_ROWS = 12
 
 _STATUS_GLYPHS = {
     "running": ("●", "accent"),
+    "queued": ("○", "muted"),
+    "waiting": ("◌", "warning"),
+    "done": ("✔", "success"),
     "ok": ("✔", "success"),
     "error": ("✗", "error"),
+    "failed": ("✗", "error"),
     "cancelled": ("—", "muted"),
+    "stopped": ("■", "muted"),
+    "interrupted": ("!", "warning"),
 }
 
 
@@ -84,6 +93,17 @@ class AgentRun:
     error: str = ""
     started_at: float = field(default_factory=time.monotonic)
     truncated: bool = False
+    parent_id: str | None = None
+    depth: int = 0
+    worker: bool = False
+    origin: str = "delegated"
+    cost_usd: float = 0.0
+    usage_incomplete: bool = False
+    context_used: int = 0
+    context_window: int = 0
+    elapsed_s: float = 0.0
+    subtree_cost_usd: float = 0.0
+    subtree_usage_incomplete: bool = False
 
     @property
     def current(self) -> str:
@@ -138,6 +158,56 @@ class AgentRoster:
             run.status = "ok"
         return run
 
+    def sync_worker(self, worker, *, context_window: int = 0) -> AgentRun:
+        """Mirror the persistent worker state into the UI-only roster."""
+        run = self._runs.get(worker.id)
+        if run is None:
+            run = AgentRun(
+                run_id=worker.id,
+                index=len(self._order) + 1,
+                agent=worker.agent,
+                description=worker.description,
+                parent_id=worker.parent_id,
+                depth=worker.depth,
+                worker=True,
+                origin=worker.origin,
+            )
+            self._runs[run.run_id] = run
+            self._order.append(run.run_id)
+        run.status = {"completed": "done", "failed": "error"}.get(worker.state, worker.state)
+        run.error = worker.error or ""
+        run.answer = worker.result.final_text if worker.result is not None else ""
+        run.cost_usd = worker.usage_totals.cost_usd
+        run.usage_incomplete = worker.usage_incomplete
+        run.context_used = worker.usage_totals.context_tokens
+        run.context_window = context_window
+        started_at = getattr(worker, "started_at", "")
+        now = datetime.now(UTC)
+        with suppress(TypeError, ValueError):
+            run.elapsed_s = max(0.0, (now - datetime.fromisoformat(started_at)).total_seconds())
+        self._refresh_subtree_costs()
+        return run
+
+    def _refresh_subtree_costs(self) -> None:
+        workers = [run for run in self._runs.values() if run.worker]
+        children: dict[str | None, list[AgentRun]] = {}
+        for run in workers:
+            children.setdefault(run.parent_id, []).append(run)
+
+        def total(run: AgentRun) -> tuple[float, bool]:
+            cost = run.cost_usd
+            incomplete = run.usage_incomplete
+            for child in children.get(run.run_id, []):
+                child_cost, child_incomplete = total(child)
+                cost += child_cost
+                incomplete |= child_incomplete
+            run.subtree_cost_usd = cost
+            run.subtree_usage_incomplete = incomplete
+            return cost, incomplete
+
+        for run in children.get(None, []):
+            total(run)
+
     def finish(
         self, run_id: str, *, answer: str = "", error: str = "", is_error: bool = False
     ) -> AgentRun | None:
@@ -163,7 +233,14 @@ class AgentRoster:
         return cancelled
 
     def has_running(self) -> bool:
-        return any(run.status == "running" for run in self._runs.values())
+        return any(run.status in {"queued", "running", "waiting"} for run in self._runs.values())
+
+    def has_workers(self) -> bool:
+        return any(run.worker for run in self._runs.values())
+
+    def worker_total(self) -> tuple[float, bool]:
+        workers = [run for run in self._runs.values() if run.worker]
+        return sum(run.cost_usd for run in workers), any(run.usage_incomplete for run in workers)
 
     def get(self, run_id: str) -> AgentRun | None:
         return self._runs.get(run_id)
@@ -187,8 +264,25 @@ class AgentRoster:
         """``(shown, hidden_count)``: running first (newest first), then
         finished (newest first); stable indices come from the run itself."""
         runs = self.runs()
-        running = [run for run in reversed(runs) if run.status == "running"]
-        finished = [run for run in reversed(runs) if run.status != "running"]
+        if self.has_workers():
+            by_parent: dict[str | None, list[AgentRun]] = {}
+            workers = [run for run in runs if run.worker]
+            for run in workers:
+                by_parent.setdefault(run.parent_id, []).append(run)
+            ordered: list[AgentRun] = []
+
+            def visit(parent_id: str | None) -> None:
+                for child in by_parent.get(parent_id, []):
+                    ordered.append(child)
+                    visit(child.run_id)
+
+            visit(None)
+            ordered.extend(run for run in runs if not run.worker)
+            return ordered[:limit], max(0, len(ordered) - limit)
+        running = [run for run in reversed(runs) if run.status in {"queued", "running", "waiting"}]
+        finished = [
+            run for run in reversed(runs) if run.status not in {"queued", "running", "waiting"}
+        ]
         ordered = running + finished
         return ordered[:limit], max(0, len(ordered) - limit)
 
@@ -203,20 +297,30 @@ def roster_lines(roster: AgentRoster, theme: Theme, width: int) -> list[Text]:
     runs = roster.runs()
     if not runs:
         return []
-    running = sum(1 for run in runs if run.status == "running")
+    running = sum(1 for run in runs if run.status in {"queued", "running", "waiting"})
     done = len(runs) - running
-    header = f"agents · {running} running"
+    header = (
+        f"workers · {running} running" if roster.has_workers() else f"agents · {running} running"
+    )
     if done:
         header += f" · {done} done"
+    if roster.has_workers():
+        cost, incomplete = roster.worker_total()
+        header += f" · {format_cost(cost)}" + (" incomplete" if incomplete else "")
     lines = [Text(header, style=theme.muted)]
     shown, hidden = roster.visible()
     for run in shown:
         glyph, style = _glyph(run.status, theme)
         line = Text()
-        line.append(f"  {glyph} ", style=style)
+        indent = "  " * run.depth if run.worker else ""
+        line.append(f"  {indent}{glyph} ", style=style)
         line.append(f"{run.index} {run.agent} ", style=theme.accent)
         line.append(_clip(run.description, max(12, width // 3)), style=theme.text)
-        line.append(f" · {_clip(run.current, max(12, width // 3))}", style=theme.muted)
+        detail = _clip(run.current, max(12, width // 3))
+        if run.worker:
+            detail += f" · {format_cost(run.cost_usd)}" + ("?" if run.usage_incomplete else "")
+            detail += f" · {run.elapsed_s:.0f}s"
+        line.append(f" · {detail}", style=theme.muted)
         lines.append(line)
     if hidden:
         lines.append(Text(f"  … +{hidden} more · /runs", style=theme.muted))
@@ -243,6 +347,21 @@ def detail_lines(run: AgentRun | None, theme: Theme, width: int) -> list[Text]:
     header.append(_clip(run.description, max(12, width // 2)), style=theme.text)
     header.append(f" · {run.current}", style=theme.muted)
     lines.append(header)
+    if run.worker:
+        cost = format_cost(run.cost_usd) + (" (incomplete)" if run.usage_incomplete else "")
+        subtree = format_cost(run.subtree_cost_usd) + (
+            " (incomplete)" if run.subtree_usage_incomplete else ""
+        )
+        context = "unknown"
+        if run.context_window:
+            context = f"{human_tokens(run.context_used)}/{human_tokens(run.context_window)}"
+        lines.append(
+            Text(
+                f"    cost: {cost} · subtree: {subtree} · ctx: {context}"
+                f" · elapsed: {run.elapsed_s:.0f}s",
+                style=theme.muted,
+            )
+        )
     if not run.activity:
         lines.append(Text("    (no tool calls yet)", style=theme.muted))
     for entry in run.activity:

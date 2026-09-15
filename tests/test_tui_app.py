@@ -136,6 +136,40 @@ def test_roster_panel_renders_as_prompt_toolkit_text(tmp_path, monkeypatch):
         assert "Scan src" in rendered
 
 
+async def test_worker_focus_preserves_drafts_and_routes_composer(tmp_path, monkeypatch):
+    app, _, _ = make_app(
+        tmp_path,
+        monkeypatch,
+        [{"text": "initial"}, {"text": "follow-up"}],
+    )
+    manager = app.worker_manager
+    assert manager is not None
+    with create_pipe_input() as inp:
+        app._build_app(input=inp, output=DummyOutput())
+        worker = await manager.start(
+            app.runtime.ctx,
+            agent="explore",
+            prompt="inspect this",
+            origin="human",
+            background=True,
+        )
+        await manager.wait(worker.id)
+        app._input_area.buffer.text = "main draft"
+        assert app.focus_worker(worker.id)
+        app._input_area.buffer.text = "worker draft"
+        assert app.focus_worker(None)
+        assert app._input_area.text == "main draft"
+        assert app.focus_worker(worker.id)
+        assert app._input_area.text == "worker draft"
+        await app._submit("follow up")
+        assert (await manager.wait(worker.id)).final_text == "follow-up"
+        assert "follow up" in [item["text"] for item in manager.pending(worker.id)] or any(
+            message["content"] == "follow up"
+            for message in app.store.load_for_model(worker.session)
+        )
+    await manager.shutdown()
+
+
 def _buffer(app):
     return app._input_area.buffer
 

@@ -24,6 +24,8 @@ from lecode.extras.subagents import (
     SubagentError,
     run_subagent,
 )
+from lecode.extras.workers import WORKER_EXTRA
+from lecode.extras.worktree import WorktreeError
 
 #: Subagent used when the call does not name one.
 DEFAULT_AGENT = "explore"
@@ -75,6 +77,14 @@ class TaskTool(Tool):
         agents = ctx.extras.get(AGENTS_EXTRA)
         if registry is None or agents is None:
             return ToolResult("error: subagents are unavailable in this context", is_error=True)
+        # The TUI still owns its transient roster through run_subagent.
+        manager = (
+            None
+            if ctx.extras.get(SUBAGENT_EVENTS_EXTRA) is not None
+            else ctx.extras.get(WORKER_EXTRA)
+        )
+        if manager is not None:
+            return await self._start_worker(args, ctx, manager, prompt)
         if args.get("run_in_background"):
             return self._start_background(args, ctx, registry, agents, prompt)
         try:
@@ -98,6 +108,41 @@ class TaskTool(Tool):
                 "input_tokens": outcome.input_tokens,
                 "output_tokens": outcome.output_tokens,
                 "cost_usd": outcome.cost_usd,
+            },
+        )
+
+    async def _start_worker(
+        self, args: dict[str, Any], ctx: ToolContext, manager: Any, prompt: str
+    ) -> ToolResult:
+        agent = str(args.get("agent") or DEFAULT_AGENT)
+        description = str(args.get("description") or prompt[:60])
+        background = bool(args.get("run_in_background"))
+        try:
+            worker = await manager.start(
+                ctx,
+                agent=agent,
+                prompt=prompt,
+                description=description,
+                background=background,
+            )
+            if background:
+                return ToolResult(
+                    f"worker {worker.id} started ({agent}): {description}",
+                    metadata={"worker_id": worker.id, "agent": agent},
+                )
+            outcome = await manager.wait(worker.id)
+        except (SubagentError, WorktreeError, RuntimeError) as e:
+            return ToolResult(f"error: {e}", is_error=True)
+        return ToolResult(
+            outcome.final_text or "(subagent returned no text)",
+            metadata={
+                "agent": agent,
+                "worker_id": worker.id,
+                "run_id": worker.id,
+                "turns": outcome.turns,
+                "input_tokens": outcome.usage_totals.input_tokens,
+                "output_tokens": outcome.usage_totals.output_tokens,
+                "cost_usd": outcome.usage_totals.cost_usd,
             },
         )
 

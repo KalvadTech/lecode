@@ -288,6 +288,31 @@ async def test_tool_round_then_answer(tmp_path, monkeypatch):
     assert "all done here" in dump, "final answer missing:\n" + dump
 
 
+async def test_focused_worker_uses_the_current_composer(tmp_path, monkeypatch):
+    """A direct worker focuses in-place; no child TUI or alternate screen opens."""
+
+    async def drive(master: int, screen: pyte.HistoryScreen) -> list[str]:
+        lines = lambda: _screen_lines(screen)  # noqa: E731
+        await asyncio.sleep(0.8)
+        os.write(master, b"@explore inspect\r")
+        await _wait_for(lines, "started for @explore")
+        os.write(master, b"/agent 1 focus\r")
+        await _wait_for(lines, "to @explore")
+        os.write(master, b"follow up\r")
+        await _wait_for(lines, "sent to @explore")
+        os.write(master, b"/quit\r")
+        return lines()
+
+    lines = await _run_pty_app(
+        tmp_path,
+        monkeypatch,
+        [{"text": ["first"]}, {"text": ["second"]}],
+        drive,
+        delay=0.05,
+    )
+    assert any("to @explore" in line for line in lines)
+
+
 async def test_slash_menu_renders_and_no_match_row(tmp_path, monkeypatch):
     """Typing '/mod' shows the dropdown on the real terminal (several rows at
     once, not clipped); an unknown prefix shows the inert 'No matching

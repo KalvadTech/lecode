@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 
 import pytest
 from tests.fakes import FakeProvider, sample_catalog
@@ -54,6 +55,25 @@ class SleepTool(Tool):
     async def run(self, args, ctx) -> ToolExecResult:
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
+
+
+class TaskLikeTool(EchoTool):
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "task"
+
+
+class LeaseManager:
+    def __init__(self) -> None:
+        self.suspensions = 0
+
+    def consume(self, id, history):
+        return []
+
+    @asynccontextmanager
+    async def suspend(self, id):
+        self.suspensions += 1
+        yield
 
 
 def make_runner(tool_ctx, script, **kwargs) -> tuple[AgentRunner, FakeProvider]:
@@ -134,6 +154,20 @@ async def test_tool_round_trip(tool_ctx):
     result_events = [e for e in events if isinstance(e, ToolResult)]
     assert result_events[0].content == "hi"
     assert result_events[0].is_error is False
+
+
+@pytest.mark.parametrize("names,expected", [(["task"], 1), (["task", "echo"], 0)])
+async def test_worker_suspends_only_all_task_batches(tool_ctx, names, expected):
+    manager = LeaseManager()
+    tool_ctx.extras.update({"workers": manager, "worker_id": "worker"})
+    registry = ToolRegistry([TaskLikeTool(), EchoTool()])
+    calls = [
+        {"id": f"c{i}", "name": name, "arguments": '{"text":"ok"}'} for i, name in enumerate(names)
+    ]
+    provider = FakeProvider([{"tool_calls": calls}, {"text": "done"}])
+    runner = AgentRunner(provider, registry, tool_ctx)
+    assert (await runner.run([{"role": "user", "content": "go"}])).final_text == "done"
+    assert manager.suspensions == expected
 
 
 async def test_parallel_tool_calls_paired_by_id(tool_ctx):

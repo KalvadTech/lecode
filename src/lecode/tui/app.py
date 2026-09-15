@@ -71,6 +71,8 @@ from lecode.extras.subagents import (
     SubagentProgress,
     run_subagent,
 )
+from lecode.extras.workers import WORKER_EXTRA
+from lecode.extras.worktree import WorktreeError
 from lecode.hooks import (
     INTERRUPT,
     NOTIFICATION,
@@ -263,6 +265,12 @@ class TuiApp:
         self._runtime.ctx.extras["subagent_events"] = self._on_child_event
         #: Live agent-run roster (compact above the composer; /runs opens detail).
         self._roster = AgentRoster()
+        #: A focused worker shares this composer; it never opens another TUI.
+        self._focused_worker_id: str | None = None
+        self._composer_drafts: dict[str, str] = {}
+        self._root_stopped = False
+        self._worker_wake_task: asyncio.Task[None] | None = None
+        self._worker_usage = (0, 0, 0.0)
         self._detail_run_id: str | None = None
         self._roster_window: Any | None = None
         # Background-task completions surface as feed info lines as they land.
@@ -290,6 +298,11 @@ class TuiApp:
         self._status.output_tokens = stats.output_tokens
         self._status.cost_usd = stats.cost_usd
         self._status.context_used = stats.context_tokens
+        self._worker_manager = runtime.ctx.extras.get(WORKER_EXTRA)
+        if self._worker_manager is not None:
+            self._worker_manager.notify = self._on_worker_notification
+            self._worker_manager.progress = self._on_worker_progress
+            self._hydrate_workers()
         # Logbook suffix: the feed reads live context/cost from the statusline.
         self._feed.metrics = lambda: (
             self._status.context_used,
@@ -392,6 +405,7 @@ class TuiApp:
 
     def submit_prompt(self, text: str, *, echo: str | None = None) -> None:
         """Render and queue/start a user prompt (skill commands, ``/retry``)."""
+        self._root_stopped = False
         self._feed.user_message(text if echo is None else echo)
         self._enqueue_or_start(text)
 
@@ -421,6 +435,9 @@ class TuiApp:
         """
         from lecode.session.storage import SessionInUseError
 
+        if self.workers_active():
+            self._feed.error("stop or finish all workers before switching sessions")
+            return False
         try:
             new_lock = self._store.acquire_lock(session)
         except SessionInUseError as e:
@@ -450,6 +467,14 @@ class TuiApp:
             self._input_area.history = self._input_history
         self._status.session_name = session.name
         self._status.agent = self._agent_name
+        if self._worker_manager is not None:
+            self._worker_manager.attach(session)
+            self._roster = AgentRoster()
+            self._detail_run_id = None
+            self._focused_worker_id = None
+            self._composer_drafts.clear()
+            self._worker_usage = (0, 0, 0.0)
+            self._hydrate_workers()
         self._invalidate()
         hooks = self._runtime.hooks
         if hooks is not None and (
@@ -475,7 +500,115 @@ class TuiApp:
 
     def turn_busy(self) -> bool:
         """Whether a turn or plan loop is in flight (switching commands refuse)."""
-        return self._turn_running() or self.loop_running()
+        return self._turn_running() or self.loop_running() or self.workers_active()
+
+    def workers_active(self) -> bool:
+        return self._worker_manager is not None and any(
+            worker.state in {"queued", "running", "waiting"}
+            for worker in self._worker_manager.list()
+        )
+
+    def resolve_worker(self, ref: str) -> Any | None:
+        """Resolve a worker by stable roster number, exact id, or unique prefix."""
+        if self._worker_manager is None:
+            return None
+        run = self._roster.resolve(ref)
+        if run is not None and run.worker:
+            return self._worker_manager.get(run.run_id)
+        matches = [worker for worker in self._worker_manager.list() if worker.id.startswith(ref)]
+        return matches[0] if len(matches) == 1 else None
+
+    def focus_worker(self, worker_id: str | None) -> bool:
+        """Switch the shared composer to a worker, retaining both drafts."""
+        if worker_id is not None and self.resolve_worker(worker_id) is None:
+            return False
+        current = self._focused_worker_id or "main"
+        if self._input_area is not None:
+            self._composer_drafts[current] = self._input_area.text
+        self._focused_worker_id = worker_id
+        if self._input_area is not None:
+            draft = self._composer_drafts.get(worker_id or "main", "")
+            self._input_area.buffer.set_document(Document(draft, len(draft)), bypass_readonly=True)
+        self._sync_queue_status()
+        return True
+
+    def _hydrate_workers(self) -> None:
+        """Load persisted workers once per attached root session."""
+        if self._worker_manager is None:
+            return
+        for worker in self._worker_manager.load():
+            self._roster.sync_worker(worker, context_window=self._status.context_window)
+        self._worker_usage = self._worker_totals()
+
+    def _worker_totals(self) -> tuple[int, int, float]:
+        if self._worker_manager is None:
+            return (0, 0, 0.0)
+        totals = [worker.usage_totals for worker in self._worker_manager.list()]
+        return (
+            sum(total.input_tokens for total in totals),
+            sum(total.output_tokens for total in totals),
+            sum(total.cost_usd for total in totals),
+        )
+
+    def current_session_usage(self) -> tuple[int, int, float, bool]:
+        """Session totals with live worker usage substituted for persisted deltas."""
+        stats = session_stats(self._store, self._session)
+        persisted = [
+            event.get("usage", event)
+            for event in self._store.load_events(self._session, "worker_usage")
+        ]
+        live = self._worker_totals()
+        recorded = (
+            sum(int(item.get("input_tokens") or 0) for item in persisted),
+            sum(int(item.get("output_tokens") or 0) for item in persisted),
+            sum(float(item.get("cost_usd") or 0.0) for item in persisted),
+        )
+        incomplete = (
+            stats.usage_incomplete
+            or any(worker.usage_incomplete for worker in self._worker_manager.list())
+            if self._worker_manager is not None
+            else stats.usage_incomplete
+        )
+        return (
+            stats.input_tokens + live[0] - recorded[0],
+            stats.output_tokens + live[1] - recorded[1],
+            stats.cost_usd + live[2] - recorded[2],
+            incomplete,
+        )
+
+    def _on_worker_progress(self, worker: Any) -> None:
+        """WorkerManager callback: update exactly that roster entry and live totals."""
+        before = self._worker_usage
+        self._roster.sync_worker(worker, context_window=self._status.context_window)
+        after = self._worker_totals()
+        self._status.input_tokens += after[0] - before[0]
+        self._status.output_tokens += after[1] - before[1]
+        self._status.cost_usd += after[2] - before[2]
+        self._worker_usage = after
+        self._invalidate()
+
+    async def _on_worker_notification(self, note: dict[str, Any]) -> None:
+        """Render completed-worker attribution and wake only delegated root work."""
+        worker = self.resolve_worker(note["worker_id"])
+        if worker is None:
+            return
+        run = self._roster.sync_worker(worker, context_window=self._status.context_window)
+        self._feed.agent_summary(run)
+        if (
+            (note["origin"] == "delegated" or note["deliver"])
+            and note["parent_id"] is None
+            and not self._root_stopped
+            and not self._turn_running()
+            and (self._worker_wake_task is None or self._worker_wake_task.done())
+        ):
+            self._worker_wake_task = asyncio.create_task(self._wake_for_workers())
+        self._invalidate()
+
+    async def _wake_for_workers(self) -> None:
+        """Coalesce same-loop worker completions into one parent wake-up."""
+        await asyncio.sleep(0)
+        if not self._root_stopped and not self._turn_running() and not self._quit:
+            self._enqueue_or_start("Worker updates are available.")
 
     def loop_running(self) -> bool:
         return self._loop_task is not None and not self._loop_task.done()
@@ -607,21 +740,21 @@ class TuiApp:
 
         @kb.add("y", filter=approval_pending)
         def _approve_once(event: Any) -> None:
-            self._approval.resolve(AllowOnce())
+            self._resolve_approval(AllowOnce())
 
         @kb.add("a", filter=approval_pending)
         def _approve_always(event: Any) -> None:
             pending = self._approval.pending
             pattern = pending.target if pending is not None else "*"
-            self._approval.resolve(AllowAlways(pattern=pattern))
+            self._resolve_approval(AllowAlways(pattern=pattern))
 
         @kb.add("n", filter=approval_pending)
         def _deny(event: Any) -> None:
-            self._approval.resolve(Deny())
+            self._resolve_approval(Deny())
 
         @kb.add("escape", filter=approval_pending)
         def _deny_escape(event: Any) -> None:
-            self._approval.resolve(Deny())
+            self._resolve_approval(Deny())
 
         @kb.add("up", filter=question_picker)
         def _question_up(event: Any) -> None:
@@ -674,6 +807,10 @@ class TuiApp:
             # state, so their dismissal is remembered per typed text (any edit
             # or Tab brings it back). Longer M-* sequences still win over this
             # bare-key handler.
+            if self._focused_worker_id is not None:
+                worker = self.resolve_worker(self._focused_worker_id)
+                self.focus_worker(worker.parent_id if worker is not None else None)
+                return
             if self._detail_run_id is not None:
                 self.close_agent_run()
                 return
@@ -735,7 +872,7 @@ class TuiApp:
         @kb.add("c-c")
         def _ctrl_c(event: Any) -> None:
             if self._approval.is_pending:
-                self._approval.resolve(Deny())
+                self._resolve_approval(Deny())
                 return
             if self._question.is_pending:
                 self._question.dismiss()
@@ -1089,6 +1226,7 @@ class TuiApp:
 
     async def run(self, *, input: Input | None = None, output: Output | None = None) -> int:
         """Run the interactive loop until quit; returns the exit code."""
+        self._hydrate_workers()
         self._status.git = await self._git.get(self._cwd)
         self._app = self._build_app(input=input, output=output)
         self._runtime.ctx.approval_callback = self._request_approval
@@ -1130,6 +1268,8 @@ class TuiApp:
             background = self._runtime.ctx.extras.get(BACKGROUND_EXTRA)
             if background is not None:
                 await background.shutdown()
+            if self._worker_manager is not None:
+                await self._worker_manager.shutdown()
             mcp = self._runtime.ctx.extras.get(MCP_EXTRA)
             if mcp is not None:
                 await mcp.shutdown()
@@ -1222,6 +1362,16 @@ class TuiApp:
         elif text.startswith(".") and self._submit_persona(text, steer=steer):
             pass  # .persona <text>: handled (persona system-prompt overlay)
         else:
+            if self._focused_worker_id is not None:
+                worker = self.resolve_worker(self._focused_worker_id)
+                if worker is None:
+                    self._feed.error("focused worker no longer exists")
+                    self.focus_worker(None)
+                    return
+                self._feed.user_message(f"[@{worker.agent}] {text}")
+                await self._worker_manager.send(worker.id, text, steer, from_human=True)
+                self._feed.info(f"sent to @{worker.agent} ({worker.id[:8]})")
+                return
             if self.loop_running():
                 self._feed.info("a plan loop is running — /loop stop first")
                 return
@@ -1235,14 +1385,15 @@ class TuiApp:
             invocable = {a.name for a in self._runtime.agents.subagents()}
             targets = [name for name in mentions if name in invocable]
             if targets and not self._turn_running():
-                # Direct @agent dispatch: a side query run by the subagent.
-                # While a turn runs, mentions keep the note behavior in
-                # _prepare_message (the message queues as normal input).
                 self._feed.user_message(text)
-                self._turn_task = asyncio.ensure_future(
-                    self._run_subagent_turn(targets[0], cleaned or text)
-                )
+                worker = await self._start_human_worker(targets[0], cleaned or text)
+                if worker is not None:
+                    # Compatibility: direct @agent work remains awaitable through
+                    # the established turn-task seam, but execution stays in the
+                    # persistent human-origin worker manager.
+                    self._turn_task = asyncio.create_task(self._wait_for_worker(worker.id))
                 return
+            self._root_stopped = False
             prepared = self._prepare_message(text)
             echo = self._attachment_echo()
             content = self._with_attachments(prepared)
@@ -1253,6 +1404,38 @@ class TuiApp:
                 # transcript; they echo when the model actually sees them.
                 self._feed.user_message(text + echo)
             self._enqueue_or_start(content, steer=steer)
+
+    async def _start_human_worker(self, agent: str, prompt: str) -> Any | None:
+        """Start direct ``@agent`` work as a persistent human-origin worker."""
+        if self._worker_manager is None:
+            self._feed.error("workers are unavailable")
+            return None
+        try:
+            worker = await self._worker_manager.start(
+                self._runtime.ctx,
+                agent=agent,
+                prompt=prompt,
+                description=prompt.splitlines()[0][:80],
+                origin="human",
+                background=True,
+            )
+        except (RuntimeError, SubagentError, WorktreeError) as e:
+            self._feed.error(str(e))
+            return None
+        self._roster.sync_worker(worker, context_window=self._status.context_window)
+        self._feed.info(
+            f"worker {worker.id[:8]} started for @{agent} · /agent {worker.id[:8]} focus"
+        )
+        self._invalidate()
+        return worker
+
+    async def _wait_for_worker(self, worker_id: str) -> None:
+        """Keep direct worker execution compatible with the legacy turn seam."""
+        assert self._worker_manager is not None
+        try:
+            await self._worker_manager.wait(worker_id)
+        except SubagentError as e:
+            self._feed.error(str(e))
 
     def _with_attachments(self, text: str) -> MessageContent | None:
         """Attach pending attachments to ``text``; ``None`` = blocked (modality)."""
@@ -1398,15 +1581,43 @@ class TuiApp:
         self._status.activity = label
         self._invalidate()
 
+    def _show_approval_head(self) -> None:
+        """Print the FIFO head once, keeping worker attribution with the ask."""
+        pending = self._approval.pending
+        if pending is None:
+            return
+        shown = getattr(self, "_shown_approval", None)
+        if shown is pending.future:
+            return
+        self._shown_approval = pending.future
+        attribution = (
+            f"[worker {pending.worker[:8]} · {pending.conversation}] " if pending.worker else ""
+        )
+        self._feed.permission(attribution + approval_prompt_text(pending.tool_name, pending.target))
+
+    def _resolve_approval(self, decision: ApprovalDecision) -> None:
+        self._approval.resolve(decision)
+        self._shown_approval = None
+        self._show_approval_head()
+        self._invalidate()
+
     async def _request_approval(
-        self, tool_name: str, args: dict[str, Any], reason: str
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        reason: str,
+        *,
+        worker: str | None = None,
+        conversation: str = "main",
     ) -> ApprovalDecision:
         """``ctx.approval_callback``: inline y/a/n/ESC ask during a turn."""
         target = target_of(tool_name, args)
         if reason:
             self._feed.info(reason)  # doom-loop coach reasons land here too
-        self._feed.permission(approval_prompt_text(tool_name, target))
-        future = self._approval.request(tool_name, target, reason)
+        future = self._approval.request(
+            tool_name, target, reason, worker=worker, conversation=conversation
+        )
+        self._show_approval_head()
         self._status.state = StatusLineState.AWAITING_APPROVAL
         self._invalidate()
         self._spawn(self._notifier.approval_needed(tool_name))
@@ -1414,8 +1625,14 @@ class TuiApp:
         try:
             return await future
         finally:
-            self._approval.cancel()
-            self._status.state = StatusLineState.RUNNING
+            self._approval.cancel(future)
+            self._shown_approval = None
+            self._show_approval_head()
+            self._status.state = (
+                StatusLineState.AWAITING_APPROVAL
+                if self._approval.is_pending
+                else StatusLineState.RUNNING
+            )
             self._invalidate()
 
     def _render_question(self) -> None:
@@ -1456,6 +1673,7 @@ class TuiApp:
     def cancel_turn(self) -> bool:
         """Cancel the in-flight turn (Ctrl-C); ``True`` if one was cancelled."""
         if self._turn_running():
+            self._root_stopped = True
             self._turn_task.cancel()
             return True
         return False
@@ -1501,7 +1719,12 @@ class TuiApp:
             parts.append("queue: " + ", ".join(self._queue_label(m) for m in queued))
         if steered:
             parts.append("steer: " + ", ".join(self._queue_label(m) for m in steered))
-        return "message" if not parts else "message · " + " · ".join(parts)
+        recipient = "message"
+        if self._focused_worker_id is not None:
+            worker = self.resolve_worker(self._focused_worker_id)
+            if worker is not None:
+                recipient = f"to @{worker.agent} ({worker.id[:8]})"
+        return recipient if not parts else recipient + " · " + " · ".join(parts)
 
     async def _run_turn(self, text: MessageContent, *, overlay: str | None = None) -> None:
         message: dict[str, Any] = {"role": "user", "content": text}
@@ -1777,6 +2000,18 @@ class TuiApp:
     @property
     def roster(self) -> AgentRoster:
         return self._roster
+
+    @property
+    def worker_manager(self) -> Any | None:
+        return self._worker_manager
+
+    async def submit_worker(self, worker_id: str) -> dict[str, Any]:
+        """Submit a human worker and apply its root wake-up policy."""
+        if self._worker_manager is None:
+            raise RuntimeError("workers are unavailable")
+        note = await self._worker_manager.submit(worker_id)
+        await self._on_worker_notification(note)
+        return note
 
     @property
     def detail_run_id(self) -> str | None:

@@ -265,16 +265,27 @@ class Feed:
     def agent_summary(self, run: AgentRun) -> None:
         """One attributed line for a finished child run (the roster keeps detail)."""
         glyph, slot = {
+            "done": ("✔", "success"),
             "ok": ("✔", "success"),
             "error": ("✗", "error"),
+            "failed": ("✗", "error"),
             "cancelled": ("—", "muted"),
+            "stopped": ("■", "muted"),
+            "interrupted": ("!", "warning"),
         }.get(run.status, ("✔", "muted"))
-        parts = [f"{run.agent} · {run.description}"]
+        identity = f"{run.agent} · {run.description}"
+        if run.worker:
+            identity += f" · worker {run.run_id[:8]}"
+        parts = [identity]
         if run.activity:
             count = len(run.activity)
             parts.append(f"{count} tool call{'s' if count != 1 else ''}")
         if run.status == "error" and run.error:
             parts.append(run.error.splitlines()[0][:80])
+        if run.worker:
+            parts.append(
+                format_cost(run.cost_usd) + (" incomplete" if run.usage_incomplete else "")
+            )
         self._console.print(
             Text(
                 f"[{self._stamp()}] {glyph} " + " · ".join(parts), style=getattr(self._theme, slot)

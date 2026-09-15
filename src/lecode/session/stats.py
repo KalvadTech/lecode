@@ -26,6 +26,8 @@ class Stats:
     created_at: str
     last_active: str | None
     tombstone_count: int
+    #: True when a counted worker usage event is marked incomplete.
+    usage_incomplete: bool = False
 
 
 def _usage_tokens(usage: dict) -> tuple[int, int]:
@@ -44,6 +46,7 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
     input_tokens = 0
     output_tokens = 0
     cost_usd = 0.0
+    usage_incomplete = False
 
     for record in messages:
         role_counts[record.role] = role_counts.get(record.role, 0) + 1
@@ -62,14 +65,22 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
                 continue
             cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1_000_000
 
-    # Pierre reviews carry their own usage on the event record.
+    # Pierre reviews and worker dispatches carry their own usage on the event.
     for record in records:
-        if isinstance(record, EventRecord) and record.kind == "pierre":
+        if not isinstance(record, EventRecord):
+            continue
+        if record.kind == "pierre":
             usage = record.data.get("usage") or {}
-            in_tok, out_tok = _usage_tokens(usage)
-            input_tokens += in_tok
-            output_tokens += out_tok
-            cost_usd += float(usage.get("cost_usd") or 0.0)
+        elif record.kind == "worker_usage":
+            usage = record.data.get("usage") or record.data
+            if record.data.get("incomplete"):
+                usage_incomplete = True
+        else:
+            continue
+        in_tok, out_tok = _usage_tokens(usage)
+        input_tokens += in_tok
+        output_tokens += out_tok
+        cost_usd += float(usage.get("cost_usd") or 0.0)
 
     timestamps = [
         r.ts for r in records if isinstance(r, MessageRecord | EventRecord | TombstoneRecord)
@@ -93,4 +104,5 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
         created_at=session.meta.created_at,
         last_active=max(timestamps) if timestamps else None,
         tombstone_count=sum(isinstance(r, TombstoneRecord) for r in records),
+        usage_incomplete=usage_incomplete,
     )

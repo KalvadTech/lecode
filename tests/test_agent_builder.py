@@ -68,6 +68,16 @@ def test_session_grants_loaded(cwd, tmp_path):
     assert "session grant" in check.reason
 
 
+def test_session_runtime_installs_workers(cwd, tmp_path):
+    from lecode.session.storage import SessionStore
+
+    store = SessionStore(config_dir=tmp_path / "cfg")
+    session = store.create("workers", cwd)
+    runtime = build_runtime(Config(), cwd, session=session, store=store)
+    assert "workers" in runtime.registry.names()
+    assert runtime.ctx.extras["workers"].session is session
+
+
 def test_agent_name_applies_overlay(cwd):
     runtime = build_runtime(Config(), cwd, agent_name="plan")
     checker = runtime.ctx.permission_checker

@@ -6,6 +6,49 @@ from __future__ import annotations
 from tests.test_tui_app import make_app
 from tests.test_worktree import make_repo
 
+
+async def test_agent_focus_command_targets_persistent_worker(tmp_path, monkeypatch):
+    app, _, out = make_app(tmp_path, monkeypatch, [{"text": "done"}])
+    manager = app.worker_manager
+    assert manager is not None
+    worker = await manager.start(
+        app.runtime.ctx,
+        agent="explore",
+        prompt="inspect",
+        origin="human",
+        background=True,
+    )
+    await manager.wait(worker.id)
+    await app.handle_command("/agent 1 focus")
+    assert app._focused_worker_id == worker.id
+    assert "composer focused on @explore" in out.getvalue()
+    await manager.shutdown()
+
+
+async def test_agent_submit_wakes_root_once(tmp_path, monkeypatch):
+    app, provider, _ = make_app(tmp_path, monkeypatch, [{"text": "done"}, {"text": "integrated"}])
+    manager = app.worker_manager
+    assert manager is not None
+    worker = await manager.start(
+        app.runtime.ctx,
+        agent="explore",
+        prompt="inspect",
+        origin="human",
+        background=True,
+    )
+    await manager.wait(worker.id)
+    await app.handle_command("/agent 1 submit")
+    assert app._worker_wake_task is not None
+    await app._worker_wake_task
+    assert app._turn_task is not None
+    await app._turn_task
+    assert any(
+        message["content"] == "Worker updates are available."
+        for message in provider.requests[-1]["messages"]
+    )
+    await manager.shutdown()
+
+
 # -- /init -------------------------------------------------------------------------
 
 

@@ -20,6 +20,7 @@ from lecode.extras.export import ShareError, export_html, share_gist
 from lecode.extras.loop_mode import DEFAULT_MAX_ITERATIONS
 from lecode.extras.proc import run_proc
 from lecode.extras.status_signals import GIT_CONFLICT
+from lecode.extras.subagents import SubagentError
 from lecode.extras.worktree import WorktreeError, WorktreeManager
 from lecode.hooks import hooks_status
 from lecode.memory import MemoryStore, memory_command, memory_root
@@ -204,6 +205,7 @@ async def cmd_session(app: TuiApp, args: list[str]) -> None:
     """``/session``: metadata plus token/cost stats."""
     session = app.session
     stats = session_stats(app.store, session)
+    input_tokens, output_tokens, cost_usd, incomplete = app.current_session_usage()
     roles = " · ".join(f"{role} x{count}" for role, count in sorted(stats.role_counts.items()))
     lines = [
         f"session: {session.name} ({session.id})",
@@ -213,7 +215,8 @@ async def cmd_session(app: TuiApp, args: list[str]) -> None:
         f"agent: {session.meta.agent} · model: {session.meta.model or app.config.llm.model}",
         f"messages: {stats.message_count} ({roles or 'none'})"
         f" · tombstones: {stats.tombstone_count}",
-        f"tokens: {stats.input_tokens} in / {stats.output_tokens} out · cost ${stats.cost_usd:.4f}",
+        f"tokens: {input_tokens} in / {output_tokens} out · cost ${cost_usd:.4f}"
+        + (" (incomplete)" if incomplete else ""),
     ]
     app.feed.info("\n".join(lines))
 
@@ -757,6 +760,60 @@ async def cmd_runs(app: TuiApp, args: list[str]) -> None:
         app.feed.error(f"no such agent run: {args[0]}")
         return
     app.open_agent_run(run.run_id)
+
+
+async def cmd_agent(app: TuiApp, args: list[str]) -> None:
+    """``/agent <id|number> [send|stop|resume|submit|focus]``: human worker control."""
+    manager = app.worker_manager
+    if manager is None:
+        app.feed.info("(no workers this session)")
+        return
+    if not args:
+        workers = [run for run in app.roster.runs() if run.worker]
+        if not workers:
+            app.feed.info("(no workers this session)")
+            return
+        app.feed.info(
+            "\n".join(
+                f"{run.index}. {run.agent} · {run.status} · {run.description} · {run.run_id}"
+                for run in workers
+            )
+            + "\n\ncontrol: /agent <id|number> [send TEXT|stop [tree]|resume [TEXT]|submit|focus]"
+        )
+        return
+    worker = app.resolve_worker(args[0])
+    if worker is None:
+        app.feed.error(f"no such worker: {args[0]}")
+        return
+    if len(args) == 1:
+        app.open_agent_run(worker.id)
+        return
+    action = args[1]
+    rest = args[2:]
+    try:
+        if action == "send":
+            if not rest:
+                raise ValueError("usage: /agent <id> send <text>")
+            await manager.send(worker.id, " ".join(rest), from_human=True)
+            app.feed.info(f"sent to @{worker.agent} ({worker.id[:8]})")
+        elif action == "stop":
+            await manager.stop(worker.id, tree=bool(rest and rest[0] == "tree"))
+            app.feed.info(f"worker {worker.id[:8]} stopped")
+        elif action == "resume":
+            await manager.resume(worker.id, " ".join(rest) if rest else None)
+            app.feed.info(f"worker {worker.id[:8]} resumed")
+        elif action == "submit":
+            await app.submit_worker(worker.id)
+            app.feed.info(f"worker {worker.id[:8]} submitted")
+        elif action == "focus":
+            app.focus_worker(worker.id)
+            app.feed.info(f"composer focused on @{worker.agent} ({worker.id[:8]}); Esc returns")
+        else:
+            raise ValueError(
+                "usage: /agent <id> [send TEXT|stop [tree]|resume [TEXT]|submit|focus]"
+            )
+    except (KeyError, RuntimeError, SubagentError, ValueError) as e:
+        app.feed.error(str(e))
 
 
 async def cmd_tasks(app: TuiApp, args: list[str]) -> None:
@@ -1418,6 +1475,23 @@ def _complete_runs(app: TuiApp, args: list[str]) -> list[CompletionRow]:
     ]
 
 
+def _complete_agent(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if not args:
+        return [
+            (run.run_id, f"{run.index} {run.agent} · {run.description}", run.status)
+            for run in app.roster.runs()
+            if run.worker
+        ]
+    if len(args) == 1:
+        return [
+            (action, action, "worker control")
+            for action in ("send", "stop", "resume", "submit", "focus")
+        ]
+    if len(args) == 2 and args[1] == "stop":
+        return [("tree", "tree", "stop descendants too")]
+    return []
+
+
 def _complete_rewind(app: TuiApp, args: list[str]) -> list[CompletionRow]:
     if args:
         return []
@@ -1480,6 +1554,7 @@ _ARG_COMPLETIONS: dict[str, tuple[ArgCompletions, str | None]] = {
     "memory": (_complete_memory, None),
     "wt-exit": (_complete_wt_exit, None),
     "runs": (_complete_runs, "no agent runs this session"),
+    "agent": (_complete_agent, "no workers this session"),
 }
 
 
@@ -1520,7 +1595,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ),
     ("Permissions", ["permissions", "mode", "toggle"]),
     ("Worktrees", ["worktree", "wt-merge", "wt-exit"]),
-    ("Power features", ["loop", "chain", "mcp", "review", "tasks", "runs"]),
+    ("Power features", ["loop", "chain", "mcp", "review", "tasks", "runs", "agent"]),
     (
         "Interface",
         [
@@ -1581,6 +1656,7 @@ _HANDLERS = {
     "agents": cmd_agents,
     "queue": cmd_queue,
     "runs": cmd_runs,
+    "agent": cmd_agent,
     "tasks": cmd_tasks,
     "btw": cmd_btw,
     "copy": cmd_copy,
@@ -1638,6 +1714,7 @@ ARG_HINTS = {
     "review": "[file…]",
     "notifications": "[on|off]",
     "runs": "[number|id]",
+    "agent": "[id|number] [send TEXT|stop [tree]|resume [TEXT]|submit|focus]",
 }
 
 

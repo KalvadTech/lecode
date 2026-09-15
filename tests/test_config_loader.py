@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from lecode.config.loader import deep_merge, load_config
 from lecode.config.migrations import MIGRATIONS
@@ -47,6 +48,7 @@ def test_defaults_validate_from_empty():
     assert config.mcp.enable_exa is True
     assert config.mcp.enable_context7 is False
     assert config.memory.max_bytes == 32768
+    assert config.worktree.validation == []
     assert config.telemetry.enabled is False
     assert config.telemetry.sentry_dsn is None
     assert config.telemetry.otlp_endpoint is None
@@ -70,6 +72,17 @@ def test_telemetry_section_parses(global_dir, tmp_path):
     assert tel.export_interval_s == 30.0
     assert tel.environment == "prod"
     assert result.warnings == []
+
+
+def test_worktree_validation_parses_and_requires_a_list(global_dir, tmp_path):
+    (global_dir / "config.toml").write_text(
+        '[worktree]\nvalidation = ["uv run pytest tests/test_worktree.py"]\n'
+    )
+    assert load_config(cwd=tmp_path).config.worktree.validation == [
+        "uv run pytest tests/test_worktree.py"
+    ]
+    with pytest.raises(ValidationError):
+        Config.model_validate({"worktree": {"validation": "pytest"}})
 
 
 def test_first_run_creates_default_config(global_dir, tmp_path):

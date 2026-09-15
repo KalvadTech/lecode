@@ -440,17 +440,21 @@ class SessionStore:
             if isinstance(r, MessageRecord) and not self._is_hidden(r.seq, tombstones)
         ]
 
-    def load_agent_runs(self, session: Session) -> list[dict[str, Any]]:
-        """Agent-run activity records with tombstones applied, in append order."""
+    def load_events(self, session: Session, kind: str) -> list[dict[str, Any]]:
+        """Event records of ``kind`` with tombstones applied, in append order."""
         records = self.read_records(session)
         tombstones = self._active_tombstones(records)
         return [
             dict(r.data)
             for r in records
             if isinstance(r, EventRecord)
-            and r.kind == "agent_run"
+            and r.kind == kind
             and not self._is_hidden(r.seq, tombstones)
         ]
+
+    def load_agent_runs(self, session: Session) -> list[dict[str, Any]]:
+        """Agent-run activity records with tombstones applied, in append order."""
+        return self.load_events(session, "agent_run")
 
     def undo(self, session: Session) -> TombstoneRecord | None:
         """Hide the last user turn (the user message and everything after it)."""

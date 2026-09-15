@@ -14,9 +14,12 @@ from lecode.permission import (
 )
 
 
-def _checker(permissions: dict, session_perms=None, cwd=None) -> PermissionChecker:
+def _checker(permissions: dict, session_perms=None, cwd=None, read_only=False) -> PermissionChecker:
     return PermissionChecker(
-        Config.model_validate({"permissions": permissions}), session_perms, cwd=cwd
+        Config.model_validate({"permissions": permissions}),
+        session_perms,
+        cwd=cwd,
+        read_only=read_only,
     )
 
 
@@ -272,3 +275,225 @@ def test_overlay_shares_doom_tracking():
     plan.check("read", args)
     third = checker.check("read", args)
     assert third.decision == Decision.ASK  # count shared across derived checkers
+
+
+# -- read-only enforcement ------------------------------------------------------
+
+
+def test_read_only_denies_writes_even_in_yolo():
+    checker = _checker({"mode": "yolo"}, read_only=True)
+    assert checker.read_only is True
+    assert checker.check("bash", {"command": "ls"}).decision == Decision.DENY
+    assert checker.check("write", {"path": "a.py"}).decision == Decision.DENY
+    assert checker.check("edit", {"path": "a.py"}).decision == Decision.DENY
+    assert "read-only" in checker.check("bash", {"command": "ls"}).reason
+
+
+def test_read_only_not_widened_by_overlay_allow_rule():
+    overlay = AgentOverlay(extra_rules=_ruleset(allow={"bash": [{"pattern": "*"}]}))
+    checker = _checker({"mode": "yolo"}, read_only=True).for_agent(overlay)
+    assert checker.check("bash", {"command": "ls"}).decision == Decision.DENY
+
+
+def test_read_only_not_widened_by_session_grant():
+    perms = SessionPermissions([("bash", "*")])
+    checker = _checker({"mode": "yolo"}, session_perms=perms, read_only=True)
+    assert checker.check("bash", {"command": "ls"}).decision == Decision.DENY
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("read", {"path": "a.py"}),
+        ("grep", {"pattern": "x"}),
+        ("list_dir", {"path": "."}),
+        ("task", {"prompt": "inspect"}),
+    ],
+)
+def test_read_only_allows_read_class_tools(tool, args):
+    checker = _checker({"mode": "yolo"}, read_only=True)
+    assert checker.check(tool, args).decision == Decision.ALLOW
+
+
+def test_for_agent_propagates_read_only():
+    checker = _checker({"mode": "yolo"}, read_only=True)
+    derived = checker.for_agent(BUILTIN_AGENT_OVERLAYS["build"])
+    assert derived.read_only is True
+    assert derived.check("write", {"path": "a"}).decision == Decision.DENY
+
+
+def test_for_agent_read_only_narrows_writable_checker():
+    checker = _checker({"mode": "yolo"})
+    derived = checker.for_agent(BUILTIN_AGENT_OVERLAYS["build"], read_only=True)
+    assert derived.read_only is True
+    assert checker.read_only is False
+    assert checker.check("write", {"path": "a"}).decision == Decision.ALLOW
+    assert derived.check("write", {"path": "a"}).decision == Decision.DENY
+
+
+def test_for_agent_cannot_widen_read_only_checker():
+    checker = _checker({"mode": "yolo"}, read_only=True)
+    derived = checker.for_agent(BUILTIN_AGENT_OVERLAYS["build"], read_only=False)
+    assert derived.read_only is True
+    assert derived.check("bash", {"command": "ls"}).decision == Decision.DENY
+
+
+def test_nested_agent_overlays_retain_each_ancestor_restriction():
+    parent = _checker(
+        {"mode": "yolo", "rules": {"ask": {"read": [{"pattern": "global/*"}]}}}
+    ).for_agent(
+        AgentOverlay(
+            denied_tools=("bash",),
+            extra_rules=_ruleset(
+                deny={"read": [{"pattern": "denied/*"}]},
+                ask={"read": [{"pattern": "private/*"}]},
+            ),
+        )
+    )
+    child = parent.for_agent(
+        AgentOverlay(extra_rules=_ruleset(allow={"read": [{"pattern": "*"}]}))
+    ).for_agent(AgentOverlay(mode="yolo"))
+    for path, expected in (
+        ("global/a", Decision.ASK),
+        ("denied/a", Decision.DENY),
+        ("private/a", Decision.ASK),
+        ("public/a", Decision.ALLOW),
+    ):
+        assert child.check("read", {"path": path}).decision == expected
+    assert child.check("bash", {"command": "ls"}).decision == Decision.DENY
+
+
+def test_child_rules_and_grants_cannot_override_ancestor_ask_or_deny():
+    parent = _checker({"mode": "yolo"}).for_agent(
+        AgentOverlay(
+            denied_tools=("write",),
+            extra_rules=_ruleset(
+                ask={"read": [{"pattern": "private/*"}]},
+                deny={"read": [{"pattern": "denied/*"}]},
+            ),
+        )
+    )
+    grants = SessionPermissions([("read", "*"), ("write", "*")])
+    child = parent.for_child(
+        AgentOverlay(extra_rules=_ruleset(allow={"read": [{"pattern": "*"}]})),
+        session_perms=grants,
+    ).for_child(AgentOverlay(mode="yolo"))
+    assert child.check("read", {"path": "private/a"}).decision == Decision.ASK
+    assert child.check("read", {"path": "denied/a"}).decision == Decision.DENY
+    assert child.check("write", {"path": "a"}).decision == Decision.DENY
+    assert child.check("read", {"path": "public/a"}).decision == Decision.ALLOW
+
+
+@pytest.mark.parametrize("derive", ["for_agent", "for_child"])
+def test_readonly_overlay_remains_effective_through_writable_descendants(derive):
+    parent = _checker({"mode": "yolo"}).for_agent(AgentOverlay(mode="readonly"))
+    child = getattr(parent, derive)(
+        AgentOverlay(mode="yolo", extra_rules=_ruleset(allow={"write": [{"pattern": "*"}]}))
+    )
+    child.set_mode("yolo")
+    assert parent.read_only is True
+    assert child.read_only is True
+    assert child.mode == "readonly"
+    assert child.check("write", {"path": "a"}).decision == Decision.DENY
+    assert child.check("read", {"path": "a"}).decision == Decision.ALLOW
+
+
+def test_child_path_rules_use_child_cwd_for_all_ancestor_layers(tmp_path):
+    parent_cwd, child_cwd = tmp_path / "parent", tmp_path / "child"
+    parent = _checker(
+        {
+            "mode": "yolo",
+            "rules": {"deny": {"read": [{"pattern": str(child_cwd / "secret")}]}},
+        },
+        cwd=parent_cwd,
+    ).for_agent(
+        AgentOverlay(
+            extra_rules=_ruleset(ask={"read": [{"pattern": str(child_cwd / "review")}]}),
+        )
+    )
+    child = parent.for_child(cwd=child_cwd).for_child()
+    assert child.check("read", {"path": "secret"}).decision == Decision.DENY
+    assert child.check("read", {"path": "review"}).decision == Decision.ASK
+    assert parent.check("read", {"path": "secret"}).decision == Decision.ALLOW
+    assert parent.check("read", {"path": "review"}).decision == Decision.ALLOW
+    assert child.check("read", {"path": str(parent_cwd / "secret")}).decision == Decision.ALLOW
+
+
+def test_children_have_independent_doom_tracking_without_recording_parent_calls():
+    parent = _checker({"mode": "yolo"}).for_agent(AgentOverlay())
+    args = {"path": "same"}
+    assert parent.check("read", args).decision == Decision.ALLOW
+    assert parent.check("read", args).decision == Decision.ALLOW
+    child, sibling = parent.for_child(), parent.for_child()
+    grandchild = child.for_child()
+    for checker in (child, sibling, grandchild):
+        assert [checker.check("read", args).decision for _ in range(4)] == [
+            Decision.ALLOW,
+            Decision.ALLOW,
+            Decision.ASK,
+            Decision.DENY,
+        ]
+    assert parent.check("read", args).decision == Decision.ASK
+
+
+def test_child_uses_supplied_scoped_grants_without_sharing_parent_or_sibling_grants():
+    parent_grants = SessionPermissions([("write", "src/*")])
+    parent = _checker({"mode": "readonly"}, session_perms=parent_grants)
+    child_grants = SessionPermissions()
+    child = parent.for_child(session_perms=child_grants)
+    sibling = parent.for_child()
+    assert child.check("write", {"path": "src/before"}).decision == Decision.DENY
+    child_grants.grant("write", "src/approved")
+    child_grants.grant("write", "outside/*")
+    assert child.check("write", {"path": "src/approved"}).decision == Decision.ALLOW
+    assert child.check("write", {"path": "src/other"}).decision == Decision.DENY
+    assert child.check("write", {"path": "outside/file"}).decision == Decision.DENY
+    assert sibling.check("write", {"path": "src/approved"}).decision == Decision.DENY
+    assert parent.check("write", {"path": "src/other"}).decision == Decision.ALLOW
+    assert parent.check("write", {"path": "outside/file"}).decision == Decision.DENY
+    assert parent_grants.grants == [("write", "src/*")]
+
+
+@pytest.mark.parametrize("source", ["global_allow", "global_ask", "grant", "overlay_allow"])
+def test_readonly_with_writable_exceptions_is_not_safe_for_shared_checkout(source):
+    permissions = {"mode": "readonly"}
+    grants = SessionPermissions()
+    overlay = AgentOverlay()
+    expected = Decision.ALLOW
+    if source.startswith("global_"):
+        decision = source.removeprefix("global_")
+        permissions["rules"] = {decision: {"write": [{"pattern": "allowed/*"}]}}
+        expected = Decision(decision)
+    elif source == "grant":
+        grants.grant("write", "allowed/*")
+    else:
+        permissions["mode"] = "yolo"
+        overlay = AgentOverlay(
+            mode="readonly",
+            extra_rules=_ruleset(allow={"write": [{"pattern": "allowed/*"}]}),
+        )
+    checker = _checker(permissions, session_perms=grants).for_agent(overlay)
+    assert checker.read_only is False
+    assert checker.check("write", {"path": "allowed/a"}).decision == expected
+    assert checker.check("write", {"path": "other/a"}).decision == Decision.DENY
+    strict = checker.for_child(read_only=True)
+    assert strict.read_only is True
+    assert strict.check("write", {"path": "allowed/a"}).decision == Decision.DENY
+
+
+@pytest.mark.parametrize("parent_decision", list(Decision))
+@pytest.mark.parametrize("overlay_decision", list(Decision))
+def test_per_call_overlay_composes_with_full_policy(parent_decision, overlay_decision):
+    parent = _checker(
+        {"mode": "yolo", "rules": {parent_decision: {"read": [{"pattern": "*"}]}}}
+    ).for_agent(AgentOverlay(denied_tools=("write",)))
+    overlay = AgentOverlay(extra_rules=_ruleset(**{overlay_decision: {"read": [{"pattern": "*"}]}}))
+    if Decision.DENY in (parent_decision, overlay_decision):
+        expected = Decision.DENY
+    elif Decision.ASK in (parent_decision, overlay_decision):
+        expected = Decision.ASK
+    else:
+        expected = Decision.ALLOW
+    assert parent.check("read", {"path": "a"}, overlay).decision == expected
+    assert parent.check("write", {"path": "a"}, overlay).decision == Decision.DENY
+    assert parent.check("read", {"path": "b"}).decision == parent_decision

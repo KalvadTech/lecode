@@ -4,12 +4,17 @@ Rendering goes through the feed (normal scrollback) and the statusline's
 ``awaiting approval`` state; keypresses are intercepted by the main app's
 keybindings, filtered on :attr:`ApprovalPrompt.is_pending`, so no nested
 prompt_toolkit application ever fights over stdin.
+
+Concurrent askers (parent turn + workers) queue FIFO. Only the head is
+resolved by keypresses; queued entries keep waiting until they reach the
+front. Cancelling an awaiter removes exactly that entry.
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from functools import partial
 
 from lecode.permission import ApprovalDecision
 
@@ -23,6 +28,9 @@ class PendingApproval:
     target: str
     reason: str
     future: asyncio.Future[ApprovalDecision] = field(repr=False)
+    #: Attribution for "[w2 bash]" style prompts; None = the main turn.
+    worker: str | None = None
+    conversation: str = "main"
 
 
 def approval_prompt_text(tool_name: str, target: str) -> str:
@@ -32,32 +40,56 @@ def approval_prompt_text(tool_name: str, target: str) -> str:
 
 
 class ApprovalPrompt:
-    """At most one pending approval; resolved by keypress or cancelled."""
+    """FIFO queue of pending approvals; keypresses resolve only the head."""
 
     def __init__(self) -> None:
-        self._pending: PendingApproval | None = None
+        self._queue: list[PendingApproval] = []
 
     @property
     def pending(self) -> PendingApproval | None:
-        return self._pending
+        return self._queue[0] if self._queue else None
 
     @property
     def is_pending(self) -> bool:
-        return self._pending is not None
+        return bool(self._queue)
 
-    def request(self, tool_name: str, target: str, reason: str) -> asyncio.Future[ApprovalDecision]:
+    def request(
+        self,
+        tool_name: str,
+        target: str,
+        reason: str,
+        *,
+        worker: str | None = None,
+        conversation: str = "main",
+    ) -> asyncio.Future[ApprovalDecision]:
         future: asyncio.Future[ApprovalDecision] = asyncio.get_running_loop().create_future()
-        self._pending = PendingApproval(tool_name, target, reason, future)
+        entry = PendingApproval(tool_name, target, reason, future, worker, conversation)
+        self._queue.append(entry)
+        future.add_done_callback(partial(self._on_future_done, entry))
         return future
 
     def resolve(self, decision: ApprovalDecision) -> None:
-        pending = self._pending
-        if pending is not None and not pending.future.done():
-            pending.future.set_result(decision)
-        self._pending = None
+        entry = self.pending
+        if entry is not None and not entry.future.done():
+            entry.future.set_result(decision)
+            self._queue.pop(0)
 
-    def cancel(self) -> None:
-        pending = self._pending
-        if pending is not None and not pending.future.done():
-            pending.future.cancel()
-        self._pending = None
+    def cancel(self, future: asyncio.Future[ApprovalDecision] | None = None) -> None:
+        """Cancel the entry behind ``future`` only, or all outstanding when omitted."""
+        if future is None:
+            queue, self._queue = self._queue, []
+            for item in queue:
+                if not item.future.done():
+                    item.future.cancel()
+            return
+        for i, item in enumerate(self._queue):
+            if item.future is future:
+                del self._queue[i]
+                future.cancel()
+                return
+
+    def _on_future_done(
+        self, entry: PendingApproval, future: asyncio.Future[ApprovalDecision]
+    ) -> None:
+        if future.cancelled() and entry in self._queue:
+            self._queue.remove(entry)

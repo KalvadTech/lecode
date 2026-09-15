@@ -333,6 +333,38 @@ def test_agent_runs_respect_tombstones(store, session):
     assert store.load_agent_runs(session) == []
 
 
+def test_load_agent_runs_matches_generic_events(store, session):
+    store.record_agent_run(session, {"run_id": "one", "agent": "explore", "status": "ok"})
+    store.append_event(session, "worker_usage", {"input_tokens": 3})
+    assert store.load_agent_runs(session) == store.load_events(session, "agent_run")
+    assert [run["run_id"] for run in store.load_agent_runs(session)] == ["one"]
+
+
+# -- generic event loading ------------------------------------------------------
+
+
+def test_load_events_in_append_order(store, session):
+    store.append_event(session, "worker", {"id": "one"})
+    store.append_event(session, "worker_state", {"id": "one", "state": "done"})
+    store.append_event(session, "worker", {"id": "two"})
+    assert store.load_events(session, "worker") == [{"id": "one"}, {"id": "two"}]
+    assert store.load_events(session, "worker_state") == [{"id": "one", "state": "done"}]
+
+
+def test_load_events_respects_tombstones(store, session):
+    first = store.append_event(session, "worker_usage", {"dispatch": 1})
+    hidden = store.append_event(session, "worker_usage", {"dispatch": 2})
+    store.append_tombstone(session, up_to_seq=hidden.seq - 1)
+    last = store.append_event(session, "worker_usage", {"dispatch": 3})
+    assert store.load_events(session, "worker_usage") == [{"dispatch": 1}, {"dispatch": 3}]
+    assert first.seq < hidden.seq < last.seq
+
+
+def test_load_events_unknown_kind(store, session):
+    store.record_agent_run(session, {"run_id": "r", "agent": "explore", "status": "ok"})
+    assert store.load_events(session, "no_such_kind") == []
+
+
 # -- attach locking -------------------------------------------------------------
 
 

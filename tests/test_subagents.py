@@ -578,7 +578,8 @@ async def test_task_result_event_carries_run_id_metadata(tmp_path, monkeypatch):
     assert task_results
     run_id = task_results[0].metadata.get("run_id")
     assert run_id
-    assert run_id == store.load_agent_runs(session)[0]["run_id"]
+    assert run_id == task_results[0].metadata["worker_id"]
+    assert runtime.ctx.extras["workers"].get(run_id).session_id != session.id
 
 
 async def test_roster_panel_visible_while_child_runs(tmp_path, monkeypatch):
@@ -682,22 +683,21 @@ async def test_at_agent_runs_directly(tmp_path, monkeypatch):
     script = [{"text": "42 files", "usage": {"input_tokens": 7, "output_tokens": 3}}]
     app, provider, out = make_app(tmp_path, monkeypatch, script)
     await app._submit("@explore count the files")
-    await app._turn_task
+    task = app._turn_task
+    assert task is not None and not task.done()
+    await task
     rendered = out.getvalue()
     assert "> @explore count the files" in rendered
-    assert "42 files" in rendered
     request = provider.requests[0]
     assert "read-only exploration agent" in request["messages"][0]["content"]
     assert request["messages"][1] == {"role": "user", "content": "count the files"}
-    # A side query: no message history, but the run itself is persisted.
+    # A persistent human worker: no root history or legacy agent-run record.
     assert app.store.load_messages(app.session) == []
-    runs = app.store.load_agent_runs(app.session)
-    assert len(runs) == 1
-    assert runs[0]["agent"] == "explore"
-    assert runs[0]["status"] == "ok"
-    assert runs[0]["prompt"] == "count the files"
-    assert runs[0]["answer"] == "42 files"
-    assert app._last_response == "42 files"
+    worker = app.worker_manager.list()[0]
+    assert worker.origin == "human"
+    assert worker.result is not None and worker.result.final_text == "42 files"
+    assert app.store.load_agent_runs(app.session) == []
+    assert "42 files" not in rendered  # completion notifies until /agent submit
     assert app._status.input_tokens == 7
 
 

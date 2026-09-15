@@ -282,6 +282,7 @@ class AgentRunner:
         self.ctx.extras["conversation"] = history
         # Background tasks finished between runs surface at the start.
         await self._drain_background(history, on_event)
+        await self._consume_workers(history, on_event)
         input_tokens = 0
         output_tokens = 0
         cost_usd = 0.0
@@ -303,6 +304,7 @@ class AgentRunner:
                     break
                 if turns > 0:
                     await self._drain_queues(history, on_event)
+                    await self._consume_workers(history, on_event)
                     if self.config.agent.turn_cooldown_ms > 0:
                         await asyncio.sleep(self.config.agent.turn_cooldown_ms / 1000)
 
@@ -367,6 +369,8 @@ class AgentRunner:
                     continuing = True
                     continue
                 final_text = (final_text if continuing else "") + completed.content
+                if await self._consume_workers(history, on_event):
+                    continue
                 stop_reason = "done"
                 break
         except asyncio.CancelledError:
@@ -539,8 +543,19 @@ class AgentRunner:
             )
             for call in completed.tool_calls
         ]
+        manager = self.ctx.extras.get("workers")
+        worker_id = self.ctx.extras.get("worker_id")
+        suspend = (
+            manager is not None
+            and worker_id is not None
+            and all(call["function"]["name"] == "task" for call in completed.tool_calls)
+        )
         try:
-            pairs = await asyncio.gather(*tasks)
+            if suspend:
+                async with manager.suspend(worker_id):
+                    pairs = await asyncio.gather(*tasks)
+            else:
+                pairs = await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             # Cancel in-flight tools; persist the results that did complete.
             for task in tasks:
@@ -602,6 +617,16 @@ class AgentRunner:
             history.append(message)
             self._persist_message(message)
             await self._emit(on_event, QueuedMessage(content=note))
+
+    async def _consume_workers(self, history: list[ChatMessage], on_event: OnEvent | None) -> bool:
+        """Deliver worker inboxes only between model turns, never mid tool batch."""
+        manager = self.ctx.extras.get("workers")
+        if manager is None:
+            return False
+        items = manager.consume(self.ctx.extras.get("worker_id"), history)
+        for item in items:
+            await self._emit(on_event, QueuedMessage(content=item["text"]))
+        return bool(items)
 
     # -- automatic compaction -----------------------------------------------------
 

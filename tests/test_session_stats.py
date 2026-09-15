@@ -40,6 +40,7 @@ def test_counts_and_roles(store, session):
     assert stats.role_counts == {"user": 1, "assistant": 2}
     assert stats.input_tokens == 1_001_000
     assert stats.output_tokens == 1_000_500
+    assert stats.usage_incomplete is False
 
 
 def test_cost_combines_recorded_and_catalog_pricing(store, session):
@@ -108,3 +109,52 @@ def test_context_tokens_zero_without_usage(store):
     s = store.create("plain", cwd="/tmp")
     store.append_message(s, {"role": "assistant", "content": "no usage"})
     assert session_stats(store, s).context_tokens == 0
+
+
+# -- worker usage ----------------------------------------------------------------
+
+
+def test_worker_usage_summed_once(store, session):
+    store.append_event(
+        session,
+        "worker_usage",
+        {"input_tokens": 100, "output_tokens": 50, "cost_usd": 0.002},
+    )
+    store.append_event(
+        session,
+        "worker_usage",
+        {"usage": {"input_tokens": 200, "output_tokens": 25, "cost_usd": 0.003}},
+    )
+    stats = session_stats(store, session, catalog=sample_catalog())
+    assert stats.input_tokens == 1_001_000 + 300
+    assert stats.output_tokens == 1_000_500 + 75
+    assert stats.cost_usd == pytest.approx(2.26 + 0.005)
+
+
+def test_worker_usage_includes_failed_and_cancelled_dispatches(store, session):
+    store.append_event(
+        session,
+        "worker_usage",
+        {"status": "failed", "input_tokens": 10, "output_tokens": 5},
+    )
+    store.append_event(
+        session,
+        "worker_usage",
+        {"status": "cancelled", "input_tokens": 7, "output_tokens": 3},
+    )
+    stats = session_stats(store, session, catalog=sample_catalog())
+    assert stats.input_tokens == 1_001_000 + 17
+    assert stats.output_tokens == 1_000_500 + 8
+
+
+def test_worker_usage_incomplete_flag(store, session):
+    store.append_event(session, "worker_usage", {"input_tokens": 1, "output_tokens": 1})
+    assert session_stats(store, session).usage_incomplete is False
+    store.append_event(
+        session,
+        "worker_usage",
+        {"input_tokens": 1, "output_tokens": 1, "incomplete": True},
+    )
+    stats = session_stats(store, session)
+    assert stats.usage_incomplete is True
+    assert stats.input_tokens == 1_001_000 + 2

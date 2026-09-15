@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from lecode.agent.runner import Done, Error, LlmCall, ToolCall, ToolResult
 from lecode.extras.subagents import SubagentProgress
 from lecode.tui.agents import (
@@ -102,3 +104,43 @@ def test_detail_lines_show_tools_and_answer():
     assert "a.py" in text
     assert "line one" in text
     assert "the answer" in text
+
+
+def test_worker_tree_shows_cost_and_selected_context():
+    roster = AgentRoster()
+    root = SimpleNamespace(
+        id="worker-root",
+        parent_id=None,
+        depth=1,
+        agent="explore",
+        description="Scan the repository",
+        origin="delegated",
+        state="running",
+        error=None,
+        result=None,
+        usage_totals=SimpleNamespace(cost_usd=0.0123, context_tokens=1234),
+        usage_incomplete=False,
+    )
+    child = SimpleNamespace(
+        id="worker-child",
+        parent_id="worker-root",
+        depth=2,
+        agent="explore",
+        description="Inspect tests",
+        origin="delegated",
+        state="interrupted",
+        error=None,
+        result=None,
+        usage_totals=SimpleNamespace(cost_usd=0.0, context_tokens=0),
+        usage_incomplete=True,
+    )
+    roster.sync_worker(root, context_window=200_000)
+    roster.sync_worker(child, context_window=200_000)
+    compact = _plain(roster_lines(roster, THEME, width=100))
+    detail = _plain(detail_lines(roster.get("worker-root"), THEME, width=100))
+    assert "workers · 1 running · 1 done · $0.0123 incomplete" in compact
+    assert "Inspect tests" in compact and "interrupted" in compact
+    assert "cost: $0.0123" in detail
+    assert "subtree: $0.0123 (incomplete)" in detail
+    assert "ctx: 1.2k/200.0k" in detail
+    assert "elapsed:" in detail
