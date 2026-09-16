@@ -139,6 +139,8 @@ async def _run_pty_app_once(
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TERM", "xterm-256color")
 
     saved_stdout = os.dup(1)
@@ -215,6 +217,10 @@ async def _run_pty_app_once(
             # mid-flow fails fast instead of every driver wait timing out on
             # a dead tty (the two CI flakes looked exactly like that).
             done, _ = await asyncio.wait({task, driven}, return_when=asyncio.FIRST_COMPLETED)
+            if driven in done and driven.exception() is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                return await driven
             if task in done and driven not in done:
                 driven.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -311,6 +317,161 @@ async def test_focused_worker_uses_the_current_composer(tmp_path, monkeypatch):
         delay=0.05,
     )
     assert any("to @explore" in line for line in lines)
+
+
+async def test_ctrl_c_focused_child_keeps_root_alive(tmp_path, monkeypatch):
+    async def drive(master: int, screen: pyte.HistoryScreen) -> list[str]:
+        lines = lambda: _screen_lines(screen)  # noqa: E731
+        os.write(master, b"delegate work\r")
+        await _wait_for(lambda: screen.display, "workers")
+        os.write(master, b"/agent 1 focus\r")
+        await _wait_for(lambda: screen.display, "to @explore")
+        os.write(master, b"\x03")
+        await _wait_for(lines, "ROOT SURVIVED")
+        assert not any("turn cancelled" in line for line in lines())
+        os.write(master, b"/quit\r")
+        return lines()
+
+    await _run_pty_app(
+        tmp_path,
+        monkeypatch,
+        [
+            {"tool_calls": [{"name": "task", "arguments": '{"prompt":"child work"}'}]},
+            {"text": ["still working "] * 200},
+            {"text": "ROOT SURVIVED"},
+        ],
+        drive,
+        delay=0.03,
+    )
+
+
+async def test_denied_focused_prompt_never_executes(tmp_path, monkeypatch):
+    def configure(config: Config) -> None:
+        config.hooks = {
+            "UserPromptSubmit": [
+                'case $(cat) in *blocked-prompt*) echo \'{"verdict":"deny"}\' ;; esac'
+            ]
+        }
+
+    async def drive(master: int, screen: pyte.HistoryScreen) -> list[str]:
+        lines = lambda: _screen_lines(screen)  # noqa: E731
+        os.write(master, b"@explore initial\r")
+        await _wait_for(lines, "started for @explore")
+        os.write(master, b"/agent 1 focus\r")
+        await _wait_for(lambda: screen.display, "to @explore")
+        os.write(master, b"blocked-prompt\r")
+        await _wait_for(lines, "prompt blocked by hook")
+        os.write(master, b"/quit\r")
+        return lines()
+
+    await _run_pty_app(
+        tmp_path,
+        monkeypatch,
+        [
+            {"text": "initial"},
+            {"text": "NEVER_EXECUTED"},
+        ],
+        drive,
+        configure=configure,
+        delay=0.03,
+    )
+    store = SessionStore()
+    for meta in store.list_sessions():
+        messages = store.load_for_model(store.open(meta.id))
+        assert not any(m.get("content") in {"blocked-prompt", "NEVER_EXECUTED"} for m in messages)
+
+
+async def test_focus_switch_replaces_visible_worker_transcript(tmp_path, monkeypatch):
+    async def drive(master: int, screen: pyte.HistoryScreen) -> list[str]:
+        lines = lambda: _screen_lines(screen)  # noqa: E731
+        visible = lambda: screen.display  # noqa: E731
+        os.write(master, b"@explore FIRST\r")
+        await _wait_for(lines, "explore · FIRST · worker")
+        os.write(master, b"@explore SECOND\r")
+        await _wait_for(lines, "explore · SECOND · worker")
+        os.write(master, b"/agent 1\r")
+        await _wait_for(visible, "ANSWER_A")
+        os.write(master, b"/agent 2 focus\r")
+        await _wait_for(visible, "ANSWER_B")
+        assert not any("ANSWER_A" in line for line in visible())
+        await _wait_for(visible, "to @explore")
+        os.write(master, b"/agent root\r")
+        await _wait_for(visible, "| message |")
+        assert not any("transcript:" in line for line in visible())
+        os.write(master, b"/agent 2 focus\r")
+        await _wait_for(visible, "to @explore")
+        os.write(master, b"\x1b")
+        await _wait_for(visible, "| message |")
+        assert not any("transcript:" in line for line in visible())
+        os.write(master, b"/quit\r")
+        return lines()
+
+    await _run_pty_app(
+        tmp_path, monkeypatch, [{"text": "ANSWER_A"}, {"text": "ANSWER_B"}], drive, delay=0.03
+    )
+
+
+async def test_denied_note_composition_never_reaches_model(tmp_path, monkeypatch):
+    def configure(config: Config) -> None:
+        config.hooks = {
+            "UserPromptSubmit": ['case $(cat) in *BLOCKED*) echo \'{"verdict":"deny"}\' ;; esac']
+        }
+
+    async def drive(master: int, screen: pyte.HistoryScreen) -> list[str]:
+        lines = lambda: _screen_lines(screen)  # noqa: E731
+        os.write(master, b"/btw BLOCKED\r")
+        await _wait_for(lines, "noted")
+        os.write(master, b"go\r")
+        await _wait_for(lines, "prompt blocked by hook")
+        os.write(master, b"/quit\r")
+        return lines()
+
+    await _run_pty_app(
+        tmp_path, monkeypatch, [{"text": "NEVER_EXECUTED"}], drive, configure=configure, delay=0.03
+    )
+    store = SessionStore()
+    session = store.open(store.list_sessions()[0].id)
+    assert store.load_for_model(session) == []
+    assert not any(event.get("text") == "go" for event in store.load_events(session, "input"))
+
+
+async def test_idle_incomplete_total_and_selected_context_render(tmp_path, monkeypatch):
+    def configure(config: Config) -> None:
+        config.agent.subagent_model = "anthropic/claude-sonnet-4"
+
+    async def drive(master: int, screen: pyte.HistoryScreen) -> list[str]:
+        lines = lambda: _screen_lines(screen)  # noqa: E731
+        visible = lambda: screen.display  # noqa: E731
+        os.write(master, b"main work\r")
+        await _wait_for(lines, "answer:")
+        os.write(master, b"@explore child work\r")
+        await _wait_for(visible, "total cost: $0.3000")
+        os.write(master, b"/agent 1 focus\r")
+        await _wait_for(visible, "2.0k/200.0k")
+        os.write(master, b"follow up\r")
+        await _wait_for(visible, "total cost: $0.3000 incomplete")
+        os.write(master, b"\x1b")
+        await _wait_for(visible, "| message |")
+        await _wait_for(visible, "0.1k/1.0M")
+        assert any("total cost: $0.3000 incomplete" in line for line in visible())
+        os.write(master, b"/quit\r")
+        return lines()
+
+    await _run_pty_app(
+        tmp_path,
+        monkeypatch,
+        [
+            {"text": "main", "usage": {"input_tokens": 100, "output_tokens": 10, "cost_usd": 0.1}},
+            {
+                "text": "child",
+                "usage": {"input_tokens": 2000, "output_tokens": 20, "cost_usd": 0.2},
+            },
+            {"text": "unknown usage"},
+        ],
+        drive,
+        configure=configure,
+        delay=0.03,
+    )
 
 
 async def test_slash_menu_renders_and_no_match_row(tmp_path, monkeypatch):

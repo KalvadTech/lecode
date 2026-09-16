@@ -9,10 +9,13 @@ so. Pickers are inline numbered lists — no dialogs.
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, get_args
 
 from lecode.agent.tools.background import format_row
+from lecode.agent.tools.workers import HUMAN_CONTROL_EXTRA
 from lecode.config.models import PermissionMode, ThinkingLevel
 from lecode.context.resources import load_text
 from lecode.extras.background import BACKGROUND_EXTRA
@@ -762,8 +765,17 @@ async def cmd_runs(app: TuiApp, args: list[str]) -> None:
     app.open_agent_run(run.run_id)
 
 
+_AGENT_USAGE = (
+    "[id|number] [send TEXT|stop [tree]|resume [TEXT]|submit|focus|"
+    "inspect|integrate WORKER_HASH PARENT_HASH|cleanup|recover] | root"
+)
+
+
 async def cmd_agent(app: TuiApp, args: list[str]) -> None:
-    """``/agent <id|number> [send|stop|resume|submit|focus]``: human worker control."""
+    """Human worker controls use the same tool permission gate as the model."""
+    if args == ["root"]:
+        app.focus_worker(None)
+        return
     manager = app.worker_manager
     if manager is None:
         app.feed.info("(no workers this session)")
@@ -778,7 +790,7 @@ async def cmd_agent(app: TuiApp, args: list[str]) -> None:
                 f"{run.index}. {run.agent} · {run.status} · {run.description} · {run.run_id}"
                 for run in workers
             )
-            + "\n\ncontrol: /agent <id|number> [send TEXT|stop [tree]|resume [TEXT]|submit|focus]"
+            + f"\n\ncontrol: /agent {_AGENT_USAGE}"
         )
         return
     worker = app.resolve_worker(args[0])
@@ -791,27 +803,40 @@ async def cmd_agent(app: TuiApp, args: list[str]) -> None:
     action = args[1]
     rest = args[2:]
     try:
-        if action == "send":
-            if not rest:
-                raise ValueError("usage: /agent <id> send <text>")
-            await manager.send(worker.id, " ".join(rest), from_human=True)
-            app.feed.info(f"sent to @{worker.agent} ({worker.id[:8]})")
-        elif action == "stop":
-            await manager.stop(worker.id, tree=bool(rest and rest[0] == "tree"))
-            app.feed.info(f"worker {worker.id[:8]} stopped")
-        elif action == "resume":
-            await manager.resume(worker.id, " ".join(rest) if rest else None)
-            app.feed.info(f"worker {worker.id[:8]} resumed")
-        elif action == "submit":
-            await app.submit_worker(worker.id)
-            app.feed.info(f"worker {worker.id[:8]} submitted")
-        elif action == "focus":
+        if action == "focus" and not rest:
             app.focus_worker(worker.id)
-            app.feed.info(f"composer focused on @{worker.agent} ({worker.id[:8]}); Esc returns")
-        else:
-            raise ValueError(
-                "usage: /agent <id> [send TEXT|stop [tree]|resume [TEXT]|submit|focus]"
+            app.feed.info(
+                f"composer focused on @{worker.agent} ({worker.id[:8]}); "
+                "Esc returns to parent; /agent root returns to main"
             )
+            return
+        params = {"action": action, "id": worker.id}
+        if action == "send" and rest:
+            params["text"] = " ".join(rest)
+        elif action == "resume":
+            if rest:
+                params["text"] = " ".join(rest)
+        elif action == "stop" and rest in ([], ["tree"]):
+            params["tree"] = bool(rest)
+        elif action == "integrate" and len(rest) == 2:
+            params["reviewed_head"] = rest[0]
+            params["reviewed_parent_head"] = rest[1]
+        elif action in {"submit", "inspect", "review", "cleanup", "recover"} and not rest:
+            pass
+        else:
+            raise ValueError(f"usage: /agent {_AGENT_USAGE}")
+        ctx = app.runtime.ctx
+        ctx = replace(ctx, extras={**ctx.extras, HUMAN_CONTROL_EXTRA: True})
+        _, result = await ctx.extras["registry"].dispatch_result(
+            "human-worker-control", "workers", json.dumps(params), ctx
+        )
+        if result.is_error:
+            app.feed.error(result.content)
+        else:
+            app.feed.info(result.content)
+            note = result.metadata.get("notification")
+            if note and note["new"] and note["deliver"]:
+                await app._on_worker_notification(note)
     except (KeyError, RuntimeError, SubagentError, ValueError) as e:
         app.feed.error(str(e))
 
@@ -1477,7 +1502,7 @@ def _complete_runs(app: TuiApp, args: list[str]) -> list[CompletionRow]:
 
 def _complete_agent(app: TuiApp, args: list[str]) -> list[CompletionRow]:
     if not args:
-        return [
+        return [("root", "root", "return to main conversation")] + [
             (run.run_id, f"{run.index} {run.agent} · {run.description}", run.status)
             for run in app.roster.runs()
             if run.worker
@@ -1485,7 +1510,17 @@ def _complete_agent(app: TuiApp, args: list[str]) -> list[CompletionRow]:
     if len(args) == 1:
         return [
             (action, action, "worker control")
-            for action in ("send", "stop", "resume", "submit", "focus")
+            for action in (
+                "send",
+                "stop",
+                "resume",
+                "submit",
+                "focus",
+                "inspect",
+                "integrate",
+                "cleanup",
+                "recover",
+            )
         ]
     if len(args) == 2 and args[1] == "stop":
         return [("tree", "tree", "stop descendants too")]
@@ -1714,7 +1749,7 @@ ARG_HINTS = {
     "review": "[file…]",
     "notifications": "[on|off]",
     "runs": "[number|id]",
-    "agent": "[id|number] [send TEXT|stop [tree]|resume [TEXT]|submit|focus]",
+    "agent": _AGENT_USAGE,
 }
 
 

@@ -365,24 +365,32 @@ async def test_worker_approval_is_attributed_at_fifo_head(tmp_path, monkeypatch)
 
 
 async def test_dirty_worker_confirmation_is_one_shot(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
     app, out = make_app(tmp_path, monkeypatch, [])
-    task = asyncio.ensure_future(
-        app._confirm_worker_worktree(
-            "Uncommitted changes will not enter the worker's committed-HEAD worktree. Continue?",
-            worker=SimpleNamespace(id="worker-1234", agent="build"),
-            worktree=tmp_path / "worker-tree",
-        )
+    question = (
+        f"@build worker worker-1234 in {tmp_path / 'worker-tree'}: "
+        "Uncommitted changes will not enter the committed-HEAD worktree. Continue?"
     )
-    await wait_for(lambda: app._approval.pending is not None)
-    pending = app._approval.pending
-    assert pending is not None and pending.allow_always is False
-    assert "@build worker worker-1" in out.getvalue()
-    assert "worker-tree" in out.getvalue()
-    assert "(y)es (n)o" in out.getvalue()
-    app._resolve_approval(AllowAlways(pattern="*"))
-    assert await task is False
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app.worker_manager.confirm is not None)
+        first = asyncio.create_task(app.worker_manager.confirm(question))
+        second = asyncio.create_task(app.worker_manager.confirm("second worker question?"))
+        await wait_for(lambda: "(y)es (n)o" in out.getvalue())
+        assert question in " ".join(out.getvalue().split())
+        assert "second worker question?" not in out.getvalue()
+        inp.send_text("a")
+        await asyncio.sleep(0.05)
+        assert not first.done() and not second.done()
+        inp.send_text("y")
+        assert await first is True
+        await wait_for(lambda: "second worker question?" in out.getvalue())
+        assert not second.done()
+        inp.send_text("n")
+        assert await second is False
+        assert app.status.state is StatusLineState.IDLE
+        assert app.store.load_grants(app.session) == []
+        inp.send_text("/quit\r")
+        assert await task == 0
 
 
 async def test_pipe_approval_y_runs_asked_tool(tmp_path, monkeypatch):

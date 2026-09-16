@@ -14,6 +14,7 @@ from lecode.permission import Decision
 def cwd(tmp_path, monkeypatch):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    monkeypatch.chdir(tmp_path)
     return tmp_path
 
 
@@ -31,6 +32,21 @@ def test_default_runtime(cwd):
     assert runtime.registry.names() == sorted(expected)
     assert runtime.ctx.auto_approve is False
     assert runtime.system_prompt.startswith("You are lecode")
+    assert "- general: General-purpose coding subagent" in runtime.system_prompt
+    assert "- explore: Fast read-only" in runtime.system_prompt
+
+
+def test_subagent_discovery_respects_overrides(cwd):
+    from tests.test_agents import write_agent
+
+    agents = cwd / ".lecode" / "agents"
+    write_agent(agents, "general", "description: Custom primary\nmode: primary")
+    write_agent(agents, "secret", "description: Hidden\nmode: subagent\nhidden: true")
+    write_agent(agents, "helper", "description: Custom helper\nmode: subagent")
+    runtime = build_runtime(Config(), cwd)
+    assert "- general:" not in runtime.system_prompt
+    assert "- secret:" not in runtime.system_prompt
+    assert "- helper: Custom helper" in runtime.system_prompt
 
 
 def test_read_only_mode_denies_writes(cwd):
@@ -78,15 +94,14 @@ def test_session_runtime_installs_workers(cwd, tmp_path):
     assert runtime.ctx.extras["workers"].session is session
 
 
-def test_workers_schema_omits_unimplemented_integration_actions(cwd, tmp_path):
+def test_workers_schema_exposes_reviewed_integration_controls(cwd, tmp_path):
     from lecode.session.storage import SessionStore
 
     store = SessionStore(config_dir=tmp_path / "cfg")
     session = store.create("workers", cwd)
     runtime = build_runtime(Config(), cwd, session=session, store=store)
     actions = runtime.registry.get("workers").parameters["properties"]["action"]["enum"]
-    assert "integrate" not in actions
-    assert "cleanup" not in actions
+    assert {"review", "integrate", "cleanup", "recover"} <= set(actions)
 
 
 def test_agent_name_applies_overlay(cwd):

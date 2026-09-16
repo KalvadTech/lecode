@@ -181,11 +181,11 @@ class PermissionChecker:
 
         A readonly fallback with writable rule/grant exceptions is not a safe
         shared-checkout policy. Conservatively treat Ask as writable too.
+        Action-dependent tools must be treated as writable without arguments.
         """
         if self._read_only or (self._parent is not None and self._parent.read_only):
             return True
-        mode = self._overlay.mode if self._overlay and self._overlay.mode else self._mode
-        if mode != "readonly":
+        if self._mode != "readonly" and (self._overlay is None or self._overlay.mode != "readonly"):
             return False
         rules = [self._rules]
         if self._overlay is not None:
@@ -352,11 +352,18 @@ class PermissionChecker:
     # -- mode fallback ---------------------------------------------------------
 
     def _is_read_class(self, tool_name: str, args: dict[str, Any] | None = None) -> bool:
-        return (
-            tool_name in READ_TOOLS
-            or is_read_equiv_mcp(tool_name)
-            or (tool_name == "workers" and args is not None and args.get("action") == "question")
-        )
+        if tool_name == "workers":
+            # Control-plane replies cannot widen descendant permissions. Without
+            # an action, capability inference must still account for mutations.
+            action = args.get("action") if args is not None else None
+            return isinstance(action, str) and action in {
+                "list",
+                "question",
+                "send",
+                "inspect",
+                "review",
+            }
+        return tool_name in READ_TOOLS or is_read_equiv_mcp(tool_name)
 
     def _mode_fallback(
         self, mode: PermissionMode, tool_name: str, args: dict[str, Any]

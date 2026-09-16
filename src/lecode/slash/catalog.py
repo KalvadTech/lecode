@@ -45,7 +45,7 @@ BUILTIN_COMMANDS: list[tuple[str, str]] = [
     ("queue", "Show queued/steered messages"),
     ("tasks", "List background tasks"),
     ("runs", "Inspect agent runs"),
-    ("agent", "Control a worker"),
+    ("agent", "Control a worker; integrate WORKER_HASH PARENT_HASH after review"),
     ("copy", "Copy the last answer to the clipboard"),
     ("export", "Export the session as HTML"),
     ("import", "Import a session file"),

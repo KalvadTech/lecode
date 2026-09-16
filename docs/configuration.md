@@ -74,6 +74,63 @@ default context window and zeroed pricing.
 | `enabled` | `{}` | per-tool on/off, e.g. `enabled = { bash = false }` |
 | `allowlist` | `[]` | when non-empty, only these tools are registered |
 
+## `[worktree]`
+
+| field | default | meaning |
+|---|---|---|
+| `validation` | `[]` | ordered list of validation commands run in the worker checkout before integration |
+
+```toml
+[worktree]
+validation = ["uv run ruff check", "uv run python -m pytest"]
+```
+
+Lists replace inherited lists, so a project can explicitly set `validation = []`.
+**Empty means an explicit human gate**, not automatic approval or successful
+validation. Integrating without checks requires a human decision for that operation,
+passed as `allow_unvalidated=True`. Tool auto-approval never supplies that decision.
+Blank commands are rejected. Configuring checks does not grant permission to run them.
+
+### Worker lifecycle integration API
+
+These `WorktreeManager` primitives are for the worker/tool caller to wire at an
+idle boundary, after stopping or joining the worker:
+
+- `await reconcile(name, *, recreate=False) -> WorktreeInspection` verifies the
+  checkout against its sidecar and its pinned immediate parent. It merges the
+  parent's latest committed HEAD into a clean worker for follow-up work. Dirty
+  or in-progress work is returned unchanged. A conflicting merge raises
+  `WorktreeError` and remains visible in the worker. It never resets or rebases.
+  Missing checkouts raise a clean error unless `recreate=True` was explicitly
+  requested. Recreation uses the surviving worker branch, or the recorded base
+  commit if the branch is gone, then merges current parent progress.
+  **Missing uncommitted content cannot be recovered.**
+- `await integrate(name, *, reviewed_head, validation, validation_runner,
+  allow_unvalidated=False) -> MergeResult` requires the parent model to review
+  the actual diff against the pinned destination and approve the exact full
+  commit hash. The mechanical gate cannot judge whether that review was honest.
+  `ValidationRunner` is `Callable[[str, Path], Awaitable[ProcResult]]`, using
+  `lecode.extras.proc.ProcResult`. The caller must dispatch every command through
+  `ToolRegistry` and map denials/failures to nonzero results. There is no built-in
+  shell runner. If merging destination progress changes the candidate HEAD,
+  integration stops with `WorktreeError` requiring a fresh diff review and hash.
+  Checks validate that exact candidate. Changed HEADs, dirty checkouts, in-progress
+  Git operations, and replaced or switched destinations prevent integration.
+  Only a fast-forward of the pinned parent is performed. No push occurs.
+- `await cleanup_worker(name, *, discard=False) -> WorktreeInfo` proves that the
+  clean worker's **current** HEAD is an ancestor of its current pinned destination,
+  then removes the checkout and uses safe branch deletion (`-d`). Extra commits
+  after integration prevent cleanup. Only explicit human `discard=True` permits
+  deleting dirty or unmerged work and force-deleting its branch. Checkout identity
+  checks still apply. Sidecars and session data are retained.
+
+These operations serialize by canonical common Git directory and destination
+branch using a cancellable, nonblocking `flock`. Lock sidecars are never unlinked.
+The caller must also keep workers idle and prevent concurrent tool writes to the
+worker or parent during the operation. Destination path, repository identity and
+branch are pinned; the helper never silently switches branches. A nested worker
+integrates into its immediate parent, not directly into the repository's main branch.
+
 ## `[ui]`
 
 | field | default | meaning |

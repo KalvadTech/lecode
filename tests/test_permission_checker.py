@@ -289,22 +289,75 @@ def test_read_only_denies_writes_even_in_yolo():
     assert "read-only" in checker.check("bash", {"command": "ls"}).reason
 
 
+@pytest.mark.parametrize("strict", [False, True])
 @pytest.mark.parametrize(
     ("args", "expected"),
     [
         ({"action": "question", "text": "Need a choice"}, Decision.ALLOW),
-        ({"action": "list"}, Decision.DENY),
-        ({"action": "send", "id": "w", "text": "continue"}, Decision.DENY),
+        ({"action": "list"}, Decision.ALLOW),
+        ({"action": "inspect", "id": "w"}, Decision.ALLOW),
+        ({"action": "send", "id": "w", "text": "continue"}, Decision.ALLOW),
         ({"action": "stop", "id": "w"}, Decision.DENY),
         ({"action": "resume", "id": "w"}, Decision.DENY),
         ({"action": "submit", "id": "w"}, Decision.DENY),
         ({"action": "integrate"}, Decision.DENY),
         ({"action": "cleanup"}, Decision.DENY),
+        ({"action": "recover"}, Decision.DENY),
+        ({"action": "unknown"}, Decision.DENY),
+        ({}, Decision.DENY),
+        ({"action": None}, Decision.DENY),
+        ({"action": 1}, Decision.DENY),
+        ({"action": True}, Decision.DENY),
+        ({"action": ["send"]}, Decision.DENY),
+        ({"action": {"send": True}}, Decision.DENY),
     ],
 )
-def test_strict_readonly_allows_only_workers_question(args, expected):
-    checker = _checker({"mode": "yolo"}, read_only=True)
+def test_readonly_workers_control_plane(args, expected, strict):
+    checker = _checker({"mode": "yolo" if strict else "readonly"}, read_only=strict)
     assert checker.check("workers", args).decision == expected
+
+
+@pytest.mark.parametrize("action", ["list", "question", "send", "inspect"])
+@pytest.mark.parametrize("decision", [Decision.ASK, Decision.DENY])
+@pytest.mark.parametrize("source", ["global", "overlay"])
+def test_readonly_worker_controls_honor_rules_through_descendants(action, decision, source):
+    rules = {decision: {"workers": [{"pattern": "*"}]}}
+    parent = _checker(
+        {"mode": "yolo", "rules": rules if source == "global" else {}}, read_only=True
+    ).for_agent(AgentOverlay(extra_rules=_ruleset(**rules) if source == "overlay" else _ruleset()))
+    child = parent.for_child(
+        AgentOverlay(extra_rules=_ruleset(allow={"workers": [{"pattern": "*"}]})),
+        session_perms=SessionPermissions([("workers", "*")]),
+    ).for_child(AgentOverlay(mode="yolo"))
+    result = child.check("workers", {"action": action, "id": "w", "text": "reply"})
+    assert result.decision == decision
+    assert result.matched_rule == PermissionRule(pattern="*")
+
+
+@pytest.mark.parametrize("action", ["list", "question", "send", "inspect"])
+def test_readonly_worker_controls_honor_denied_tools(action):
+    checker = _checker({"mode": "readonly"}).for_agent(AgentOverlay(denied_tools=("workers",)))
+    child = checker.for_child(AgentOverlay(mode="yolo"))
+    assert child.check("workers", {"action": action}).decision == Decision.DENY
+
+
+def test_readonly_parent_reply_does_not_widen_child_permissions():
+    parent = _checker({"mode": "yolo"}, read_only=True)
+    child = parent.for_child(
+        AgentOverlay(
+            mode="yolo",
+            extra_rules=_ruleset(
+                allow={"write": [{"pattern": "*"}], "workers": [{"pattern": "*"}]}
+            ),
+        ),
+        session_perms=SessionPermissions([("write", "*"), ("workers", "*")]),
+    )
+    assert parent.check("workers", {"action": "send", "id": "w", "text": "write"}).decision == (
+        Decision.ALLOW
+    )
+    assert child.read_only is True
+    assert child.check("write", {"path": "a.py"}).decision == Decision.DENY
+    assert child.check("workers", {"action": "integrate"}).decision == Decision.DENY
 
 
 def test_read_only_not_widened_by_overlay_allow_rule():
@@ -497,6 +550,41 @@ def test_readonly_with_writable_exceptions_is_not_safe_for_shared_checkout(sourc
     strict = checker.for_child(read_only=True)
     assert strict.read_only is True
     assert strict.check("write", {"path": "allowed/a"}).decision == Decision.DENY
+
+
+@pytest.mark.parametrize("source", ["global", "overlay", "grant"])
+@pytest.mark.parametrize("decision", [Decision.ALLOW, Decision.ASK])
+def test_readonly_workers_exceptions_are_not_safe_for_shared_checkout(source, decision):
+    rules = {decision: {"workers": [{"pattern": "*"}]}}
+    checker = _checker(
+        {
+            "mode": "yolo" if source == "overlay" else "readonly",
+            "rules": rules if source == "global" else {},
+        },
+        session_perms=SessionPermissions([("workers", "*")] if source == "grant" else []),
+    ).for_agent(
+        AgentOverlay(
+            mode="readonly", extra_rules=_ruleset(**rules) if source == "overlay" else _ruleset()
+        )
+    )
+    assert checker.read_only is False
+    assert checker.check("workers", {"action": "integrate"}).decision == (
+        Decision.ALLOW if source == "grant" else decision
+    )
+    strict = checker.for_child(read_only=True)
+    assert strict.read_only is True
+    assert strict.check("workers", {"action": "integrate"}).decision == Decision.DENY
+
+
+def test_child_readonly_capability_uses_base_policy_despite_yolo_overlay():
+    parent = _checker({"mode": "readonly"}, session_perms=SessionPermissions([("write", "*")]))
+    child = parent.for_child(AgentOverlay(mode="yolo"))
+    assert parent.read_only is False
+    assert child.read_only is True
+    assert child.check("write", {"path": "a.py"}).decision == Decision.DENY
+    assert child.check("workers", {"action": "send", "id": "w", "text": "reply"}).decision == (
+        Decision.ALLOW
+    )
 
 
 @pytest.mark.parametrize("parent_decision", list(Decision))

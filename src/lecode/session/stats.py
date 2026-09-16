@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from lecode.providers.catalog import Catalog, ModelNotFoundError
+from lecode.providers.catalog import AmbiguousModelError, Catalog, ModelNotFoundError
 from lecode.session.model import EventRecord, MessageRecord, TombstoneRecord
 from lecode.session.storage import Session, SessionStore
 
@@ -26,7 +26,7 @@ class Stats:
     created_at: str
     last_active: str | None
     tombstone_count: int
-    #: True when a counted worker usage event is marked incomplete.
+    #: True when any counted model call has missing usage or unknown cost.
     usage_incomplete: bool = False
 
 
@@ -51,17 +51,24 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
     for record in messages:
         role_counts[record.role] = role_counts.get(record.role, 0) + 1
         usage = record.usage or {}
+        usage_incomplete |= bool(usage.get("incomplete")) or (
+            record.role == "assistant" and not usage
+        )
         in_tok, out_tok = _usage_tokens(usage)
         input_tokens += in_tok
         output_tokens += out_tok
         if usage.get("cost_usd") is not None:
             cost_usd += float(usage["cost_usd"])
-        elif (in_tok or out_tok) and session.meta.model:
+        elif usage and (record.role == "assistant" or in_tok or out_tok):
+            if not session.meta.model:
+                usage_incomplete = True
+                continue
             if catalog is None:
                 catalog = Catalog.default()
             try:
                 pricing = catalog.get(session.meta.model).pricing
-            except ModelNotFoundError:
+            except (ModelNotFoundError, AmbiguousModelError):
+                usage_incomplete = True
                 continue
             cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1_000_000
 
@@ -73,14 +80,15 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
             usage = record.data.get("usage") or {}
         elif record.kind == "worker_usage":
             usage = record.data.get("usage") or record.data
-            if record.data.get("incomplete"):
-                usage_incomplete = True
         else:
             continue
+        usage_incomplete |= bool(record.data.get("incomplete") or usage.get("incomplete"))
         in_tok, out_tok = _usage_tokens(usage)
         input_tokens += in_tok
         output_tokens += out_tok
         cost_usd += float(usage.get("cost_usd") or 0.0)
+        if usage.get("cost_usd") is None:
+            usage_incomplete = True
 
     timestamps = [
         r.ts for r in records if isinstance(r, MessageRecord | EventRecord | TombstoneRecord)

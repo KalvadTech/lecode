@@ -233,7 +233,9 @@ class AgentRoster:
 
     def cancel_running(self) -> list[AgentRun]:
         """Mark every still-running run cancelled (parent turn was cancelled)."""
-        cancelled = [run for run in self._runs.values() if run.status == "running"]
+        cancelled = [
+            run for run in self._runs.values() if run.status == "running" and not run.worker
+        ]
         for run in cancelled:
             run.status = "cancelled"
         return cancelled

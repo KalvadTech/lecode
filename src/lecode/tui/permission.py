@@ -36,9 +36,9 @@ class PendingApproval:
 
 def approval_prompt_text(tool_name: str, target: str, *, allow_always: bool = True) -> str:
     """The one-line ask: ``allow bash 'ls'? (y)once (a)lways (n)deny — ESC denies``."""
-    shown = target if len(target) <= _TARGET_MAX_LEN else target[: _TARGET_MAX_LEN - 1] + "…"
     if not allow_always:
-        return f"confirm {tool_name} '{shown}'? (y)es (n)o — ESC denies"
+        return f"{target}\n(y)es (n)o — ESC denies"
+    shown = target if len(target) <= _TARGET_MAX_LEN else target[: _TARGET_MAX_LEN - 1] + "…"
     return f"allow {tool_name} '{shown}'? (y)once (a)lways (n)deny — ESC denies"
 
 

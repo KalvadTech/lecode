@@ -174,6 +174,7 @@ async def test_completed_run_persists_activity_trail(tmp_path, monkeypatch):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
     store = SessionStore(config_dir=tmp_path / "cfg")
+    monkeypatch.chdir(tmp_path)
     session = store.create("agent-run", tmp_path)
     runtime = build_runtime(Config(), tmp_path, session=session, store=store)
     runtime.ctx.extras["provider"] = provider
@@ -208,6 +209,7 @@ async def test_cancelled_run_persists_cancelled_status(tmp_path, monkeypatch):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
     store = SessionStore(config_dir=tmp_path / "cfg")
+    monkeypatch.chdir(tmp_path)
     session = store.create("agent-run", tmp_path)
     runtime = build_runtime(Config(), tmp_path, session=session, store=store)
     runtime.ctx.extras["provider"] = provider
@@ -238,6 +240,7 @@ async def test_failed_run_persists_error_status(tmp_path, monkeypatch):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
     store = SessionStore(config_dir=tmp_path / "cfg")
+    monkeypatch.chdir(tmp_path)
     session = store.create("agent-run", tmp_path)
     runtime = build_runtime(Config(), tmp_path, session=session, store=store)
     runtime.ctx.extras["provider"] = NeverProvider()
@@ -313,6 +316,7 @@ async def test_primary_agent_not_invocable(tmp_path, monkeypatch):
 async def test_missing_provider(tmp_path, monkeypatch):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    monkeypatch.chdir(tmp_path)
     runtime = build_runtime(Config(), tmp_path)  # no provider seam installed
     with pytest.raises(SubagentError, match="no provider available"):
         await run_subagent(
@@ -567,6 +571,7 @@ async def test_task_result_event_carries_run_id_metadata(tmp_path, monkeypatch):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
     store = SessionStore(config_dir=tmp_path / "cfg")
+    monkeypatch.chdir(tmp_path)
     session = store.create("agent-run", tmp_path)
     runtime = build_runtime(Config(), tmp_path, session=session, store=store)
     runtime.ctx.extras["provider"] = provider
@@ -604,22 +609,36 @@ async def test_roster_panel_visible_while_child_runs(tmp_path, monkeypatch):
     app._runner.provider = provider
     app._runtime.ctx.extras["provider"] = provider
     await app._submit("go")
-    await wait_for(lambda: provider.child_started.is_set())
+    try:
+        await wait_for(lambda: provider.child_started.is_set())
 
-    assert app._roster_visible()
-    rows = "".join(fragment[1] for fragment in to_formatted_text(app._roster_text()))
-    assert "Scan repo" in rows
+        assert app._roster_visible()
+        rows = "".join(fragment[1] for fragment in to_formatted_text(app._roster_text()))
+        assert "Scan repo" in rows
 
-    run_id = app.roster.runs()[0].run_id
-    assert app.open_agent_run(run_id)
-    detail = "".join(fragment[1] for fragment in to_formatted_text(app._roster_text()))
-    assert "Scan repo" in detail
+        run = app.roster.runs()[0]
+        assert app.open_agent_run(run.run_id)
+        detail = "".join(fragment[1] for fragment in to_formatted_text(app._roster_text()))
+        assert "Scan repo" in detail
 
-    app._turn_task.cancel()
-    await app._turn_task
-    assert app.roster.runs()[0].status == "cancelled"
-    app.close_agent_run()
-    assert not app._roster_visible()
+        app._turn_task.cancel()
+        await app._turn_task
+        worker = app._worker_manager.get(run.run_id)
+        assert worker.state == "running"
+        assert worker.is_active
+        assert run.status == "running"
+        app.close_agent_run()
+        assert app._roster_visible()
+
+        await app._worker_manager.stop(worker.id)
+        assert worker.state == "stopped"
+        assert not worker.is_active
+        assert run.status == "stopped"
+        assert not app._roster_visible()
+    finally:
+        app._turn_task.cancel()
+        await asyncio.gather(app._turn_task, return_exceptions=True)
+        await app._worker_manager.shutdown()
 
 
 async def test_runs_command_lists_and_opens_detail(tmp_path, monkeypatch):

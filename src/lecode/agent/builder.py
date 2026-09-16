@@ -135,6 +135,11 @@ def build_runtime(
     extra_parts: list[str] = []
     if agent is not None and agent.body:
         extra_parts.append(agent.body)
+    if "task" in registry.names():
+        extra_parts.append(
+            "Available subagents for task(agent=..., prompt=...):\n"
+            + "\n".join(f"- {a.name}: {a.description}" for a in agents.subagents())
+        )
     listing = skills.render_listing()
     if listing:
         extra_parts.append(listing)

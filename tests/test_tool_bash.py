@@ -17,12 +17,17 @@ async def test_echo(tool_ctx):
     result = await bash.make_tool().run({"command": "echo hello"}, tool_ctx)
     assert not result.is_error
     assert "hello" in result.content
+    proc = result.metadata["proc_result"]
+    assert proc.exit_code == 0
+    assert proc.stdout == "hello\n"
+    assert not proc.timed_out
 
 
 async def test_nonzero_exit_reported(tool_ctx):
     result = await bash.make_tool().run({"command": "exit 7"}, tool_ctx)
     assert result.is_error
     assert "exit code 7" in result.content
+    assert result.metadata["proc_result"].exit_code == 7
 
 
 async def test_stderr_merged(tool_ctx):
@@ -34,6 +39,7 @@ async def test_timeout(tool_ctx):
     result = await bash.make_tool().run({"command": "sleep 30", "timeout": 0.3}, tool_ctx)
     assert result.is_error
     assert "timed out" in result.content
+    assert result.metadata["proc_result"].timed_out
 
 
 async def test_idle_timeout(tool_ctx):
@@ -43,6 +49,7 @@ async def test_idle_timeout(tool_ctx):
     assert result.is_error
     assert "no output" in result.content
     assert "start" in result.content
+    assert result.metadata["proc_result"].timed_out
 
 
 async def test_truncation_and_overflow_file(tool_ctx, tmp_path):
@@ -54,6 +61,7 @@ async def test_truncation_and_overflow_file(tool_ctx, tmp_path):
     assert len(files) == 1
     assert files[0].read_text().count("repeated-output-line") > 1000
     assert len(result.content) < MAX_OUTPUT_BYTES + 500
+    assert result.metadata["proc_result"].truncated
 
 
 async def test_rtk_rewrite_applied(tool_ctx, tmp_path, monkeypatch):

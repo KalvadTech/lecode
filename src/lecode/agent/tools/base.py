@@ -18,6 +18,7 @@ from typing import Any
 
 from lecode.config.models import Config
 from lecode.permission import AllowAlways, Decision, Deny, PermissionChecker
+from lecode.permission.checker import CheckResult
 from lecode.telemetry import capture_exception, record_tool_call
 
 #: Cap on tool-argument JSON size (guard against runaway payloads).
@@ -91,6 +92,48 @@ async def _fire_permission_hook(
     if dispatcher is None or not dispatcher.handlers.get(event):
         return
     await dispatcher.fire(event, tool_name=tool_name, tool_args=args, decision=decision)
+
+
+async def authorize_tool(
+    name: str, args: dict[str, Any], ctx: ToolContext, check: CheckResult
+) -> ToolResult | None:
+    """Enforce a verdict for the exact arguments about to execute.
+
+    Shared by initial dispatch and hook-rewritten inputs; approvals apply to
+    these arguments, never to a previously approved command or action.
+    """
+    if check.decision == Decision.DENY:
+        return ToolResult(f"denied: {check.reason}", is_error=True)
+    if check.decision != Decision.ASK:
+        return None
+    # Deferred import: hooks.decorator wraps this module's tools.
+    from lecode.hooks import PERMISSION_REQUEST, PERMISSION_RESULT
+
+    if ctx.auto_approve:
+        await _fire_permission_hook(ctx, PERMISSION_RESULT, name, args, decision="auto")
+    elif ctx.approval_callback is None:
+        await _fire_permission_hook(ctx, PERMISSION_RESULT, name, args, decision="deny")
+        return ToolResult(
+            f"denied: requires approval ({check.reason})",
+            is_error=True,
+            metadata={"needs_approval": True},
+        )
+    else:
+        await _fire_permission_hook(ctx, PERMISSION_REQUEST, name, args)
+        approval = await ctx.approval_callback(name, args, check.reason)
+        if isinstance(approval, Deny):
+            await _fire_permission_hook(ctx, PERMISSION_RESULT, name, args, decision="deny")
+            return ToolResult(f"denied by user ({check.reason})", is_error=True)
+        if isinstance(approval, AllowAlways):
+            grant_always(ctx, name, approval.pattern)
+        await _fire_permission_hook(
+            ctx,
+            PERMISSION_RESULT,
+            name,
+            args,
+            decision="allow_always" if isinstance(approval, AllowAlways) else "allow_once",
+        )
+    return None
 
 
 class ToolRegistry:
@@ -169,38 +212,9 @@ class ToolRegistry:
         if not isinstance(args, dict):
             return ToolResult("error: tool arguments must be a JSON object", is_error=True)
 
-        check = ctx.permission_checker.check(name, args)
-        if check.decision == Decision.DENY:
-            return ToolResult(f"denied: {check.reason}", is_error=True)
-        if check.decision == Decision.ASK:
-            # Deferred import: hooks.decorator wraps this module's tools.
-            from lecode.hooks import PERMISSION_REQUEST, PERMISSION_RESULT
-
-            if ctx.auto_approve:
-                await _fire_permission_hook(ctx, PERMISSION_RESULT, name, args, decision="auto")
-            elif ctx.approval_callback is None:
-                await _fire_permission_hook(ctx, PERMISSION_RESULT, name, args, decision="deny")
-                return ToolResult(
-                    f"denied: requires approval ({check.reason})",
-                    is_error=True,
-                    metadata={"needs_approval": True},
-                )
-            else:
-                await _fire_permission_hook(ctx, PERMISSION_REQUEST, name, args)
-                approval = await ctx.approval_callback(name, args, check.reason)
-                if isinstance(approval, Deny):
-                    await _fire_permission_hook(ctx, PERMISSION_RESULT, name, args, decision="deny")
-                    return ToolResult(f"denied by user ({check.reason})", is_error=True)
-                if isinstance(approval, AllowAlways):
-                    grant_always(ctx, name, approval.pattern)
-                await _fire_permission_hook(
-                    ctx,
-                    PERMISSION_RESULT,
-                    name,
-                    args,
-                    decision="allow_always" if isinstance(approval, AllowAlways) else "allow_once",
-                )
-                # AllowOnce / AllowAlways fall through to running the tool.
+        denied = await authorize_tool(name, args, ctx, ctx.permission_checker.check(name, args))
+        if denied is not None:
+            return denied
 
         try:
             started = time.monotonic()

@@ -110,6 +110,7 @@ def test_layout_is_chatbox_above_statusline(tmp_path, monkeypatch):
     assert isinstance(children[3], ConditionalContainer)  # picker panel sizes to its rows
     assert isinstance(children[4], Window) and children[4].height == 3
     assert app._live_buffer is not None
+    assert pt_app.full_screen is False
 
 
 def test_roster_panel_renders_as_prompt_toolkit_text(tmp_path, monkeypatch):
@@ -178,6 +179,243 @@ async def test_worker_focus_preserves_drafts_and_routes_composer(tmp_path, monke
             for note in notes
         )
     await manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["blocked follow-up", "/agent 1 send blocked follow-up", "/agent 1 resume blocked follow-up"],
+)
+async def test_focused_prompt_hook_denial_prevents_delivery(tmp_path, monkeypatch, command):
+    config = Config()
+    config.hooks = {"UserPromptSubmit": ['echo \'{"verdict":"deny","reason":"closed"}\'']}
+    app, _, out = make_app(tmp_path, monkeypatch, [{"text": "initial"}], config=config)
+    manager = app.worker_manager
+    worker = await manager.start(
+        app.runtime.ctx, agent="explore", prompt="initial", origin="human", background=True
+    )
+    await manager.wait(worker.id)
+    before = app.store.load_for_model(worker.session)
+    assert app.focus_worker(worker.id)
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text(command + "\r")
+        await wait_for(lambda: "prompt blocked by hook: closed" in out.getvalue())
+        assert app.store.load_for_model(worker.session) == before
+        assert manager.pending(worker.id) == []
+        assert not any(
+            event.get("text") in {command, "blocked follow-up"}
+            for event in app.store.load_events(app.session, "input")
+        )
+        assert not any(
+            note.get("content") == "blocked follow-up"
+            for note in app.store.load_events(app.session, "worker_notification")
+        )
+        inp.send_text("/quit\r")
+        assert await task == 0
+
+
+@pytest.mark.parametrize("route", ["main", "focused", "mention", "expanded", "send", "resume"])
+async def test_human_dispatch_hooks_once_and_preserves_prompt(tmp_path, monkeypatch, route):
+    import json
+
+    config = Config()
+    config.hooks = {"UserPromptSubmit": ["cat >> prompts.jsonl"]}
+    app, provider, _ = make_app(tmp_path, monkeypatch, [{"text": "answer"}] * 2, config=config)
+    if route in {"focused", "send", "resume"}:
+        worker = await app.worker_manager.start(
+            app.runtime.ctx, agent="explore", prompt="initial", origin="human", background=True
+        )
+        await app.worker_manager.wait(worker.id)
+        app.focus_worker(worker.id)
+    prompt = "@explore inspect" if route == "mention" else "expanded instructions"
+    before = len(provider.requests)
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        if route == "expanded":
+            app.submit_prompt(prompt, echo="/skill")
+        elif route in {"send", "resume"}:
+            inp.send_text(f"/agent 1 {route} {prompt}\r")
+        else:
+            inp.send_text(prompt + "\r")
+        await wait_for(lambda: len(provider.requests) > before)
+        sent = [m["content"] for m in provider.requests[-1]["messages"] if m["role"] == "user"]
+        assert ("inspect" if route == "mention" else prompt) in sent
+        hooks = [json.loads(line) for line in (tmp_path / "prompts.jsonl").read_text().splitlines()]
+        assert [hook["prompt"] for hook in hooks] == ["inspect" if route == "mention" else prompt]
+        inp.send_text("/quit\r")
+        assert await task == 0
+
+
+@pytest.mark.parametrize("deny", [False, True])
+async def test_retry_hook_runs_before_undo_and_only_once(tmp_path, monkeypatch, deny):
+    import json
+
+    config = Config()
+    config.hooks = {
+        "UserPromptSubmit": [
+            "cat >> prompts.jsonl; echo >> prompts.jsonl; "
+            'if test -e deny; then echo \'{"verdict":"deny"}\'; fi'
+        ]
+    }
+    app, _, out = make_app(
+        tmp_path, monkeypatch, [{"text": "first"}, {"text": "retry"}], config=config
+    )
+    await app._submit("original prompt")
+    await app._turn_task
+    before = app.store.load_for_model(app.session)
+    if deny:
+        (tmp_path / "deny").touch()
+    await app.handle_command("/retry")
+    if deny:
+        await wait_for(lambda: "prompt blocked by hook" in out.getvalue())
+        assert app.store.load_for_model(app.session) == before
+    else:
+        await wait_for(
+            lambda: "retry" in [m.get("content") for m in app.store.load_for_model(app.session)]
+        )
+    prompts = [
+        json.loads(line)["prompt"] for line in (tmp_path / "prompts.jsonl").read_text().splitlines()
+    ]
+    assert prompts == ["original prompt", "original prompt"]
+
+
+@pytest.mark.parametrize("command", ["go", ".reviewer go", "/review note.py"])
+async def test_notes_hook_checks_composed_prompt_before_persistence(tmp_path, monkeypatch, command):
+    import json
+
+    config = Config()
+    config.hooks = {
+        "UserPromptSubmit": [
+            'payload=$(cat); echo "$payload" >> prompts.jsonl; '
+            'case "$payload" in *BLOCKED*) echo \'{"verdict":"deny"}\' ;; esac'
+        ]
+    }
+    app, provider, out = make_app(tmp_path, monkeypatch, [{"text": "unused"}], config=config)
+    (tmp_path / "note.py").write_text("print('safe')\n")
+    await app._submit("/btw BLOCKED")
+    before = app.store.read_records(app.session)
+    await app._submit(command)
+    await wait_for(lambda: "prompt blocked by hook" in out.getvalue())
+    assert not provider.requests
+    assert app.store.read_records(app.session) == before
+    assert app._pending_notes == ["BLOCKED"]
+    prompts = [
+        json.loads(line)["prompt"] for line in (tmp_path / "prompts.jsonl").read_text().splitlines()
+    ]
+    assert len(prompts) == 1
+    if command.startswith("/review"):
+        assert prompts[0].startswith("BLOCKED\n\n")
+        assert "meticulous code reviewer" in prompts[0] and "print('safe')" in prompts[0]
+    else:
+        assert prompts == ["BLOCKED\n\ngo"]
+
+
+@pytest.mark.parametrize("route", ["chain", "loop"])
+@pytest.mark.parametrize("deny_after", [0, 1])
+async def test_generated_prompts_are_guarded_at_each_submission(
+    tmp_path, monkeypatch, route, deny_after
+):
+    import json
+
+    config = Config()
+    config.hooks = {
+        "UserPromptSubmit": [
+            'payload=$(cat); echo "$payload" >> prompts.jsonl; '
+            'case "$payload" in *BLOCKED*) echo \'{"verdict":"deny"}\' ;; esac'
+        ]
+    }
+    app, provider, out = make_app(tmp_path, monkeypatch, [{"text": "BLOCKED"}] * 4, config=config)
+    topic = "BLOCKED" if deny_after == 0 else "safe"
+    plan = tmp_path / "plan.md"
+    plan.write_text(f"- [ ] {topic}\n")
+    if route == "loop" and deny_after:
+        original = provider.stream_chat
+
+        def stream_chat(*args, **kwargs):
+            plan.write_text("- [ ] BLOCKED\n")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(provider, "stream_chat", stream_chat)
+    before = app.store.read_records(app.session)
+    await app._submit(f"/chain {topic}" if route == "chain" else "/loop plan.md 3")
+    await (app._turn_task if route == "chain" else app._loop_task)
+    assert "prompt blocked by hook" in out.getvalue()
+    assert len(provider.requests) == deny_after
+    prompts = [
+        json.loads(line)["prompt"] for line in (tmp_path / "prompts.jsonl").read_text().splitlines()
+    ]
+    assert len(prompts) == deny_after + 1
+    for prompt, request in zip(prompts[:-1], provider.requests, strict=True):
+        assert prompt == request["messages"][-1]["content"]
+    assert "BLOCKED" in prompts[-1]
+    if deny_after == 0:
+        assert app.store.read_records(app.session) == before
+    assert not any(
+        m.get("role") == "user" and "BLOCKED" in m.get("content", "")
+        for m in app.store.load_for_model(app.session)
+    )
+
+
+@pytest.mark.parametrize("state", ["running", "stopped", "completed"])
+async def test_worker_focus_and_detail_follow_same_target_and_escape_parent(
+    tmp_path, monkeypatch, state
+):
+    from dataclasses import replace
+
+    app, _, _ = make_app(tmp_path, monkeypatch, [{"text": "answer A"}, {"text": "answer B"}])
+    manager = app.worker_manager
+    parent = await manager.start(app.runtime.ctx, agent="explore", prompt="A", origin="human")
+    await manager.wait(parent.id)
+    child_ctx = replace(app.runtime.ctx, extras={**app.runtime.ctx.extras, "worker_id": parent.id})
+    if state != "completed":
+        child_ctx.extras["provider"] = BlockingProvider()
+    child = await manager.start(child_ctx, agent="explore", prompt="B", origin="human")
+    if state == "completed":
+        await manager.wait(child.id)
+    else:
+        await wait_for(lambda: bool(child_ctx.extras["provider"].requests))
+        if state == "stopped":
+            await manager.stop(child.id)
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        try:
+            await wait_for(lambda: app._input_area is not None)
+            app._input_area.buffer.text = "main draft"
+            await app.handle_command("/agent 1")
+            inp.send_text("/agent 2 focus\r")
+            await wait_for(lambda: app._focused_worker_id == child.id)
+            assert app.detail_run_id == app._focused_worker_id == child.id
+            if state == "completed":
+                assert "answer B" in str(app._roster_text())
+            assert "answer A" not in str(app._roster_text())
+            inp.send_text("child draft")
+            await wait_for(lambda: app._input_area.text == "child draft")
+            inp.send_text("\x1b")
+            await wait_for(lambda: app._focused_worker_id == parent.id)
+            assert app.detail_run_id == parent.id
+            assert "answer A" in str(app._roster_text())
+            inp.send_text("parent draft")
+            await wait_for(lambda: app._input_area.text == "parent draft")
+            inp.send_text("\x1b")
+            await wait_for(lambda: app._focused_worker_id is None)
+            assert app.detail_run_id is None
+            assert app._input_area.text == "main draft"
+            await app.handle_command("/agent 2 focus")
+            assert app._input_area.text == "child draft"
+            await app.handle_command("/agent 1")
+            assert app.detail_run_id == app._focused_worker_id == parent.id
+            assert app._input_area.text == "parent draft"
+            inp.send_text("\x15")  # clear the draft before entering a command
+            await wait_for(lambda: app._input_area.text == "")
+            inp.send_text("/agent root\r")
+            await wait_for(lambda: app._focused_worker_id is None, timeout=1)
+            assert app.detail_run_id is None
+            assert app._input_area.text == "main draft"
+        finally:
+            app.request_quit()
+            await task
 
 
 async def test_worker_detail_renders_persisted_child_transcript(tmp_path, monkeypatch):
@@ -672,6 +910,71 @@ async def test_ctrl_c_cancels_running_turn(tmp_path, monkeypatch):
     assert app.cancel_turn() is False  # nothing running now
 
 
+async def test_ctrl_c_denies_only_pending_approval(tmp_path, monkeypatch):
+    from lecode.permission import Deny
+
+    app, provider, _ = make_blocking_app(tmp_path, monkeypatch)
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("root work\r")
+        await wait_for(lambda: len(provider.requests) == 1)
+        callback = app.runtime.ctx.approval_callback
+        first = asyncio.create_task(callback("bash", {"command": "ls"}, ""))
+        second = asyncio.create_task(callback("bash", {"command": "pwd"}, ""))
+        await wait_for(lambda: app._approval.is_pending)
+        inp.send_text("\x03")
+        assert await first == Deny()
+        assert not second.done()
+        assert not app._turn_task.done()
+        inp.send_text("n")
+        assert await second == Deny()
+        provider.blocked = False
+        provider.release.set()
+        await wait_for(lambda: not app._turn_running())
+        inp.send_text("/quit\r")
+        assert await task == 0
+
+
+@pytest.mark.parametrize("direct", [False, True])
+async def test_ctrl_c_stops_focused_worker_not_root_or_waiter(tmp_path, monkeypatch, direct):
+    app, provider, out = make_blocking_app(tmp_path, monkeypatch)
+    app.runtime.ctx.extras["provider"] = provider
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("@explore inspect\r" if direct else "root work\r")
+        await wait_for(lambda: len(provider.requests) == 1)
+        if direct:
+            worker = app.worker_manager.list()[0]
+        else:
+            inp.send_text("root queued\r")
+            await wait_for(lambda: app.queued_prompts() == ([], ["root queued"]))
+            worker = await app.worker_manager.start(
+                app.runtime.ctx,
+                agent="explore",
+                prompt="child work",
+                origin="human",
+                background=True,
+            )
+            await wait_for(lambda: len(provider.requests) == 2)
+        assert app.focus_worker(worker.id)
+        inp.send_text("child draft")
+        await wait_for(lambda: app._input_area.text == "child draft")
+        inp.send_text("\x03")
+        await wait_for(lambda: worker.state == "stopped")
+        assert app._input_area.text == "child draft"
+        if not direct:
+            assert not app._turn_task.done()
+            assert app.queued_prompts() == ([], ["root queued"])
+            assert "turn cancelled" not in out.getvalue()
+        provider.blocked = False
+        provider.release.set()
+        await wait_for(lambda: not app._turn_running())
+        inp.send_text("\x15/quit\r")
+        assert await task == 0
+
+
 async def test_provider_error_renders_and_recovers(tmp_path, monkeypatch):
     from lecode.providers.openai_compat import ProviderError
 
@@ -770,6 +1073,113 @@ async def test_statusline_totals_update_after_turn(tmp_path, monkeypatch):
     assert app._status.output_tokens == 5
     assert app._status.cost_usd == pytest.approx(0.001)
     assert app._status.context_used == 10
+
+
+async def test_live_total_counts_root_and_nested_workers_once(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    release = asyncio.Event()
+
+    class PausedProvider(FakeProvider):
+        async def _stream(self, entry):
+            if entry.get("pause"):
+                await release.wait()
+            async for event in super()._stream(entry):
+                yield event
+
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    provider = PausedProvider(
+        [
+            {
+                "tool_calls": [{"name": "read", "arguments": '{"path":"note.txt"}'}],
+                "usage": {"input_tokens": 100, "output_tokens": 10, "cost_usd": 0.1},
+            },
+            {
+                "pause": True,
+                "text": "root done",
+                "usage": {"input_tokens": 200, "output_tokens": 20, "cost_usd": 0.2},
+            },
+            {"text": "child", "usage": {"input_tokens": 300, "output_tokens": 30, "cost_usd": 0.3}},
+            {
+                "text": "grandchild",
+                "usage": {"input_tokens": 400, "output_tokens": 40, "cost_usd": 0.4},
+            },
+        ]
+    )
+    app.runner.provider = provider
+    app.runtime.ctx.extras["provider"] = provider
+    (tmp_path / "note.txt").write_text("note")
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("root work\r")
+        await wait_for(lambda: len(provider.requests) == 2)
+        assert app.status.cost_usd == pytest.approx(0.1)
+        worker = await app.worker_manager.start(
+            app.runtime.ctx, agent="explore", prompt="child", origin="human", background=True
+        )
+        await app.worker_manager.wait(worker.id)
+        child_ctx = replace(
+            app.runtime.ctx, extras={**app.runtime.ctx.extras, "worker_id": worker.id}
+        )
+        child = await app.worker_manager.start(
+            child_ctx, agent="explore", prompt="grandchild", origin="human", background=True
+        )
+        await app.worker_manager.wait(child.id)
+        assert app.status.cost_usd == pytest.approx(0.8)
+        release.set()
+        await wait_for(lambda: not app._turn_running())
+        assert app.status.cost_usd == pytest.approx(1.0)
+        assert app.current_session_usage()[:3] == (1000, 100, pytest.approx(1.0))
+        app.reload_history()
+        assert app.status.cost_usd == pytest.approx(1.0)
+        inp.send_text("/quit\r")
+        assert await task == 0
+
+
+async def test_selected_worker_context_and_incomplete_cost_survive_idle(tmp_path, monkeypatch):
+    config = Config()
+    config.agent.subagent_model = "anthropic/claude-sonnet-4"
+    app, _, out = make_app(
+        tmp_path,
+        monkeypatch,
+        [
+            {"text": "main", "usage": {"input_tokens": 100, "output_tokens": 10, "cost_usd": 0.1}},
+            {
+                "text": "child",
+                "usage": {"input_tokens": 2000, "output_tokens": 20, "cost_usd": 0.2},
+            },
+            {"text": "missing usage"},
+        ],
+        config=config,
+    )
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app._input_area is not None)
+        inp.send_text("main work\r")
+        await wait_for(lambda: "answer:" in out.getvalue())
+        main_window = app.status.context_window
+        worker = await app.worker_manager.start(
+            app.runtime.ctx, agent="explore", prompt="child", origin="human", background=True
+        )
+        await app.worker_manager.wait(worker.id)
+        assert app.focus_worker(worker.id)
+        rendered = "".join(part[1] for part in to_formatted_text(app._toolbar()))
+        assert "2.0k/200.0k" in rendered
+        assert "anthropic/claude-sonnet-4" in rendered
+        assert "total cost: $0.3000" in rendered
+        inp.send_text("follow up\r")
+        await wait_for(lambda: "sent to @explore" in out.getvalue())
+        await app.worker_manager.wait(worker.id)
+        assert not app.roster.has_running()
+        assert app.focus_worker(None)
+        assert app.status.context_window == main_window
+        assert app.status.context_used == 100
+        rendered = "".join(part[1] for part in to_formatted_text(app._toolbar()))
+        assert "total cost: $0.3000 incomplete" in rendered
+        assert out.getvalue().count(f"worker {worker.id[:8]}") == 2
+        inp.send_text("/quit\r")
+        assert await task == 0
 
 
 # -- end-to-end pipe-input smokes ---------------------------------------------
@@ -895,6 +1305,7 @@ class FakeTui:
 def cli_env(tmp_path, monkeypatch):
     """Isolated cwd + config dir; deps check, provider, prompt and TuiApp faked."""
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("lecode.cli.check_dependencies", lambda: None)
     monkeypatch.setattr("lecode.cli.build_provider", lambda config, api_key=None: object())

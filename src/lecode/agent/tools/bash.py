@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from lecode.agent.tools.base import Tool, ToolContext, ToolResult
+from lecode.extras.proc import ProcResult
 from lecode.extras.rtk import rewrite_command
 
 DEFAULT_TIMEOUT_S = 120.0
@@ -204,6 +205,15 @@ class BashTool(Tool):
         return ToolResult(
             (text.rstrip("\n") or "(no output)") + suffix,
             is_error=timed_out or idle_killed or exit_code != 0,
+            metadata={
+                "proc_result": ProcResult(
+                    exit_code=exit_code,
+                    stdout=text,
+                    stderr="",  # The shell merges stderr into stdout.
+                    timed_out=timed_out or idle_killed,
+                    truncated=len(output) > MAX_OUTPUT_BYTES,
+                )
+            },
         )
 
 

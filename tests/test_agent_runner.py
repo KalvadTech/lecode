@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+import json
 
 import pytest
 from tests.fakes import FakeProvider, sample_catalog
+from tests.test_workers import setup as setup
 
 from lecode.agent.runner import (
     CONTINUE_PROMPT,
@@ -26,6 +27,7 @@ from lecode.agent.runner import (
 )
 from lecode.agent.tools.base import Tool, ToolRegistry
 from lecode.agent.tools.base import ToolResult as ToolExecResult
+from lecode.extras.background import BACKGROUND_EXTRA
 from lecode.providers.openai_compat import ProviderError
 from lecode.providers.types import TokenDelta
 from lecode.session.model import EventRecord, MessageRecord
@@ -55,25 +57,6 @@ class SleepTool(Tool):
     async def run(self, args, ctx) -> ToolExecResult:
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
-
-
-class TaskLikeTool(EchoTool):
-    def __init__(self) -> None:
-        super().__init__()
-        self.name = "task"
-
-
-class LeaseManager:
-    def __init__(self) -> None:
-        self.suspensions = 0
-
-    def consume(self, id, history):
-        return []
-
-    @asynccontextmanager
-    async def suspend(self, id):
-        self.suspensions += 1
-        yield
 
 
 def make_runner(tool_ctx, script, **kwargs) -> tuple[AgentRunner, FakeProvider]:
@@ -154,20 +137,6 @@ async def test_tool_round_trip(tool_ctx):
     result_events = [e for e in events if isinstance(e, ToolResult)]
     assert result_events[0].content == "hi"
     assert result_events[0].is_error is False
-
-
-@pytest.mark.parametrize("names,expected", [(["task"], 1), (["task", "echo"], 0)])
-async def test_worker_suspends_only_all_task_batches(tool_ctx, names, expected):
-    manager = LeaseManager()
-    tool_ctx.extras.update({"workers": manager, "worker_id": "worker"})
-    registry = ToolRegistry([TaskLikeTool(), EchoTool()])
-    calls = [
-        {"id": f"c{i}", "name": name, "arguments": '{"text":"ok"}'} for i, name in enumerate(names)
-    ]
-    provider = FakeProvider([{"tool_calls": calls}, {"text": "done"}])
-    runner = AgentRunner(provider, registry, tool_ctx)
-    assert (await runner.run([{"role": "user", "content": "go"}])).final_text == "done"
-    assert manager.suspensions == expected
 
 
 async def test_parallel_tool_calls_paired_by_id(tool_ctx):
@@ -417,6 +386,300 @@ async def test_steer_queue_drained_before_input_queue(tool_ctx):
     assert drained == ["steer me", "regular input"]
 
 
+async def test_root_resume_repairs_interrupted_tool_before_worker_notification(setup):
+    manager, ctx, _, store, session = setup
+
+    class Background:
+        def drain_notifications(self):
+            return ["background finished"]
+
+    ctx.extras[BACKGROUND_EXTRA] = Background()
+    store.append_message(session, {"role": "user", "content": "resume"})
+    store.append_message(
+        session,
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "interrupted",
+                    "type": "function",
+                    "function": {"name": "task", "arguments": "{}"},
+                }
+            ],
+        },
+    )
+    store.append_event(
+        session,
+        "worker_notification",
+        {
+            "id": "finished",
+            "worker_id": "child",
+            "parent_id": None,
+            "state": "completed",
+            "kind": "completed",
+            "content": "finished work",
+            "deliver": True,
+        },
+    )
+    provider = FakeProvider([{"text": "recovered"}])
+    runner = AgentRunner(provider, ctx.extras["registry"], ctx, session=session, store=store)
+
+    result = await runner.run(
+        [{"role": "system", "content": "root"}, *store.load_for_model(session)]
+    )
+
+    assert result.final_text == "recovered"
+    messages = provider.requests[0]["messages"]
+    repaired = next(message for message in messages if message["role"] == "tool")
+    assert repaired["tool_call_id"] == "interrupted"
+    assert "outcome unknown" in repaired["content"]
+    assert messages.index(repaired) < next(
+        i for i, message in enumerate(messages) if message.get("content") == "background finished"
+    )
+    assert messages[-1]["content"] == "[worker child completed] finished work"
+    assert not manager._outstanding(store.load_for_model(session))
+
+
+@pytest.mark.parametrize("queue_name", ["input_queue", "steer_queue"])
+async def test_child_question_root_human_reply_wakes_completion(setup, queue_name):
+    manager, ctx, _, store, session = setup
+    asked_human = asyncio.Event()
+    queue = asyncio.Queue()
+
+    class Provider(FakeProvider):
+        async def stream_chat(self, messages, **kwargs):
+            assert not manager._outstanding(messages)
+            outstanding = set()
+            for message in messages:
+                if message["role"] == "tool":
+                    outstanding.remove(message["tool_call_id"])
+                else:
+                    assert not outstanding, "human reply preceded tool results"
+                    outstanding.update(c["id"] for c in message.get("tool_calls", []))
+            if messages[1]["content"] == "child":
+                if len(messages) == 2:
+                    entry = {
+                        "tool_calls": [
+                            {
+                                "id": "ask",
+                                "name": "workers",
+                                "arguments": '{"action":"question","text":"which color?"}',
+                            }
+                        ]
+                    }
+                else:
+                    assert messages[-1]["content"] == "use blue"
+                    entry = {"text": "blue result"}
+            elif len(messages) == 2:
+                entry = {
+                    "tool_calls": [
+                        {"id": "spawn", "name": "task", "arguments": '{"prompt":"child"}'}
+                    ]
+                }
+            elif any("blue result" in str(m.get("content")) for m in messages):
+                entry = {"text": "reviewed blue result"}
+            elif any(m.get("tool_call_id") == "reply" for m in messages):
+                entry = {"text": "waiting for child"}
+            elif any(m.get("content") == "use blue" for m in messages):
+                entry = {
+                    "tool_calls": [
+                        {
+                            "id": "reply",
+                            "name": "workers",
+                            "arguments": json.dumps(
+                                {"action": "send", "id": manager.list()[0].id, "text": "use blue"}
+                            ),
+                        }
+                    ]
+                }
+            else:
+                assert any("which color?" in str(m.get("content")) for m in messages)
+                entry = {"text": "Human, which color?"}
+            async for event in self._stream(entry):
+                yield event
+
+    def on_event(event):
+        if isinstance(event, Token) and event.text == "Human, which color?":
+            asked_human.set()
+
+    store.append_message(session, {"role": "user", "content": "root"})
+    runner = AgentRunner(
+        Provider([]),
+        ctx.extras["registry"],
+        ctx,
+        session=session,
+        store=store,
+        **{queue_name: queue},
+    )
+    task = asyncio.create_task(
+        runner.run(
+            [{"role": "system", "content": "root"}, *store.load_for_model(session)], on_event
+        )
+    )
+    try:
+        async with asyncio.timeout(2):
+            await asked_human.wait()
+            assert not task.done()
+            queue.put_nowait("use blue")
+            result = await task
+        assert result.final_text == "reviewed blue result"
+        assert manager.list()[0].result.final_text == "blue result"
+        assert manager.list()[0].state == "completed"
+        assert [m["content"] for m in store.load_for_model(session)].count("use blue") == 1
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await manager.shutdown()
+
+
+@pytest.mark.parametrize("supervisor", ["root", "worker"])
+@pytest.mark.parametrize("max_turns", [1, 2])
+async def test_last_turn_background_spawn_reports_limit_with_unresolved_child(
+    setup, supervisor, max_turns
+):
+    from lecode.extras.subagents import SubagentError
+
+    manager, ctx, _, store, session = setup
+    ctx.config.agent.max_turns = max_turns
+    release = asyncio.Event()
+
+    class Provider(FakeProvider):
+        async def stream_chat(self, messages, **kwargs):
+            if messages[1]["content"] == "child":
+                await release.wait()
+                entry = {"text": "child done"}
+            elif len(messages) == 2:
+                entry = {
+                    "tool_calls": [
+                        {
+                            "id": "spawn",
+                            "name": "task",
+                            "arguments": '{"prompt":"child","run_in_background":true}',
+                        }
+                    ],
+                    "usage": {"input_tokens": 5, "cost_usd": 0.25},
+                }
+            else:
+                entry = {"text": "premature final"}
+            async for event in self._stream(entry):
+                yield event
+
+    provider = Provider([])
+    ctx.extras["provider"] = provider
+    events = []
+    try:
+        async with asyncio.timeout(2):
+            if supervisor == "worker":
+                parent = await manager.start(ctx, agent="explore", prompt="parent")
+                with pytest.raises(SubagentError, match="max_turns"):
+                    await manager.wait(parent.id)
+                result = parent.result
+                assert parent.state == "failed"
+                child = manager.children(parent.id)[0]
+                assert child.id in parent.error
+                stopped_session = parent.session
+            else:
+                store.append_message(session, {"role": "user", "content": "root"})
+                runner = AgentRunner(
+                    provider, ctx.extras["registry"], ctx, session=session, store=store
+                )
+                result = await runner.run(
+                    [{"role": "system", "content": "root"}, *store.load_for_model(session)],
+                    events.append,
+                )
+                child = manager.children(None)[0]
+                assert any(isinstance(e, Error) and child.id in e.message for e in events)
+                assert events[-1] == Done("max_turns", max_turns)
+                stopped_session = session
+            assert result.stop_reason == "max_turns"
+            assert result.turns == max_turns
+            assert result.usage_totals.cost_usd == 0.25
+            assert result.final_text == ("premature final" if max_turns == 2 else "")
+            assert child.is_active
+            stopped = store.load_events(stopped_session, "run_stopped")[-1]
+            assert stopped["reason"] == "max_turns" and child.id in stopped["message"]
+            release.set()
+            await manager.wait(child.id)
+    finally:
+        release.set()
+        await manager.shutdown()
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_completion_queue_race_preserves_priority_inputs_and_cleans_waiters(setup, cancel):
+    from tests.test_workers import GatedProvider
+
+    manager, ctx, _, store, session = setup
+    child_provider = GatedProvider()
+    ctx.extras["provider"] = child_provider
+
+    class Queue(asyncio.Queue):
+        def __init__(self):
+            super().__init__()
+            self.waiting = asyncio.Event()
+            self.received = asyncio.Event()
+            self.waiters = []
+
+        async def get(self):
+            self.waiters.append(asyncio.current_task())
+            self.waiting.set()
+            item = await super().get()
+            self.received.set()
+            return item
+
+    steer, inputs = Queue(), Queue()
+    child = await manager.start(ctx, agent="explore", prompt="child")
+    await child_provider.started.get()
+    provider = FakeProvider([{"text": "waiting"}, {"text": "reviewed"}])
+    runner = AgentRunner(
+        provider,
+        ctx.extras["registry"],
+        ctx,
+        session=session,
+        store=store,
+        steer_queue=steer,
+        input_queue=inputs,
+    )
+    task = asyncio.create_task(runner.run([{"role": "user", "content": "root"}]))
+    try:
+        async with asyncio.timeout(2):
+            await steer.waiting.wait()
+            await inputs.waiting.wait()
+            for queue, prefix in ((inputs, "input"), (steer, "steer")):
+                queue.put_nowait(f"{prefix} one")
+                queue.put_nowait(f"{prefix} two")
+            await inputs.received.wait()
+            if cancel:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                child_provider.release.set()
+                await task
+        texts = [
+            m["content"]
+            for m in store.load_for_model(session)
+            if m["role"] == "user" and not m["content"].startswith("[worker")
+        ]
+        assert texts == ["steer one", "steer two", "input one", "input two"]
+        assert all(waiter.done() for queue in (steer, inputs) for waiter in queue.waiters)
+        assert steer.empty() and inputs.empty()
+        if not cancel:
+            assert [
+                m["content"]
+                for m in provider.requests[1]["messages"]
+                if m["role"] == "user" and not m["content"].startswith("[worker")
+            ] == ["root", *texts]
+        child_provider.release.set()
+        await manager.wait(child.id)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        child_provider.release.set()
+        await manager.shutdown()
+
+
 # -- automatic compaction ---------------------------------------------------------
 
 
@@ -623,3 +886,119 @@ async def test_mid_turn_threshold_triggers_earlier(tool_ctx, tmp_path):
     assert _compact_events(store, session)
     started = [e for e in events if isinstance(e, CompactionStarted)]
     assert [(e.context_tokens, e.threshold) for e in started] == [(600, 500)]
+
+
+@pytest.mark.parametrize(
+    ("model", "usage", "incomplete"),
+    [
+        ("missing/model", {"input_tokens": 7, "output_tokens": 2}, True),
+        ("missing/model", {"input_tokens": 0, "output_tokens": 0}, True),
+        ("missing/model", {"input_tokens": 7, "output_tokens": 2, "cost_usd": 0}, False),
+        ("missing/model", {"cost_usd": 0}, False),
+        ("openai/gpt-5-", {"input_tokens": 7}, True),
+        ("openai/gpt-5-", {"cost_usd": 0}, False),
+        ("free/model", {"input_tokens": 7, "output_tokens": 2}, False),
+        ("free/model", {"input_tokens": 0, "output_tokens": 0}, False),
+        ("free/model", None, True),
+        ("free/model", {"cost_usd": 0, "incomplete": True}, True),
+    ],
+)
+async def test_usage_completeness_reaches_events_totals_and_storage(
+    tool_ctx, tmp_path, monkeypatch, model, usage, incomplete
+):
+    from lecode.providers.catalog import Pricing
+    from lecode.session.stats import session_stats
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "skills"))
+    catalog = sample_catalog()
+    free = catalog.all()[0].model_copy(
+        update={"id": "free/model", "pricing": Pricing(prompt=0, completion=0)}
+    )
+    tool_ctx.catalog = catalog.merge([free])
+    store = SessionStore(config_dir=tmp_path / "cfg")
+    session = store.create("usage-completeness", tmp_path, model=model)
+    runner, _ = make_runner(
+        tool_ctx, [{"text": "done", "usage": usage}], catalog=None, store=store, session=session
+    )
+    runner.model = model
+    events = []
+    result = await runner.run([{"role": "user", "content": "hi"}], events.append)
+    response = next(event for event in events if isinstance(event, LlmResponse))
+    recorded = store.load_messages(session)[0].usage
+    stats = session_stats(store, session, catalog=tool_ctx.catalog)
+
+    assert response.usage_incomplete is incomplete
+    assert result.usage_totals.usage_incomplete is incomplete
+    assert bool(recorded.get("incomplete")) is incomplete
+    assert stats.usage_incomplete is incomplete
+    assert response.cost_usd == result.usage_totals.cost_usd == stats.cost_usd == 0
+    assert response.input_tokens == stats.input_tokens == (usage or {}).get("input_tokens", 0)
+    assert response.output_tokens == stats.output_tokens == (usage or {}).get("output_tokens", 0)
+
+
+@pytest.mark.parametrize("usage", [None, {"input_tokens": 9, "output_tokens": 2, "cost_usd": 0.25}])
+@pytest.mark.parametrize("text", ["partial", ""])
+async def test_cancel_preserves_known_usage_or_unknown_marker(
+    tool_ctx, tmp_path, monkeypatch, usage, text
+):
+    from lecode.providers.types import Usage
+    from lecode.session.stats import session_stats
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "skills"))
+    ready = asyncio.Event()
+
+    class PartialProvider:
+        async def stream_chat(self, *args, **kwargs):
+            if text:
+                yield TokenDelta(text=text)
+            if usage is not None:
+                yield Usage(usage=usage)
+            ready.set()
+            await asyncio.Event().wait()
+
+    store = SessionStore(config_dir=tmp_path / "cfg")
+    session = store.create("partial-usage", tmp_path, model=tool_ctx.config.llm.model)
+    runner = AgentRunner(PartialProvider(), ToolRegistry(), tool_ctx, store=store, session=session)
+    task = asyncio.create_task(runner.run([{"role": "user", "content": "hi"}]))
+    await ready.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    recorded = store.load_messages(session)
+    assert len(recorded) == 1
+    assert recorded[0].usage == (
+        usage or {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0, "incomplete": True}
+    )
+    stats = session_stats(store, session)
+    assert stats.usage_incomplete is (usage is None)
+    assert stats.cost_usd == (usage or {}).get("cost_usd", 0)
+
+
+@pytest.mark.parametrize("review_usage", [None, {"input_tokens": 3}, {"cost_usd": 0}])
+async def test_pierre_usage_completeness_is_persisted(
+    tool_ctx, tmp_path, monkeypatch, review_usage
+):
+    from lecode.session.stats import session_stats
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "skills"))
+    tool_ctx.config.pierre.enabled = True
+    tool_ctx.config.pierre.model = "missing/reviewer"
+    store = SessionStore(config_dir=tmp_path / "cfg")
+    session = store.create("review-usage", tmp_path, model=tool_ctx.config.llm.model)
+    runner, _ = make_runner(
+        tool_ctx,
+        [{"text": "done", "usage": {"cost_usd": 0.25}}, {"text": "review", "usage": review_usage}],
+        store=store,
+        session=session,
+    )
+    result = await runner.run([{"role": "user", "content": "hi"}])
+    incomplete = review_usage != {"cost_usd": 0}
+    assert result.review == "review"
+    assert result.usage_totals.usage_incomplete is incomplete
+    assert store.load_events(session, "pierre")[0]["usage"]["incomplete"] is incomplete
+    stats = session_stats(store, session)
+    assert stats.usage_incomplete is incomplete
+    assert stats.cost_usd == result.usage_totals.cost_usd == 0.25

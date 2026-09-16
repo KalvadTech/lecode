@@ -2,9 +2,9 @@
 
 The permission checker runs first — ``ToolRegistry._execute`` returns early on
 a checker Deny without ever calling ``tool.run``, so decorated hooks are never
-consulted for checker-denied calls and can therefore only narrow. PreToolUse
-fires before execution (Deny blocks, Ask requires approval unless the context
-auto-approves, ``rewritten_input`` replaces the tool args); after execution,
+consulted for checker-denied calls. PreToolUse fires before execution; rewritten
+arguments are checked again so a rewrite cannot widen permissions. Deny blocks,
+Ask uses normal human approval unless the context auto-approves. After execution,
 exactly one of PostToolUse (success) or PostToolUseFailure (``is_error``
 result or an exception out of ``tool.run``) fires — both informational, their
 verdicts are recorded in the result metadata and cannot undo anything. On an
@@ -15,9 +15,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from lecode.agent.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
+from lecode.agent.tools.base import Tool, ToolContext, ToolRegistry, ToolResult, authorize_tool
 from lecode.hooks.events import POST_TOOL_USE_FAILURE
 from lecode.hooks.runner import HookDispatcher
+from lecode.permission.checker import CheckResult, Decision
 
 
 def _wrap(tool: Tool, dispatcher: HookDispatcher) -> None:
@@ -33,13 +34,19 @@ def _wrap(tool: Tool, dispatcher: HookDispatcher) -> None:
                 is_error=True,
                 metadata={"hook_verdict": "deny"},
             )
-        if pre.verdict == "ask" and not ctx.auto_approve:
-            return ToolResult(
-                f"denied: hook requires approval ({pre.reason or 'PreToolUse hook'})",
-                is_error=True,
-                metadata={"needs_approval": True, "hook_verdict": "ask"},
-            )
         effective_args = pre.rewritten_input if pre.rewritten_input is not None else args
+        if effective_args != args or pre.verdict == "ask":
+            check = (
+                ctx.permission_checker.check(tool.name, effective_args)
+                if effective_args != args
+                else CheckResult(Decision.ALLOW, "original arguments already authorized")
+            )
+            if pre.verdict == "ask" and check.decision == Decision.ALLOW:
+                check = CheckResult(Decision.ASK, pre.reason or "PreToolUse hook")
+            denied = await authorize_tool(tool.name, effective_args, ctx, check)
+            if denied is not None:
+                denied.metadata["hook_verdict"] = pre.verdict
+                return denied
         try:
             result = await original_run(effective_args, ctx)
         except Exception as e:
