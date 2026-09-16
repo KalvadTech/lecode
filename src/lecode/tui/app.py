@@ -504,6 +504,8 @@ class TuiApp:
         self._runtime.ctx.permission_checker = checker
         self._last_response = ""
         self._reload_history()  # also refreshes the statusline usage lines
+        self._status.timed_output_tokens = 0
+        self._status.model_elapsed_s = 0.0
         self._input_history.rebind(session)
         if self._input_area is not None:
             self._input_area.history = self._input_history
@@ -2198,6 +2200,9 @@ class TuiApp:
             self._status.output_tokens += event.output_tokens
             self._status.cost_usd += event.cost_usd
             self._status.usage_incomplete |= getattr(event, "usage_incomplete", False)
+            if event.elapsed_s > 0 and event.output_tokens > 0:
+                self._status.timed_output_tokens += event.output_tokens
+                self._status.model_elapsed_s += event.elapsed_s
             if event.input_tokens > 0 and event.prompt_chars > 0:
                 # Calibrate the live estimate: EMA of chars/token, clamped.
                 ratio = min(max(event.prompt_chars / event.input_tokens, 2.0), 8.0)
@@ -2208,6 +2213,7 @@ class TuiApp:
                 event.input_tokens,
                 event.output_tokens,
                 event.cost_usd,
+                elapsed_s=event.elapsed_s,
             )
             self._invalidate()
         elif isinstance(event, Done):

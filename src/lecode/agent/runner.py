@@ -114,6 +114,8 @@ class LlmResponse:
     #: Characters sent in this call's prompt — calibrates live token estimates.
     prompt_chars: int = 0
     usage_incomplete: bool = False
+    #: Model-call seconds, including latency/retries but excluding tool execution.
+    elapsed_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -330,7 +332,9 @@ class AgentRunner:
                 self._partial = None
                 prompt_chars = _prompt_chars(history)
                 await self._emit(on_event, LlmCall(model=self.model, turn=turns + 1))
+                call_started_at = time.monotonic()
                 completed = await self._stream_turn(history, on_event)
+                call_elapsed_s = time.monotonic() - call_started_at
                 turns += 1
 
                 in_tok, out_tok, cost, incomplete = self._turn_cost(completed)
@@ -345,6 +349,7 @@ class AgentRunner:
                         cost_usd=cost,
                         prompt_chars=prompt_chars,
                         usage_incomplete=incomplete,
+                        elapsed_s=call_elapsed_s,
                     ),
                 )
                 input_tokens += in_tok
