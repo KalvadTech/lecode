@@ -490,6 +490,17 @@ async def test_submit_prints_per_answer_stats_line(tmp_path, monkeypatch):
     assert "1 round" in rendered
 
 
+def test_status_average_accumulates_response_tokens_and_time(tmp_path, monkeypatch):
+    from lecode.agent.runner import LlmResponse
+
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    app._on_event(LlmResponse("m", 1, 10, 100, 0.0, elapsed_s=2.0))
+    app._on_event(LlmResponse("m", 2, 10, 50, 0.0, elapsed_s=4.0))
+    app._on_event(LlmResponse("m", 3, 10, 90, 0.0))
+    assert app._status.timed_output_tokens == 150
+    assert app._status.model_elapsed_s == 6.0
+
+
 async def test_reasoning_and_tool_events_render(tmp_path, monkeypatch):
     script = [
         {

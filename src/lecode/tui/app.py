@@ -433,6 +433,8 @@ class TuiApp:
         self._runtime.ctx.permission_checker = checker
         self._last_response = ""
         self._reload_history()  # also refreshes the statusline usage lines
+        self._status.timed_output_tokens = 0
+        self._status.model_elapsed_s = 0.0
         self._input_history.rebind(session)
         if self._input_area is not None:
             self._input_area.history = self._input_history
@@ -1697,6 +1699,9 @@ class TuiApp:
             self._feed.llm_call(event.model, event.turn)
             self._activity("thinking")
         elif isinstance(event, LlmResponse):
+            if event.elapsed_s > 0 and event.output_tokens > 0:
+                self._status.timed_output_tokens += event.output_tokens
+                self._status.model_elapsed_s += event.elapsed_s
             if event.input_tokens > 0 and event.prompt_chars > 0:
                 # Calibrate the live estimate: EMA of chars/token, clamped.
                 ratio = min(max(event.prompt_chars / event.input_tokens, 2.0), 8.0)
@@ -1707,6 +1712,7 @@ class TuiApp:
                 event.input_tokens,
                 event.output_tokens,
                 event.cost_usd,
+                elapsed_s=event.elapsed_s,
             )
         elif isinstance(event, Done):
             self._feed.stream_end()
@@ -1748,6 +1754,7 @@ class TuiApp:
                 event.input_tokens,
                 event.output_tokens,
                 event.cost_usd,
+                elapsed_s=event.elapsed_s,
             )
         elif isinstance(event, Done):
             self._feed.info(f"{agent} finished ({event.stop_reason}, {event.turns} turn(s))")

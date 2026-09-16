@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from tests.fakes import FakeProvider, sample_catalog
@@ -376,6 +377,39 @@ async def test_llm_call_event_per_round(tool_ctx):
         (2, 50, 6),
     ]
     assert all(r.cost_usd >= 0 for r in responses)
+
+
+async def test_response_timing_excludes_tools(tool_ctx, monkeypatch):
+    runner, _ = make_runner(
+        tool_ctx,
+        [
+            {"tool_calls": [{"id": "c1", "name": "echo", "arguments": '{"text": "hi"}'}]},
+            {"text": "done", "usage": {"input_tokens": 10, "output_tokens": 15}},
+        ],
+    )
+    now = 0.0
+    monkeypatch.setattr("lecode.agent.runner.time", SimpleNamespace(monotonic=lambda: now))
+    stream_turn = runner._stream_turn
+
+    async def timed_stream(history, on_event, source_version=None):
+        nonlocal now
+        completed = await stream_turn(history, on_event, source_version)
+        now += 2.0
+        return completed
+
+    monkeypatch.setattr(runner, "_stream_turn", timed_stream)
+    responses = []
+
+    def on_event(event):
+        nonlocal now
+        if isinstance(event, ToolResult):
+            now += 100.0
+        elif isinstance(event, LlmResponse):
+            responses.append(event)
+
+    result = await runner.run([{"role": "user", "content": "echo hi"}], on_event)
+    assert [event.elapsed_s for event in responses] == [2.0, 2.0]
+    assert result.elapsed_s == 104.0
 
 
 async def test_tool_round_trip(tool_ctx):

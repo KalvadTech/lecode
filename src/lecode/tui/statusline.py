@@ -67,6 +67,9 @@ class StatusState:
     context_window: int = 200_000
     input_tokens: int = 0
     output_tokens: int = 0
+    #: Completed responses measured in this session since launch.
+    timed_output_tokens: int = 0
+    model_elapsed_s: float = 0.0
     cost_usd: float = 0.0
     state: StatusLineState = StatusLineState.IDLE
     queued: int = 0
@@ -170,6 +173,12 @@ def render_statusline(state: StatusState, theme: Theme, width: int = 100) -> Tex
     labelled(line3, "agent", state.agent, theme.accent)
     labelled(line3, "in", human_tokens(state.input_tokens), theme.muted)
     labelled(line3, "out", human_tokens(state.output_tokens), theme.muted)
+    speed = (
+        f"{state.timed_output_tokens / state.model_elapsed_s:.1f}"
+        if state.model_elapsed_s > 0
+        else "—"
+    )
+    labelled(line3, "avg tok/s", speed, theme.muted)
     line3.append_text(sep.copy())
     line3.append(state_seg, style=getattr(theme, state_color))
 
