@@ -435,7 +435,6 @@ source recall and validation failures; they do not measure the model's ability t
 distinguish real preferences from tasks, negative examples or quoted injections.
 The scripted provider tests
 are acceptance checks, not recall-quality, cost-saving or latency benchmarks.
-The historical [comparison](memory-comparison.md) remains the design baseline.
 
 Offline reproduction using already-installed development dependencies:
 

@@ -1,7 +1,7 @@
 # Persistent memory upgrade plan
 
-Status: approved for implementation (2026-09-15). Design rationale and external
-evidence live in [memory-comparison.md](memory-comparison.md).
+Status: implemented. This document records lecode's memory architecture, delivery
+phases, and validation. See [memory.md](memory.md) for current usage and behavior.
 
 ## Architecture
 
@@ -13,8 +13,8 @@ JSONL     -> raw transcript + working summary   (session scope)
 SQLite    -> auto facts, provenance, revisions, exclusions (project scope)
 ```
 
-Borrow Pi's incremental extraction and Mastra's source-linked recall without
-adopting either framework. No embeddings, no background worker pool.
+Use incremental extraction and source-linked recall within lecode's existing
+runtime. No embeddings, no background worker pool.
 
 Delivery order: fix correctness, then storage/scope, source recall, incremental
 working memory, forgetting safeguards, and finally enable automatic learning.
@@ -112,11 +112,11 @@ live rejection and successful natural-language smoke test are described in
   compactions, exact source recall, unsupported/tool-instruction rejection,
   duplicates/conflicts, await races/failures, source invalidation, corrections,
   clear/undo/redo, byte bounds and combined usage. Individual files and focused
-   subsets were used during each phase. Final validation below includes the full
-   suite; no live-provider benchmark was run.
+  subsets were used during each phase. Final validation below includes the full
+  suite; no live-provider benchmark was run.
 - Actual configuration, model-classification and exact-source checks, bounded-context and
   proposal-inspection limitations, and the paired baseline/hybrid evaluation
-  checklist are in [memory.md](memory.md). The historical comparison is unchanged.
+  checklist are in [memory.md](memory.md).
 
 ## Non-goals
 
