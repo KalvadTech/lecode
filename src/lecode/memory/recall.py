@@ -10,6 +10,24 @@ from lecode.memory.facts import Fact, FactStore
 from lecode.session.storage import SessionStore, SourceRef
 
 MAX_RECALL_BYTES = 16384
+LEARNING_REASON_CODES = (
+    "response_schema",
+    "output_too_large",
+    "unexpected_tool_calls",
+    "incomplete_response",
+    "invalid_json",
+    "candidate_schema",
+    "invalid_text",
+    "invalid_source",
+    "invalid_conflicts",
+    "temporary_preference",
+    "invalid_preference_source",
+    "invalid_preference",
+    "exact_text_mismatch",
+    "unverified_project_evidence",
+    "stale_context",
+    "extraction_error",
+)
 
 
 def _safe_message(value: Any) -> Any:
@@ -130,6 +148,13 @@ class RecallContext:
                         except (KeyError, ValueError, TypeError):
                             continue
                 data["learning"] = {"status": latest.get("status"), "proposals": proposals}
+                counts = latest.get("reason_counts")
+                if isinstance(counts, dict):
+                    data["learning"]["reason_counts"] = {
+                        code: counts[code]
+                        for code in LEARNING_REASON_CODES
+                        if type(counts.get(code)) is int and 1 <= counts[code] <= 4
+                    }
                 if len(json.dumps(data).encode()) > 6000:
                     data["learning"]["proposals"] = []
         facts = self._facts.list(limit=20, offset=offset) if self._facts else []

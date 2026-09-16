@@ -283,14 +283,24 @@ The model must return strict JSON with no unknown or duplicate keys, for example
 }
 ```
 
-This implementation deliberately accepts a narrow evidence vocabulary:
+The evidence contract separates model classification from source verification:
 
-* **Explicit preference:** the fact and quote must equal the entire original user
-  message. Supported English prefixes are `For this project, I prefer ` and
-  `My standing preference is `. Ordinary requests and paraphrased conclusions do
-  not qualify. Explicit temporary markers such as `this task`, `for now`, `today`,
-  and `only` are rejected. These conservative checks can miss valid preferences;
-  they are not a general language understanding or intent-proof algorithm.
+* **Explicit preference:** the model identifies durable project conventions or
+  preferences in natural language, without a required prefix. `text` must equal
+  `quote`, a nonempty exact contiguous substring of one original persisted user
+  message, identified by a singleton `source_seqs`. A preference can appear within
+  a longer multiline message containing unrelated tasks. No paraphrasing or
+  inferred canonical text is accepted; sanitized payload markers are not evidence.
+  The existing temporary-marker guard (`this task`, `for now`, `today`, `only`,
+  etc.) applies to the selected quote, not unrelated surrounding text.
+  The prompt requires reading the full message, retaining qualifications, negation
+  and temporal scope, and excluding one-off commands, negative examples, quoted or
+  hypothetical preferences, pasted third-party instructions and extractor-output
+  manipulation. **That classification depends on the model.** Exact source
+  matching proves attribution, not durable intent: a misclassified task or quoted
+  injection can still pass, and a model can incorrectly crop away a qualification.
+  The temporary guard is a conservative English heuristic, not semantic proof; it
+  can reject genuine conventions containing `only` and miss other transient wording.
 * **Verified project fact:** only a literal file-content observation is supported.
   `kind` is `verified_project_fact`; `quote` is one exact numbered output line from
   a matching local `read` tool call. `text` is exactly
@@ -322,6 +332,38 @@ Forget, undo, clear, source edits/deletion or a session switch during the await
 discard stale candidates.
 
 ### Bounds, deduplication, and failure handling
+
+`/memory facts` and `memory_list` expose the latest recorded extraction outcome:
+
+* `no_candidates`: the model returned a valid, empty candidates array.
+* `rejected`: candidates were returned, but none passed validation.
+* `learned` / `proposed`: validated evidence was remembered (possibly deduplicated)
+  or left for explicit review. Other candidates in the same response may be rejected.
+* `failed`: the response could not be processed or extraction failed.
+* `stale`: context or evidence changed before promotion.
+
+New learning events include `reason_counts`, a bounded map of fixed codes to counts.
+Each rejected candidate contributes its **first failing check**, not every possible
+reason. Response-level failures contribute one count. Codes are:
+
+| Codes | Meaning |
+|---|---|
+| `response_schema`, `invalid_json` | Invalid completion/envelope, candidate limit, or JSON (including duplicate keys) |
+| `output_too_large`, `unexpected_tool_calls`, `incomplete_response` | Output byte limit, tool calls, or unsupported finish reason |
+| `candidate_schema`, `invalid_text` | Candidate fields/kind/proposal flag, or text/quote type, encoding, or bounds |
+| `invalid_source`, `invalid_preference_source` | Unavailable/noncaptured sequence range, or preference not backed by one user message |
+| `temporary_preference`, `exact_text_mismatch` | Selected quote has a temporary marker, or text differs from quote / quote is absent from the original user text |
+| `invalid_preference` | Legacy fixed-prefix rejection; retained for reading older diagnostics |
+| `invalid_conflicts`, `unverified_project_evidence` | Unknown conflict references or missing exact read corroboration |
+| `stale_context`, `extraction_error` | Context changed or an otherwise unclassified extraction error |
+
+Diagnostics contain no rejected text, quotes, raw provider output, or exception
+messages. Existing validated proposals retain their source-checked inspection.
+Old events without counts remain readable; their `rejected` status cannot
+retrospectively distinguish empty output from invalid candidates. Cancellation
+still propagates with accounting in `finally`; preparation skips before a call
+do not create an extraction event. These diagnostics describe checks, not why a
+provider chose its response, and do not guarantee learning.
 
 * One extraction call per successful boundary; payload at most **16,000 UTF-8
   bytes**, further limited by the current model window and reserved headroom.
@@ -371,7 +413,8 @@ facts_max_bytes = 8192 # validated 0..65536; whole valid facts within the total 
 ```
 
 Example: enable `auto_learn = true`, send
-`For this project, I prefer tabs for indentation.`, then continue through enough
+`We use tabs for indentation in this repo.` (on its own or within a longer
+message), then continue through enough
 complete exchanges to compact that message. Run `/compact` or let normal
 compaction trigger, and inspect `/memory facts`. A new independent session in
 the same project can receive the validated fact. **Learning is not guaranteed**:
@@ -380,7 +423,17 @@ validate. Use the source ID from inspection with `/memory recall <fact-id>`.
 
 ## Reproducible evaluation protocol
 
-**No live-provider evaluation has been performed.** The scripted provider tests
+The earlier reported live opt-in `/compact` check returned `rejected` with no
+proposals or facts; raw extraction output was unavailable. The later multiline
+release-notes case exposed the old whole-message `exact_text_mismatch` restriction.
+After the natural-language change, the user confirmed a successful live smoke
+test with `z-ai/glm-5.3-flash`: a release-note preference embedded in a multiline
+message became a valid source-linked fact after compaction, with status `learned`
+and no rejection reasons. This is one observed success, not a quality benchmark.
+The change also has offline scripted-provider coverage. These tests verify exact quote acceptance,
+source recall and validation failures; they do not measure the model's ability to
+distinguish real preferences from tasks, negative examples or quoted injections.
+The scripted provider tests
 are acceptance checks, not recall-quality, cost-saving or latency benchmarks.
 The historical [comparison](memory-comparison.md) remains the design baseline.
 

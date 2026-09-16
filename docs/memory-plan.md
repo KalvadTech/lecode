@@ -81,15 +81,22 @@ Automatic durable learning stays disabled until phase 5 is green.
   recovery, and total tokens/cost/latency.
 
 Implementation status (2026-09-15): implemented with offline scripted-provider
-acceptance coverage. **No live-provider evaluation performed; auto-learning stays
-off by default.** This is not a measured recall-quality or cost/latency result.
+acceptance coverage. **Auto-learning stays off by default.** A subsequently reported
+live rejection and successful natural-language smoke test are described in
+[memory.md](memory.md); there is no measured recall-quality or cost/latency result.
 
 - Both compaction callers pass live parent context. After a successful summary,
   one bounded call uses the same provider/current model and newly covered raw
   text, with strict JSON and captured exact source ranges. Read-only, disabled,
   child and nonpersistent contexts skip extraction.
-- Promotion accepts a narrow exact-user preference vocabulary and literal local
-  `read`-corroborated file observations. Unsupported claims are rejected;
+- Natural-language update (2026-09-16): the existing model classifies durable user
+  preferences within longer messages, with no fixed prefix. Promotion requires
+  `text=quote`, an exact substring of one original user record, and keeps the
+  temporary-marker check scoped to that quote. The prompt excludes tasks, negative
+  or quoted/hypothetical examples and embedded instructions, retaining contextual
+  qualifications. These are model judgments, not deterministic intent or injection
+  proofs. Fabricated/paraphrased evidence is rejected. Literal local
+  `read`-corroborated file observations keep their existing contract;
   conflicts/corrections become inspectable proposals, not automatic revisions.
   Comparison is bounded and model-assisted, not semantic contradiction proof.
 - Phase 5 transactions now support automatic remember's generation/source-version
@@ -107,7 +114,7 @@ off by default.** This is not a measured recall-quality or cost/latency result.
   clear/undo/redo, byte bounds and combined usage. Individual files and focused
    subsets were used during each phase. Final validation below includes the full
    suite; no live-provider benchmark was run.
-- Actual configuration, conservative acceptance grammar, bounded-context and
+- Actual configuration, model-classification and exact-source checks, bounded-context and
   proposal-inspection limitations, and the paired baseline/hybrid evaluation
   checklist are in [memory.md](memory.md). The historical comparison is unchanged.
 
@@ -133,8 +140,29 @@ silent legacy-note merging.
 
 ## Validation
 
+Natural-language update (2026-09-16): the exact multiline regression failed before
+the substring change, then passed; three prefix-free variants failed before the
+grammar removal, then passed. A sanitized-marker regression failed before checking
+the original captured record, then passed. Final focused validation:
+
+```bash
+uv run --no-sync python -m pytest tests/test_memory_learning.py tests/test_memory_recall.py tests/test_compaction.py -q
+uv run --no-sync ruff check src/lecode/memory/learning.py tests/test_memory_learning.py
+uv run --no-sync ruff format --check src/lecode/memory/learning.py tests/test_memory_learning.py
+git diff --check
+```
+
+Result: **148 focused tests passed**, including conflicts/corrections and
+stale-generation races. The subsequent full suite passed **1,522 tests**; Ruff lint
+and formatting across `src` and `tests`, and whitespace checks passed. The user
+also confirmed a live multiline preference was learned as a valid source-linked
+fact. This smoke test is not a systematic classification evaluation.
+Fake-provider responses test the grounding/recall contract, not semantic
+resistance to quoted prompt injection. No standalone typecheck was run.
+
 Individual touched test files and focused subsets were run during each phase.
-After the final two-axis review and its fixes, the orchestrator ran:
+Historical phase-6 validation, before the natural-language update: after the final
+two-axis review and its fixes, the orchestrator ran:
 
 ```bash
 uv sync --locked --extra telemetry

@@ -352,6 +352,12 @@ async def test_nested_argument_stages(tmp_path, monkeypatch):
     assert "quit " in [c.text for c in await _complete(app._completer, "/help ")]
 
 
+async def test_memory_facts_completion(tmp_path, monkeypatch):
+    app = _make_arg_app(tmp_path, monkeypatch)
+    assert "facts " in [c.text for c in await _complete(app._completer, "/memory ")]
+    assert [c.text for c in await _complete(app._completer, "/memory fa")] == ["facts "]
+
+
 async def test_consumed_positions_offer_nothing(tmp_path, monkeypatch):
     app = _make_arg_app(tmp_path, monkeypatch)
     assert await _complete(app._completer, "/model openai/gpt-5 ") == []

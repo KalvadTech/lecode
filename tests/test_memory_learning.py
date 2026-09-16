@@ -60,6 +60,145 @@ async def compact(runtime, provider):
     )
 
 
+@pytest.mark.parametrize("outcome", ["empty", "all-invalid", "exact"])
+async def test_compact_distinguishes_empty_extraction_from_rejected_candidates(runtime, outcome):
+    from lecode.memory.commands import memory_command
+    from lecode.memory.recall import RecallContext
+    from lecode.session.stats import session_stats
+
+    ctx = runtime.ctx
+    store, session = ctx.session_store, ctx.session
+    store.append_event(session, "clear")
+    text = "For this project, I prefer release notes grouped into Added, Changed, and Fixed."
+    record = store.append_message(session, {"role": "user", "content": text})
+    store.append_message(session, {"role": "assistant", "content": "Noted."})
+    for _ in range(2):
+        store.append_message(session, {"role": "user", "content": "next"})
+        store.append_message(session, {"role": "assistant", "content": "ok"})
+    reply = {
+        "empty": extraction(),
+        "all-invalid": extraction(candidate(text, [record.seq], quote="private rejected quote")),
+        "exact": extraction(candidate(text, [record.seq])),
+    }[outcome]
+    provider = FakeProvider([{"text": "working summary"}, reply])
+    assert await compact(runtime, provider) == "working summary"
+    assert len(provider.requests) == 2
+    assert json.loads(provider.requests[1]["messages"][1]["content"])["messages"][0] == {
+        "seq": record.seq,
+        "message": {"role": "user", "content": text},
+    }
+    _, result = await runtime.registry.dispatch_result("list", "memory_list", "{}", ctx)
+    data = json.loads(result.content)
+    assert len(data["facts"]) == (1 if outcome == "exact" else 0)
+    if outcome == "exact":
+        assert data["facts"][0]["text"] == text
+        assert data["facts"][0]["status"] == "valid"
+    assert data["learning"] == {
+        "status": {"empty": "no_candidates", "all-invalid": "rejected", "exact": "learned"}[
+            outcome
+        ],
+        "proposals": [],
+        "reason_counts": {"exact_text_mismatch": 1} if outcome == "all-invalid" else {},
+    }
+    recall = RecallContext(store, ctx.extras["facts"], ctx.cwd, session_id=session.id)
+    assert json.loads(memory_command(["facts"], ctx.extras["memory"], recall=recall)) == data
+    events = [r for r in store.read_records(session) if getattr(r, "kind", None) == "memory_usage"]
+    assert len(events) == 1
+    assert events[0].data["reason_counts"] == data["learning"]["reason_counts"]
+    assert "private rejected quote" not in json.dumps(events[0].data)
+    assert session_stats(store, session).cost_usd == pytest.approx(0.02)
+
+
+@pytest.mark.parametrize(
+    "quote,surrounding",
+    [
+        (
+            "For this project, I prefer release notes grouped into Added, Changed, and Fixed.",
+            "",
+        ),
+        ("I'd like our release notes grouped by Added, Changed, and Fixed.", ""),
+        ("We use tabs for indentation in this repo.", "Today, only explain the next step.\n"),
+        ("Keep our project documentation in French.", "Thanks for the update.\n"),
+    ],
+)
+async def test_multiline_preference_is_recalled_with_its_complete_user_source(
+    runtime, quote, surrounding
+):
+    ctx = runtime.ctx
+    store, session = ctx.session_store, ctx.session
+    store.append_event(session, "clear")
+    message = (
+        surrounding + quote + "\nThen send these separately, waiting for each response:\n"
+        "Explain semantic versioning in one sentence. Do not modify any files.\n"
+        "Explain a patch release in one sentence. Do not modify any files.\n"
+        "Explain a minor release in one sentence. Do not modify any files."
+    )
+    record = store.append_message(session, {"role": "user", "content": message})
+    store.append_message(session, {"role": "assistant", "content": "Noted."})
+    for _ in range(2):
+        store.append_message(session, {"role": "user", "content": "next"})
+        store.append_message(session, {"role": "assistant", "content": "ok"})
+    provider = FakeProvider([{"text": "summary"}, extraction(candidate(quote, [record.seq]))])
+    assert await compact(runtime, provider) == "summary"
+    _, result = await runtime.registry.dispatch_result("list", "memory_list", "{}", ctx)
+    data = json.loads(result.content)
+    assert data["learning"]["status"] == "learned"
+    assert len(data["facts"]) == 1
+    fact = data["facts"][0]
+    assert fact["text"] == quote and fact["status"] == "valid"
+    _, result = await runtime.registry.dispatch_result(
+        "recall", "memory_recall", json.dumps({"fact_id": fact["id"]}), ctx
+    )
+    recalled = json.loads(result.content)
+    assert recalled["source"]["seqs"] == [record.seq]
+    assert json.loads(recalled["source_text"]) == [
+        {"seq": record.seq, "message": {"role": "user", "content": message}}
+    ]
+
+
+@pytest.mark.parametrize(
+    "message,quote,text,reason",
+    [
+        ("Use tabs today.", "Use tabs today.", "Use tabs today.", "temporary_preference"),
+        (
+            "Use tabs for this task only.",
+            "Use tabs for this task only.",
+            "Use tabs for this task only.",
+            "temporary_preference",
+        ),
+        ("We use tabs.", "We use spaces.", "We use spaces.", "exact_text_mismatch"),
+        ("We use tabs.", "We use tabs.", "Tabs are the project standard.", "exact_text_mismatch"),
+        ("We use tabs.", "We use spaces.", "We use tabs.", "exact_text_mismatch"),
+        ("We use tabs.", "", "We use tabs.", "exact_text_mismatch"),
+        (
+            "data:untrusted",
+            "[binary payload omitted]",
+            "[binary payload omitted]",
+            "exact_text_mismatch",
+        ),
+    ],
+)
+async def test_selected_preference_requires_exact_original_non_temporary_quote(
+    runtime, message, quote, text, reason
+):
+    ctx = runtime.ctx
+    store, session = ctx.session_store, ctx.session
+    store.append_event(session, "clear")
+    record = store.append_message(session, {"role": "user", "content": message})
+    store.append_message(session, {"role": "assistant", "content": "ok"})
+    for _ in range(2):
+        store.append_message(session, {"role": "user", "content": "next"})
+        store.append_message(session, {"role": "assistant", "content": "ok"})
+    await compact(
+        runtime,
+        FakeProvider([{"text": "summary"}, extraction(candidate(text, [record.seq], quote=quote))]),
+    )
+    _, result = await runtime.registry.dispatch_result("list", "memory_list", "{}", ctx)
+    data = json.loads(result.content)
+    assert data["facts"] == []
+    assert data["learning"] == {"status": "rejected", "proposals": [], "reason_counts": {reason: 1}}
+
+
 async def test_opt_in_compaction_promotes_exact_lasting_user_evidence(runtime):
     from lecode.session.stats import session_stats
 
@@ -84,6 +223,99 @@ async def test_opt_in_compaction_promotes_exact_lasting_user_evidence(runtime):
     stats = session_stats(ctx.session_store, ctx.session)
     assert (stats.input_tokens, stats.output_tokens) == (100, 30)
     assert stats.cost_usd == pytest.approx(0.02)
+
+
+@pytest.mark.parametrize(
+    "reply,status,reasons",
+    [
+        (extraction(candidate(extra="private")), "rejected", {"candidate_schema": 1}),
+        (extraction(candidate(text="x" * 513)), "rejected", {"invalid_text": 1}),
+        (extraction(candidate(seqs=[5])), "rejected", {"invalid_source": 1}),
+        (extraction(candidate(seqs=[True])), "rejected", {"invalid_source": 1}),
+        (extraction(candidate(seqs=[2])), "rejected", {"invalid_preference_source": 1}),
+        (extraction(candidate(conflicts=["private"])), "rejected", {"invalid_conflicts": 1}),
+        (extraction(candidate(text="ordinary task")), "rejected", {"exact_text_mismatch": 1}),
+        (
+            extraction(candidate(text="For this project, I prefer tabs today.")),
+            "rejected",
+            {"temporary_preference": 1},
+        ),
+        (
+            extraction(candidate(kind="verified_project_fact")),
+            "rejected",
+            {"unverified_project_evidence": 1},
+        ),
+        (
+            extraction(candidate(quote="private"), candidate(quote="private")),
+            "rejected",
+            {"exact_text_mismatch": 2},
+        ),
+        (extraction(*[candidate()] * 5), "failed", {"response_schema": 1}),
+        ({"text": '{"candidates":[],"private":"secret"}'}, "failed", {"response_schema": 1}),
+        ({"text": "private invalid JSON"}, "failed", {"invalid_json": 1}),
+        ({"text": '{"candidates":[],"candidates":[]}'}, "failed", {"invalid_json": 1}),
+        (
+            {**extraction(candidate()), "finish_reason": "length"},
+            "failed",
+            {"incomplete_response": 1},
+        ),
+        ({"text": "private" * 1000}, "failed", {"output_too_large": 1}),
+        (
+            {"tool_calls": [{"name": "private", "arguments": "{}"}]},
+            "failed",
+            {"unexpected_tool_calls": 1},
+        ),
+        ({"error": RuntimeError("private provider error")}, "failed", {"extraction_error": 1}),
+        (extraction(candidate(kind=[]), candidate()), "learned", {"candidate_schema": 1}),
+        (extraction(candidate(text="\ud800"), candidate()), "learned", {"invalid_text": 1}),
+    ],
+)
+async def test_compact_exposes_content_free_validation_diagnostics(runtime, reply, status, reasons):
+    ctx = runtime.ctx
+    assert (
+        await compact(runtime, FakeProvider([{"text": "working summary"}, reply]))
+        == "working summary"
+    )
+    _, result = await runtime.registry.dispatch_result("list", "memory_list", "{}", ctx)
+    data = json.loads(result.content)
+    assert data["learning"] == {"status": status, "proposals": [], "reason_counts": reasons}
+    assert len(data["facts"]) == (1 if status == "learned" else 0)
+    events = [
+        r
+        for r in ctx.session_store.read_records(ctx.session)
+        if getattr(r, "kind", None) == "memory_usage"
+    ]
+    assert len(events) == 1
+    assert events[0].data["reason_counts"] == reasons
+    assert "private" not in json.dumps(events[0].data)
+    assert "private" not in result.content
+    assert ctx.session_store.load_for_model(ctx.session)[0]["content"] == "working summary"
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [
+        None,
+        {
+            "private raw output": 1,
+            "invalid_source": "private",
+            "invalid_json": 1,
+            "invalid_text": 9999,
+        },
+    ],
+)
+async def test_learning_diagnostics_keep_legacy_events_and_filter_untrusted_counts(runtime, counts):
+    ctx = runtime.ctx
+    data = {"purpose": "learning", "status": "rejected", "proposals": []}
+    if counts is not None:
+        data["reason_counts"] = counts
+    ctx.session_store.append_event(ctx.session, "memory_usage", data)
+    _, result = await runtime.registry.dispatch_result("list", "memory_list", "{}", ctx)
+    learning = json.loads(result.content)["learning"]
+    expected = {"status": "rejected", "proposals": []}
+    if counts is not None:
+        expected["reason_counts"] = {"invalid_json": 1}
+    assert learning == expected
 
 
 async def test_runner_auto_compaction_uses_live_context_and_counts_learning_once(runtime):
@@ -211,6 +443,9 @@ async def test_extraction_await_races_discard_candidates_and_account_once(runtim
     assert facts.search("prefer") == []
     events = [r for r in store.read_records(session) if getattr(r, "kind", None) == "memory_usage"]
     assert len(events) == 1 and events[0].data["purpose"] == "learning"
+    if change in {"forget", "undo", "clear", "switch"}:
+        assert events[0].data["status"] == "stale"
+        assert events[0].data["reason_counts"] == {"stale_context": 1}
     if change in {"failure", "cancel", "switch"}:
         assert store.load_for_model(session)[0]["content"] == "working summary"
     if change == "undo":
@@ -261,6 +496,7 @@ async def test_project_fact_requires_exact_paired_read_corroboration_not_tool_in
                     kind="verified_project_fact",
                     quote="unsupported",
                 ),
+                candidate(fact_text, [seqs[3]]),
             ),
         ]
     )
@@ -269,6 +505,11 @@ async def test_project_fact_requires_exact_paired_read_corroboration_not_tool_in
     facts = ctx.extras["facts"].search("requires-python")
     assert len(facts) == 1 and facts[0].text == fact_text
     assert ctx.extras["facts"].source(facts[0].id).seqs == tuple(seqs)
+    _, listed = await runtime.registry.dispatch_result("list", "memory_list", "{}", ctx)
+    assert json.loads(listed.content)["learning"]["reason_counts"] == {
+        "invalid_preference_source": 2,
+        "unverified_project_evidence": 1,
+    }
     _, result = await runtime.registry.dispatch_result(
         "recall", "memory_recall", json.dumps({"fact_id": facts[0].id}), ctx
     )
@@ -333,11 +574,19 @@ async def test_six_learning_boundaries_are_incremental_and_new_source_duplicates
     assert ctx.session_store.load_for_model(ctx.session)[0]["content"] == "summary-5"
 
 
-async def test_explicit_correction_is_proposed_even_when_model_requests_promotion(runtime):
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Correction: For this project, I prefer spaces instead of tabs.",
+        "Actually, we use spaces rather than tabs in this repo.",
+    ],
+)
+async def test_explicit_correction_is_proposed_even_when_model_requests_promotion(runtime, text):
     ctx = runtime.ctx
     ctx.session_store.append_event(ctx.session, "clear")
-    text = "Correction: For this project, I prefer spaces instead of tabs."
-    record = ctx.session_store.append_message(ctx.session, {"role": "user", "content": text})
+    record = ctx.session_store.append_message(
+        ctx.session, {"role": "user", "content": f"Thanks.\n{text}\nPlease explain the diff."}
+    )
     ctx.session_store.append_message(ctx.session, {"role": "assistant", "content": "noted"})
     for _ in range(2):
         ctx.session_store.append_message(ctx.session, {"role": "user", "content": "next"})
