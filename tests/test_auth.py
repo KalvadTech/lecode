@@ -72,6 +72,15 @@ def test_custom_provider_falls_back_to_config_key():
     assert (resolved.key, resolved.source) == ("config-key", "config")
 
 
+def test_custom_provider_prefers_its_own_config_key():
+    config = _config(
+        llm={"api_key": "global-key"},
+        custom_providers={"myllm": {"base_url": "http://x", "api_key": "own-key"}},
+    )
+    resolved = resolve_api_key("myllm", config)
+    assert (resolved.key, resolved.source) == ("own-key", "config")
+
+
 def test_policy_required_raises_without_key():
     config = _config(llm={"auth_policy": "required"})
     with pytest.raises(AuthError, match="required"):

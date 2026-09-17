@@ -64,8 +64,11 @@ def resolve_api_key(
             if value:
                 key, source = value, "env"
                 break
-        if key is None and config.llm.api_key:
-            key, source = config.llm.api_key, "config"
+        if key is None:
+            if custom is not None and custom.api_key:
+                key, source = custom.api_key, "config"
+            elif config.llm.api_key:
+                key, source = config.llm.api_key, "config"
 
     if key is None and policy == "required":
         raise AuthError(

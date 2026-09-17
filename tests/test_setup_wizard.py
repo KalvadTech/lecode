@@ -89,21 +89,35 @@ async def test_wizard_config_file_is_owner_only(cfg_dir, clean_home):
     assert mode == 0o600
 
 
-async def test_wizard_custom_provider_asks_base_url(cfg_dir, clean_home):
-    session = FakeSession(["custom", "https://llm.local/v1", "local-key", "2", "n"])
+async def test_wizard_custom_provider_writes_named_entry(cfg_dir, clean_home):
+    session = FakeSession(["custom", "local", "https://llm.local/v1", "local-key", "2", "n"])
     await run_wizard(session, home=clean_home)
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
-    assert raw["llm"]["provider"] == "custom"
-    assert raw["llm"]["base_url"] == "https://llm.local/v1"
+    assert raw["llm"]["provider"] == "local"
     assert raw["llm"]["model"] == "openai/gpt-5-mini"  # pick 2
+    assert "api_key" not in raw["llm"]
+    assert raw["custom_providers"]["local"] == {
+        "base_url": "https://llm.local/v1",
+        "api_key": "local-key",
+    }
 
 
-async def test_wizard_base_url_validated(cfg_dir, clean_home):
-    session = FakeSession(["2", "ftp://nope", "https://ok.example/v1", "", "1", ""])
+async def test_wizard_custom_provider_base_url_validated(cfg_dir, clean_home):
+    session = FakeSession(["2", "local", "ftp://nope", "https://ok.example/v1", "", "1", ""])
     await run_wizard(session, home=clean_home)
     raw = tomllib.loads((cfg_dir / "config.toml").read_text())
-    assert raw["llm"]["base_url"] == "https://ok.example/v1"
-    assert "api_key" not in raw["llm"]  # custom tolerates an empty key
+    assert raw["custom_providers"]["local"]["base_url"] == "https://ok.example/v1"
+    assert "api_key" not in raw["custom_providers"]["local"]
+
+
+async def test_wizard_custom_provider_name_validated(cfg_dir, clean_home):
+    session = FakeSession(
+        ["custom", "openrouter", "gemini", "https://gemini.example/v1", "k", "1", ""]
+    )
+    await run_wizard(session, home=clean_home)
+    raw = tomllib.loads((cfg_dir / "config.toml").read_text())
+    assert raw["llm"]["provider"] == "gemini"
+    assert "openrouter" not in raw["custom_providers"]
 
 
 async def test_wizard_key_required_loops_until_nonempty(cfg_dir, clean_home):
@@ -133,6 +147,27 @@ def test_build_config_minimal_shape():
         "schema_version": 1,
         "llm": {"provider": "openai", "model": "openai/gpt-5-mini", "api_key": "k"},
         "notifications": {"enabled": True},
+    }
+
+
+def test_build_config_named_custom_provider():
+    raw = build_config(
+        {
+            "provider": "custom",
+            "provider_name": "gemini",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "api_key": "gk",
+            "model": "gemini-2.5-flash",
+            "notifications": False,
+        }
+    )
+    assert raw["llm"]["provider"] == "gemini"
+    assert raw["llm"]["model"] == "gemini-2.5-flash"
+    assert "api_key" not in raw["llm"]
+    assert "base_url" not in raw["llm"]
+    assert raw["custom_providers"]["gemini"] == {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "api_key": "gk",
     }
 
 
@@ -394,6 +429,7 @@ def test_import_from_pi_custom_provider(tmp_path):
     )
     assert import_from_pi(tmp_path) == {
         "provider": "custom",
+        "provider_name": "local",
         "base_url": "http://localhost:1234/v1",
         "api_key": "local-key",
         "model": "qwen3",
@@ -436,6 +472,7 @@ def test_import_from_opencode_custom_base_url(tmp_path):
     )
     assert import_from_opencode(tmp_path) == {
         "provider": "custom",
+        "provider_name": "corp",
         "base_url": "https://corp.example/v1",
         "model": "qwen3",
     }
