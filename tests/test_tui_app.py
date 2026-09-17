@@ -288,7 +288,7 @@ async def test_notes_hook_checks_composed_prompt_before_persistence(tmp_path, mo
     config = Config()
     config.hooks = {
         "UserPromptSubmit": [
-            'payload=$(cat); echo "$payload" >> prompts.jsonl; '
+            'payload=$(cat); printf "%s\\n" "$payload" >> prompts.jsonl; '
             'case "$payload" in *BLOCKED*) echo \'{"verdict":"deny"}\' ;; esac'
         ]
     }
@@ -322,7 +322,7 @@ async def test_generated_prompts_are_guarded_at_each_submission(
     config = Config()
     config.hooks = {
         "UserPromptSubmit": [
-            'payload=$(cat); echo "$payload" >> prompts.jsonl; '
+            'payload=$(cat); printf "%s\\n" "$payload" >> prompts.jsonl; '
             'case "$payload" in *BLOCKED*) echo \'{"verdict":"deny"}\' ;; esac'
         ]
     }
