@@ -15,16 +15,20 @@ a full muted panel. All output goes through the injected console so tests
 can record with ``Console(record=True, file=StringIO())``.
 
 Logbook style: every discrete line carries a ``[HH:MM:SS]`` timestamp — except
-the user-input echo, which prints verbatim — and action lines (tool calls,
-tool results) end with the live ``ctx used/window · $cost-so-far`` segment
-when a ``metrics`` callable is bound (the TUI binds it to the statusline
-state).
+the user-input echo, which prints verbatim. Tool lines stay scannable: a call
+is one attributed line, a successful result is a one-line summary (``✔ name ·
+first line (+N lines)``), and only failures keep a head of raw output. Every
+action line still ends with the live ``ctx used/window · $cost`` segment when
+a ``metrics`` callable is bound — spend is always visible. A completed
+streamed answer is rendered as Markdown; live tokens stay raw in the bound
+sink, when one is bound.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -34,11 +38,17 @@ from rich.text import Text
 from lecode.tui.statusline import context_meter, format_cost, human_tokens
 from lecode.tui.themes import Theme
 
+if TYPE_CHECKING:
+    from lecode.tui.agents import AgentRun
+
 #: Max length of a rendered tool-call line.
 TOOL_CALL_MAX_LEN = 120
 
-#: Lines of a tool result shown before elision kicks in.
+#: Lines of a failed tool result shown before elision kicks in.
 TOOL_RESULT_HEAD_LINES = 10
+
+#: Max characters of a successful tool result's one-line summary.
+TOOL_RESULT_SUMMARY_MAX_LEN = 140
 
 #: ``(context_used, context_window, cost_usd)`` at render time.
 MetricsFn = Callable[[], tuple[int, int, float]]
@@ -98,9 +108,9 @@ class Feed:
     def stream_token(self, text: str, *, thinking: bool = False) -> None:
         """Handle one content/reasoning token.
 
-        Reasoning accumulates for stream end. Content accumulates too; with a
-        bound sink it is mirrored live to the in-layout region, otherwise it
-        prints raw immediately (non-TUI use, where no app redraws can eat it).
+        Reasoning accumulates for stream end. Content accumulates too and is
+        mirrored live to the in-layout region when a sink is bound; without a
+        sink it lands in the scrollback only at stream end.
         """
         if thinking:
             self._thinking_parts.append(text)
@@ -184,18 +194,40 @@ class Feed:
         self._console.print(Text(line + self._suffix(), style=self._theme.tool))
 
     def tool_result(self, name: str, content: str, is_error: bool = False) -> None:
-        """Render a tool result head with ``… (N more lines)`` elision.
+        """One attributed line: a result summary, or a head of the failure.
 
-        The timestamp/metrics marker goes on its own line after the output,
-        so multi-line output reads top-down and the bookkeeping lands last.
+        Success is a summary (first non-empty line, clipped, plus a count of
+        the hidden lines) — routine file contents never flood the transcript.
+        Failures stay prominent: the label plus up to ten raw lines.
         """
-        lines = content.splitlines()
-        shown = lines[:TOOL_RESULT_HEAD_LINES]
-        if len(lines) > TOOL_RESULT_HEAD_LINES:
-            shown.append(f"… ({len(lines) - TOOL_RESULT_HEAD_LINES} more lines)")
-        shown.append(f"[{self._stamp()}]{self._suffix()}")
-        style = self._theme.error if is_error else self._theme.muted
-        self._console.print(Text("\n".join(shown), style=style))
+        if is_error:
+            rows = content.splitlines()
+            shown = rows[:TOOL_RESULT_HEAD_LINES]
+            if len(rows) > TOOL_RESULT_HEAD_LINES:
+                shown.append(f"… ({len(rows) - TOOL_RESULT_HEAD_LINES} more lines)")
+            body = "\n".join(shown) or "(no output)"
+            self._console.print(
+                Text(
+                    f"[{self._stamp()}] ✗ {name}{self._suffix()}\n{body}",
+                    style=self._theme.error,
+                )
+            )
+            return
+        rows = [row for row in content.splitlines() if row.strip()]
+        if not rows:
+            summary = "(no output)"
+        else:
+            summary = " ".join(rows[0].split())
+            if len(summary) > TOOL_RESULT_SUMMARY_MAX_LEN:
+                summary = summary[: TOOL_RESULT_SUMMARY_MAX_LEN - 1] + "…"
+            if len(rows) > 1:
+                summary += f" (+{len(rows) - 1} lines)"
+        line = Text()
+        line.append(f"[{self._stamp()}] ", style=self._theme.muted)
+        line.append("✔ ", style=self._theme.success)
+        line.append(f"{name} · {summary}", style=self._theme.text)
+        line.append(self._suffix(), style=self._theme.muted)
+        self._console.print(line)
 
     def turn_stats(
         self,
@@ -229,6 +261,36 @@ class Feed:
             parts.append(" · ".join(activity))
         line = f"[{self._stamp()}] " + " · ".join(parts)
         self._console.print(Text(line, style=self._theme.muted))
+
+    def agent_summary(self, run: AgentRun) -> None:
+        """One attributed line for a finished child run (the roster keeps detail)."""
+        glyph, slot = {
+            "done": ("✔", "success"),
+            "ok": ("✔", "success"),
+            "error": ("✗", "error"),
+            "failed": ("✗", "error"),
+            "cancelled": ("—", "muted"),
+            "stopped": ("■", "muted"),
+            "interrupted": ("!", "warning"),
+        }.get(run.status, ("✔", "muted"))
+        identity = f"{run.agent} · {run.description}"
+        if run.worker:
+            identity += f" · worker {run.run_id[:8]}"
+        parts = [identity]
+        if run.activity:
+            count = len(run.activity)
+            parts.append(f"{count} tool call{'s' if count != 1 else ''}")
+        if run.status == "error" and run.error:
+            parts.append(run.error.splitlines()[0][:80])
+        if run.worker:
+            parts.append(
+                format_cost(run.cost_usd) + (" incomplete" if run.usage_incomplete else "")
+            )
+        self._console.print(
+            Text(
+                f"[{self._stamp()}] {glyph} " + " · ".join(parts), style=getattr(self._theme, slot)
+            )
+        )
 
     def review(self, model: str, feedback: str) -> None:
         """Pierre-mode feedback: a labelled block after the stats line."""

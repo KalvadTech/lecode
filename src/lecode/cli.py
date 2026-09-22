@@ -36,6 +36,7 @@ from lecode.extras.loop_mode import (
     run_plan_loop,
 )
 from lecode.extras.status_signals import START, STOP, StatusEmitter
+from lecode.extras.workers import WORKER_EXTRA
 from lecode.extras.worktree import WorktreeError, WorktreeInfo, WorktreeManager
 from lecode.hooks import (
     EVENTS,
@@ -186,6 +187,9 @@ async def _run_headless(
     try:
         return await runner.run(messages)
     finally:
+        workers = runner.ctx.extras.get(WORKER_EXTRA)
+        if workers is not None:
+            await workers.shutdown()
         aclose = getattr(provider, "aclose", None)
         if aclose is not None:
             await aclose()
@@ -488,6 +492,9 @@ def run_loop_mode(
             background = runtime.ctx.extras.get(BACKGROUND_EXTRA)
             if background is not None:
                 await background.shutdown()
+            workers = runtime.ctx.extras.get(WORKER_EXTRA)
+            if workers is not None:
+                await workers.shutdown()
             await _aclose(client)
 
     herdr.report("idle", session_id=session.id)
@@ -595,6 +602,9 @@ def run_chain_mode(
             background = runtime.ctx.extras.get(BACKGROUND_EXTRA)
             if background is not None:
                 await background.shutdown()
+            workers = runtime.ctx.extras.get(WORKER_EXTRA)
+            if workers is not None:
+                await workers.shutdown()
             await _aclose(client)
 
     herdr.report("idle", session_id=session.id)

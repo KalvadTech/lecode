@@ -47,6 +47,8 @@ def make_ctx(tmp_path, monkeypatch, callback=None, mode="yolo", tool_name="bash"
     rule for ``tool_name`` to drive the approval-prompt flows.
     """
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    monkeypatch.chdir(tmp_path)
     config = Config()
     config.notifications.enabled = False  # never play sounds in tests
     if ask:
@@ -196,11 +198,108 @@ async def test_approval_prompt_request_resolve_cancel():
         await future2
 
 
+# -- FIFO queue -------------------------------------------------------------------
+
+
+async def test_concurrent_requests_resolve_in_fifo_order():
+    prompt = ApprovalPrompt()
+    first = prompt.request("bash", "ls", "r1")
+    second = prompt.request("bash", "rm", "r2")
+    assert prompt.pending.tool_name == "bash" and prompt.pending.reason == "r1"
+    prompt.resolve(AllowOnce())
+    assert await first == AllowOnce()
+    assert not second.done()
+    assert prompt.pending.reason == "r2"
+    prompt.resolve(Deny())
+    assert await second == Deny()
+    assert not prompt.is_pending
+
+
+async def test_three_requests_head_grants_only():
+    """y/a resolve only the head; a queued request is never granted."""
+    prompt = ApprovalPrompt()
+    futures = [prompt.request("bash", f"c{i}", f"r{i}") for i in range(3)]
+    prompt.resolve(AllowAlways(pattern="c0"))
+    assert await futures[0] == AllowAlways(pattern="c0")
+    assert all(not f.done() for f in futures[1:])
+    prompt.resolve(Deny())
+    prompt.resolve(Deny())
+    results = await asyncio.gather(*futures[1:])
+    assert results == [Deny(), Deny()]
+    assert not prompt.is_pending
+
+
+async def test_cancel_head_promotes_next_without_disturbing_tail():
+    prompt = ApprovalPrompt()
+    head = prompt.request("bash", "ls", "r1")
+    tail = prompt.request("bash", "rm", "r2")
+    head.cancel()  # awaiter cancelled
+    with pytest.raises(asyncio.CancelledError):
+        await head
+    await asyncio.sleep(0)  # let the done-callback remove the entry
+    assert prompt.pending.reason == "r2"
+    prompt.resolve(AllowOnce())
+    assert await tail == AllowOnce()
+    assert not prompt.is_pending
+
+
+async def test_cancel_tail_keeps_head():
+    prompt = ApprovalPrompt()
+    head = prompt.request("bash", "ls", "r1")
+    tail = prompt.request("bash", "rm", "r2")
+    tail.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tail
+    await asyncio.sleep(0)
+    assert prompt.pending.reason == "r1"
+    prompt.resolve(Deny())
+    assert await head == Deny()
+    assert not prompt.is_pending
+
+
+async def test_scoped_cancel_future_leaves_others():
+    prompt = ApprovalPrompt()
+    head = prompt.request("bash", "ls", "r1")
+    middle = prompt.request("bash", "rm", "r2")
+    tail = prompt.request("bash", "cd", "r3")
+    prompt.cancel(middle)
+    assert middle.cancelled()
+    assert prompt.pending.reason == "r1"
+    prompt.resolve(AllowOnce())
+    assert prompt.pending.reason == "r3"
+    prompt.cancel(tail)
+    assert prompt.pending is None
+    assert await head == AllowOnce()
+
+
+async def test_attribution_passthrough_and_defaults():
+    prompt = ApprovalPrompt()
+    prompt.request("bash", "ls", "r1", worker="w2", conversation="sub-a")
+    prompt.request("bash", "rm", "r2")
+    pending = prompt.pending
+    assert pending.worker == "w2" and pending.conversation == "sub-a"
+    prompt.resolve(AllowOnce())
+    queued = prompt.pending
+    assert queued.worker is None and queued.conversation == "main"
+
+
+async def test_shutdown_cancels_all_outstanding():
+    prompt = ApprovalPrompt()
+    futures = [prompt.request("bash", f"c{i}", f"r{i}") for i in range(3)]
+    prompt.cancel()
+    assert not prompt.is_pending
+    for future in futures:
+        with pytest.raises(asyncio.CancelledError):
+            await future
+
+
 # -- app integration ---------------------------------------------------------------
 
 
 def make_app(tmp_path, monkeypatch, script):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
+    monkeypatch.chdir(tmp_path)
     config = Config()
     config.notifications.enabled = False  # never play sounds in tests
     # the two modes never Ask by themselves; gate bash with an ask rule
@@ -247,6 +346,51 @@ async def test_request_approval_shows_doom_reason(tmp_path, monkeypatch):
     app._approval.resolve(Deny())
     assert await task == Deny()
     task.result()  # consume
+
+
+async def test_worker_approval_is_attributed_at_fifo_head(tmp_path, monkeypatch):
+    app, out = make_app(tmp_path, monkeypatch, [])
+    first = asyncio.ensure_future(
+        app._request_approval("bash", {"command": "ls"}, "", worker="worker-1234", conversation="w")
+    )
+    second = asyncio.ensure_future(app._request_approval("bash", {"command": "pwd"}, ""))
+    await wait_for(lambda: app._approval.pending is not None)
+    assert app._approval.pending.worker == "worker-1234"
+    app._resolve_approval(AllowOnce())
+    assert await first == AllowOnce()
+    assert app._approval.pending is not None and app._approval.pending.worker is None
+    app._resolve_approval(Deny())
+    assert await second == Deny()
+    assert "[worker worker-1 · w] allow bash 'ls'?" in out.getvalue()
+
+
+async def test_dirty_worker_confirmation_is_one_shot(tmp_path, monkeypatch):
+    app, out = make_app(tmp_path, monkeypatch, [])
+    question = (
+        f"@build worker worker-1234 in {tmp_path / 'worker-tree'}: "
+        "Uncommitted changes will not enter the committed-HEAD worktree. Continue?"
+    )
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: app.worker_manager.confirm is not None)
+        first = asyncio.create_task(app.worker_manager.confirm(question))
+        second = asyncio.create_task(app.worker_manager.confirm("second worker question?"))
+        await wait_for(lambda: "(y)es (n)o" in out.getvalue())
+        assert question in " ".join(out.getvalue().split())
+        assert "second worker question?" not in out.getvalue()
+        inp.send_text("a")
+        await asyncio.sleep(0.05)
+        assert not first.done() and not second.done()
+        inp.send_text("y")
+        assert await first is True
+        await wait_for(lambda: "second worker question?" in out.getvalue())
+        assert not second.done()
+        inp.send_text("n")
+        assert await second is False
+        assert app.status.state is StatusLineState.IDLE
+        assert app.store.load_grants(app.session) == []
+        inp.send_text("/quit\r")
+        assert await task == 0
 
 
 async def test_pipe_approval_y_runs_asked_tool(tmp_path, monkeypatch):

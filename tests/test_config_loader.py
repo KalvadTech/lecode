@@ -42,6 +42,7 @@ def test_defaults_validate_from_empty():
     assert config.compaction.buffer_tokens == 20000
     assert config.agent.max_turns == 500
     assert config.tools.enabled == {}
+    assert config.worktree.validation == []
     assert config.permissions.mode == "yolo"
     assert config.notifications.volume == 0.5
     assert config.mcp.enable_exa is True
@@ -205,3 +206,24 @@ def test_deep_merge_semantics():
         "c": [9],
         "d": True,
     }
+
+
+def test_worktree_validation_config(global_dir, project):
+    root, cwd = project
+    (global_dir / "config.toml").write_text(
+        'schema_version = 1\n[worktree]\nvalidation = ["check-one", "check-two"]\n'
+    )
+    loaded = load_config(cwd=cwd)
+    assert loaded.config.worktree.validation == ["check-one", "check-two"]
+    assert loaded.warnings == []
+    (root / ".lecode").mkdir()
+    (root / ".lecode" / "config.toml").write_text("[worktree]\nvalidation = []\n")
+    assert load_config(cwd=cwd).config.worktree.validation == []
+    assert "validation = []" in (root / ".lecode" / "config.toml").read_text()
+
+
+@pytest.mark.parametrize("value", ['"check"', "[1]", "true"])
+def test_worktree_validation_rejects_wrong_types(global_dir, tmp_path, value):
+    (global_dir / "config.toml").write_text(f"[worktree]\nvalidation = {value}\n")
+    with pytest.raises(ValueError, match=r"worktree\.validation"):
+        load_config(cwd=tmp_path)

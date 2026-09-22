@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from tests.test_tui_app import make_app
+from tests.test_tui_permission import wait_for
 
 from lecode.extras import herdr
+from lecode.permission import AllowOnce, Deny
 
 
 def _fake_herdr(tmp_path):
@@ -95,3 +98,45 @@ async def test_tui_turn_reports_working_and_idle(tmp_path, monkeypatch):
 
     states = [call[call.index("--state") + 1] for call in _calls(log)]
     assert states == ["working", "idle"]
+
+
+async def test_tui_queued_approval_keeps_herdr_blocked(tmp_path, monkeypatch):
+    """A queued ask keeps Herdr blocked; only the last resolution resumes work."""
+    binary, log = _fake_herdr(tmp_path)
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_BIN_PATH", str(binary))
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:p1")
+    monkeypatch.setenv("HERDR_LOG", str(log))
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+
+    first = asyncio.ensure_future(
+        app._request_approval("bash", {"command": "ls"}, "", worker="worker-1", conversation="w")
+    )
+    second = asyncio.ensure_future(app._request_approval("bash", {"command": "pwd"}, ""))
+    await wait_for(lambda: app._approval.is_pending)
+    app._resolve_approval(AllowOnce())
+    assert await first == AllowOnce()
+    app._resolve_approval(Deny())
+    assert await second == Deny()
+
+    states = [call[call.index("--state") + 1] for call in _calls(log)]
+    assert states == ["blocked", "blocked", "working"]
+
+
+async def test_tui_dirty_worktree_ask_reports_lifecycle(tmp_path, monkeypatch):
+    """The dirty-worktree ask reports blocked, then the post-ask busy state."""
+    binary, log = _fake_herdr(tmp_path)
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_BIN_PATH", str(binary))
+    monkeypatch.setenv("HERDR_PANE_ID", "w1:p1")
+    monkeypatch.setenv("HERDR_LOG", str(log))
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+
+    task = asyncio.ensure_future(app._confirm_worker_worktree("dirty tree; continue?"))
+    await wait_for(lambda: "(y)es (n)o" in out.getvalue())
+    app._resolve_approval(AllowOnce())
+    assert await task is True
+
+    states = [call[call.index("--state") + 1] for call in _calls(log)]
+    # no turn or worker is active in this direct call, so the ask resolves to idle
+    assert states == ["blocked", "idle"]

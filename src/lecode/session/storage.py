@@ -39,6 +39,57 @@ try:
 except ImportError:  # Windows: best-effort, attach locking disabled
     fcntl = None  # type: ignore[assignment]
 
+#: Caps for one persisted agent-run activity record (bounded trails).
+AGENT_RUN_ANSWER_CAP = 32 * 1024
+AGENT_RUN_PROMPT_CAP = 2000
+AGENT_RUN_RESULT_CAP = 2000
+AGENT_RUN_ARGS_CAP = 500
+AGENT_RUN_MAX_TOOLS = 100
+_TRUNCATED_MARK = "… (truncated)"
+
+
+def _clip_activity(text: str, cap: int) -> tuple[str, bool]:
+    """Clip ``text`` to ``cap`` chars; the flag reports a truncation."""
+    if len(text) <= cap:
+        return text, False
+    return text[:cap] + f"\n{_TRUNCATED_MARK}", True
+
+
+def _bounded_agent_run(run: dict[str, Any]) -> dict[str, Any]:
+    """Apply the activity caps so one run can never bloat the session file."""
+    truncated = False
+    data: dict[str, Any] = {
+        "run_id": str(run.get("run_id") or ""),
+        "agent": str(run.get("agent") or ""),
+        "description": str(run.get("description") or ""),
+        "status": str(run.get("status") or ""),
+    }
+    for key, cap in (("prompt", AGENT_RUN_PROMPT_CAP), ("answer", AGENT_RUN_ANSWER_CAP)):
+        data[key], clipped = _clip_activity(str(run.get(key) or ""), cap)
+        truncated |= clipped
+    tools: list[dict[str, Any]] = []
+    raw_tools = run.get("tool_calls")
+    raw_tools = raw_tools if isinstance(raw_tools, list) else []
+    for raw in raw_tools[:AGENT_RUN_MAX_TOOLS]:
+        if not isinstance(raw, dict):
+            continue
+        entry: dict[str, Any] = {
+            "name": str(raw.get("name") or ""),
+            "is_error": bool(raw.get("is_error")),
+        }
+        for key, cap in (("args", AGENT_RUN_ARGS_CAP), ("result", AGENT_RUN_RESULT_CAP)):
+            entry[key], clipped = _clip_activity(str(raw.get(key) or ""), cap)
+            truncated |= clipped
+        tools.append(entry)
+    truncated |= len(raw_tools) > AGENT_RUN_MAX_TOOLS
+    data["tool_calls"] = tools
+    for key in ("turns", "input_tokens", "output_tokens"):
+        data[key] = int(run.get(key) or 0)
+    data["cost_usd"] = float(run.get("cost_usd") or 0.0)
+    data["duration_s"] = float(run.get("duration_s") or 0.0)
+    data["truncated"] = truncated
+    return data
+
 
 class SessionNotFoundError(KeyError):
     """No session matched the reference."""
@@ -254,6 +305,10 @@ class SessionStore:
         self._append(session, record)
         return record
 
+    def record_agent_run(self, session: Session, run: dict[str, Any]) -> EventRecord:
+        """Append one bounded agent-run activity record (kind ``agent_run``)."""
+        return self.append_event(session, "agent_run", _bounded_agent_run(run))
+
     # -- reading ------------------------------------------------------------
 
     def _read_records_at(self, path: Path) -> list[Record]:
@@ -384,6 +439,22 @@ class SessionStore:
             for r in records
             if isinstance(r, MessageRecord) and not self._is_hidden(r.seq, tombstones)
         ]
+
+    def load_events(self, session: Session, kind: str) -> list[dict[str, Any]]:
+        """Event records of ``kind`` with tombstones applied, in append order."""
+        records = self.read_records(session)
+        tombstones = self._active_tombstones(records)
+        return [
+            dict(r.data)
+            for r in records
+            if isinstance(r, EventRecord)
+            and r.kind == kind
+            and not self._is_hidden(r.seq, tombstones)
+        ]
+
+    def load_agent_runs(self, session: Session) -> list[dict[str, Any]]:
+        """Agent-run activity records with tombstones applied, in append order."""
+        return self.load_events(session, "agent_run")
 
     def undo(self, session: Session) -> TombstoneRecord | None:
         """Hide the last user turn (the user message and everything after it)."""

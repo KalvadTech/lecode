@@ -55,14 +55,14 @@ def test_lines_carry_timestamps(theme):
     )
     lines = out.getvalue().splitlines()
     stamped = [ln for ln in lines if ln.startswith("[")]
-    # tool call, tool result marker, info, error, turn stats (not the user echo)
+    # tool call, tool result, info, error, turn stats (not the verbatim echo)
     assert len(stamped) == 5
     assert all(len(ln) >= 10 and ln[1:3].isdigit() and ln[3] == ":" for ln in stamped)
-    # the tool result marker is its own line after the output
-    assert lines[lines.index("ok") + 1].startswith("[")
+    assert not lines[0].startswith("[")
 
 
 def test_metrics_suffix_on_action_lines(theme):
+    """Live ctx/cost stays on every action line: spend is always visible."""
     feed, out = make_feed(theme)
     feed.metrics = lambda: (12_300, 200_000, 0.0412)
     feed.user_message("hi")  # verbatim: no metrics suffix on the input echo
@@ -70,12 +70,6 @@ def test_metrics_suffix_on_action_lines(theme):
     feed.tool_result("bash", "ok")
     rendered = out.getvalue()
     assert rendered.count("ctx 12.3k/200.0k · $0.0412") == 2
-
-
-def test_no_metrics_suffix_when_unbound(theme):
-    feed, out = make_feed(theme)
-    feed.user_message("hi")
-    assert "ctx" not in out.getvalue()
 
 
 def test_llm_call_logged(theme):
@@ -107,7 +101,8 @@ def test_llm_response_closes_streamed_line(theme):
     feed.llm_response("m", 1, 10, 5, 0.001)  # must not append onto the answer line
     feed.stream_end()
     lines = out.getvalue().splitlines()
-    assert lines[0] == "the answer"
+    # Markdown pads rendered lines to the console width.
+    assert lines[0].strip() == "the answer"
     assert "← m (round 1)" in lines[1]
 
 
@@ -142,12 +137,18 @@ def test_streaming_prints_tokens_as_they_arrive(theme):
     assert "Hello, world" in out.getvalue()
 
 
-def test_stream_tokens_not_interpreted_as_markup(theme):
+def test_stream_flush_renders_markdown_without_sink(theme):
+    """Completed answers render as Markdown even without a live sink."""
     feed, out = make_feed(theme)
     feed.stream_start()
     feed.stream_token("**not bold** [not-a-style]")
     feed.stream_end()
-    assert "**not bold** [not-a-style]" in out.getvalue()
+    rendered = out.getvalue()
+    # Markdown semantics: emphasis markers are consumed by the renderer.
+    assert "not bold" in rendered
+    assert "**not bold**" not in rendered
+    # Literal bracket text survives rendering (escaped, not styled).
+    assert "[not-a-style]" in rendered
 
 
 def test_thinking_collapsed_one_liner(theme):
@@ -196,23 +197,32 @@ def test_tool_call_truncates_long_args(theme):
     assert len(line) == TOOL_CALL_MAX_LEN
 
 
-def test_tool_result_elides_long_content(theme):
+def test_tool_result_summarizes_long_content(theme):
     feed, out = make_feed(theme)
     content = "\n".join(f"line {i}" for i in range(25))
     feed.tool_result("bash", content)
     rendered = out.getvalue()
+    assert "✔ bash" in rendered
     assert "line 0" in rendered
-    assert "line 9" in rendered
-    assert "line 10" not in rendered
-    assert "… (15 more lines)" in rendered
+    assert "line 1" not in rendered  # only the first line survives
+    assert "+24 lines" in rendered
 
 
-def test_tool_result_short_content_not_elided(theme):
+def test_tool_result_single_line_summary(theme):
     feed, out = make_feed(theme)
     feed.tool_result("bash", "a\nb\nc")
     rendered = out.getvalue()
-    assert "a\nb\nc" in rendered
-    assert "more lines" not in rendered
+    assert "✔ bash · a (+2 lines)" in rendered
+
+
+def test_tool_result_error_keeps_head(theme):
+    feed, out = make_feed(theme)
+    feed.tool_result("bash", "\n".join(f"e{i}" for i in range(15)), is_error=True)
+    rendered = out.getvalue()
+    assert "✗ bash" in rendered
+    assert "e9" in rendered
+    assert "e10" not in rendered
+    assert "… (5 more lines)" in rendered
 
 
 def test_tool_result_error_styled(theme, monkeypatch):
@@ -314,8 +324,23 @@ def test_sink_stream_closed_by_llm_response(theme):
     feed.llm_response("m", 1, 10, 5, 0.001)
     feed.stream_end()
     lines = out.getvalue().splitlines()
-    assert lines[0] == "the answer"
+    # Markdown pads rendered lines to the console width.
+    assert lines[0].strip() == "the answer"
     assert "← m (round 1)" in lines[1]
+
+
+def test_sink_flush_renders_markdown(theme):
+    """The completed answer is formatted: headings/lists render as Markdown."""
+    feed, out = make_feed(theme)
+    feed.stream_sink = lambda text: None
+    feed.stream_clear = lambda: None
+    feed.stream_start()
+    feed.stream_token("# Head\n\n- item\n")
+    feed.stream_end()
+    rendered = out.getvalue()
+    assert "Head" in rendered
+    assert "item" in rendered
+    assert "# Head" not in rendered
 
 
 def test_sink_flush_is_idempotent(theme):

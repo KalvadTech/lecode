@@ -281,7 +281,14 @@ async def test_pipe_question_escape_dismisses(tmp_path, monkeypatch):
         assert await task == 0
     rendered = out.getvalue()
     assert '"dismissed":true' in rendered
-    assert "best judgment" in rendered
+    # The transcript shows the tool result summary; the full result (with the
+    # "best judgment" instruction) is on the persisted tool message.
+    tool_texts = [
+        str(record.message.get("content"))
+        for record in app.store.load_messages(app.session)
+        if record.role == "tool"
+    ]
+    assert any("best judgment" in text for text in tool_texts)
 
 
 async def test_pipe_question_multi_select_toggle_confirm(tmp_path, monkeypatch):

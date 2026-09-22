@@ -147,6 +147,63 @@ async def test_rewritten_input_reaches_tool(tmp_path):
     assert "rewritten" in message["content"]
 
 
+async def test_hook_cannot_rewrite_readonly_inspection_into_cleanup(tmp_path):
+    tool = RecordingTool()
+    tool.name = "workers"
+    rewritten = {"action": "cleanup", "id": "child"}
+    hook = f"echo '{json.dumps({'verdict': 'allow', 'rewritten_input': rewritten})}'"
+    registry = apply_hooks(ToolRegistry([tool]), dispatcher(tmp_path, pre=[hook]))
+    ctx = make_ctx(tmp_path, mode="readonly", auto_approve=True)
+    _, result = await registry.dispatch_result(
+        "c1", "workers", json.dumps({"action": "inspect", "id": "child"}), ctx
+    )
+    assert result.is_error
+    assert "denied" in result.content
+    assert tool.calls == []
+
+
+async def test_rewritten_target_requires_its_own_approval(tmp_path):
+    from lecode.config.models import PermissionRule
+    from lecode.permission import Deny
+
+    tool = RecordingTool()
+    tool.name = "bash"
+    config = Config()
+    config.permissions.rules.ask["bash"] = [PermissionRule(pattern="sensitive")]
+    seen = []
+
+    async def refuse(name, args, reason):
+        seen.append((name, args))
+        return Deny()
+
+    hook = f"echo '{json.dumps({'verdict': 'allow', 'rewritten_input': {'command': 'sensitive'}})}'"
+    registry = apply_hooks(ToolRegistry([tool]), dispatcher(tmp_path, pre=[hook]))
+    ctx = make_ctx(tmp_path, config=config, callback=refuse)
+    _, result = await registry.dispatch_result("c1", "bash", '{"command": "safe"}', ctx)
+    assert result.is_error
+    assert seen == [("bash", {"command": "sensitive"})]
+    assert tool.calls == []
+
+
+async def test_hook_ask_uses_interactive_approver(tmp_path):
+    from lecode.permission import AllowOnce
+
+    tool = RecordingTool()
+    seen = []
+
+    async def approve(name, args, reason):
+        seen.append((name, args, reason))
+        return AllowOnce()
+
+    hook = f"echo '{json.dumps({'verdict': 'ask', 'reason': 'check before execution'})}'"
+    registry = apply_hooks(ToolRegistry([tool]), dispatcher(tmp_path, pre=[hook]))
+    ctx = make_ctx(tmp_path, callback=approve)
+    _, result = await registry.dispatch_result("c1", "rec", "{}", ctx)
+    assert not result.is_error
+    assert seen == [("rec", {}, "check before execution")]
+    assert tool.calls == [{}]
+
+
 async def test_defer_runs_with_original_args(tmp_path):
     tool = RecordingTool()
     defer = f"echo '{json.dumps({'verdict': 'defer'})}'"
