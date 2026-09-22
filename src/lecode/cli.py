@@ -26,6 +26,7 @@ from lecode.auth import AuthError, resolve_api_key
 from lecode.config.loader import config_dir, find_config_file, load_config
 from lecode.config.models import AuthPolicy, Config
 from lecode.deps import find_missing_binaries, format_missing_error
+from lecode.extras import herdr
 from lecode.extras.background import BACKGROUND_EXTRA
 from lecode.extras.chain import ChainResult, run_chain
 from lecode.extras.loop_mode import (
@@ -356,6 +357,7 @@ def run_headless(
             err=True,
         )
         _fire_cli_hook(runtime.hooks, SESSION_END)
+        herdr.release()
         return EXIT_ERROR
 
     user_message: ChatMessage = {"role": "user", "content": prompt}
@@ -364,7 +366,9 @@ def run_headless(
         {"role": "system", "content": runtime.system_prompt},
         user_message,
     ]
+    herdr.report("idle", session_id=session.id)
     signals.emit(START)
+    herdr.report("working", session_id=session.id)
     try:
         result = asyncio.run(_run_with_mcp(runtime, client, runner, messages))
     except ProviderError as e:
@@ -377,6 +381,8 @@ def run_headless(
     finally:
         _fire_cli_hook(runtime.hooks, SESSION_END)
         signals.emit(STOP)
+        herdr.report("idle")
+        herdr.release()
         shutdown_telemetry()
 
     typer.echo(result.final_text)
@@ -491,7 +497,9 @@ def run_loop_mode(
                 await workers.shutdown()
             await _aclose(client)
 
+    herdr.report("idle", session_id=session.id)
     signals.emit(START)
+    herdr.report("working", session_id=session.id)
     _fire_cli_hook(runtime.hooks, SESSION_START)
     try:
         result = asyncio.run(_loop())
@@ -505,6 +513,8 @@ def run_loop_mode(
     finally:
         _fire_cli_hook(runtime.hooks, SESSION_END)
         signals.emit(STOP)
+        herdr.report("idle")
+        herdr.release()
         shutdown_telemetry()
     if result.stop_reason == "error":
         typer.echo(f"error: {result.error}", err=True)
@@ -597,7 +607,9 @@ def run_chain_mode(
                 await workers.shutdown()
             await _aclose(client)
 
+    herdr.report("idle", session_id=session.id)
     signals.emit(START)
+    herdr.report("working", session_id=session.id)
     _fire_cli_hook(runtime.hooks, SESSION_START)
     try:
         asyncio.run(_chain())
@@ -611,6 +623,8 @@ def run_chain_mode(
     finally:
         _fire_cli_hook(runtime.hooks, SESSION_END)
         signals.emit(STOP)
+        herdr.report("idle")
+        herdr.release()
         shutdown_telemetry()
     return EXIT_OK
 

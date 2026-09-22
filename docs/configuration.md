@@ -270,6 +270,7 @@ and `UserPromptSubmit` deny-verdicts are enforced. See [hooks.md](hooks.md).
 ```toml
 [custom_providers.local]
 base_url = "http://localhost:11434/v1"
+api_key = "sk-..."              # optional
 api_key_env = "LOCAL_API_KEY"   # optional
 auth_policy = "none"            # auto | required | none
 # headers = { X-Team = "infra" }

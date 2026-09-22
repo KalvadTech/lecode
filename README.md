@@ -195,6 +195,8 @@ non-tty `--setup`) · `3` max turns / max loop iterations / context overflow.
   mid-turn; OSC 8 hyperlinks; `/copy` (OSC 52 / pbcopy / xclip).
 - **Status signals** — start/stop/git-conflict events over a Unix socket, for
   external status bars and scripts.
+- **Herdr** — inside a Herdr pane, lecode reports its idle, working, and
+  blocked state automatically; elsewhere it is a no-op.
 - **Doctor** — `/doctor` health-checks the install: external binaries, config,
   provider connectivity, MCP servers, memory, hooks, telemetry.
 - **Telemetry (opt-in)** — Sentry/GlitchTip error reports and OpenTelemetry

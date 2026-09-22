@@ -101,7 +101,8 @@ def test_llm_response_closes_streamed_line(theme):
     feed.llm_response("m", 1, 10, 5, 0.001)  # must not append onto the answer line
     feed.stream_end()
     lines = out.getvalue().splitlines()
-    assert lines[0] == "the answer"
+    # Markdown pads rendered lines to the console width.
+    assert lines[0].strip() == "the answer"
     assert "← m (round 1)" in lines[1]
 
 
@@ -136,12 +137,18 @@ def test_streaming_prints_tokens_as_they_arrive(theme):
     assert "Hello, world" in out.getvalue()
 
 
-def test_stream_tokens_not_interpreted_as_markup(theme):
+def test_stream_flush_renders_markdown_without_sink(theme):
+    """Completed answers render as Markdown even without a live sink."""
     feed, out = make_feed(theme)
     feed.stream_start()
     feed.stream_token("**not bold** [not-a-style]")
     feed.stream_end()
-    assert "**not bold** [not-a-style]" in out.getvalue()
+    rendered = out.getvalue()
+    # Markdown semantics: emphasis markers are consumed by the renderer.
+    assert "not bold" in rendered
+    assert "**not bold**" not in rendered
+    # Literal bracket text survives rendering (escaped, not styled).
+    assert "[not-a-style]" in rendered
 
 
 def test_thinking_collapsed_one_liner(theme):

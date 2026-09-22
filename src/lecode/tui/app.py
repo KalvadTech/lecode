@@ -61,6 +61,7 @@ from lecode.agent.runner import (
 from lecode.config.models import PermissionMode, ThinkingLevel
 from lecode.context.agents import parse_mentions
 from lecode.context.resources import load_text
+from lecode.extras import herdr
 from lecode.extras.background import BACKGROUND_EXTRA
 from lecode.extras.chain import run_chain
 from lecode.extras.loop_mode import run_plan_loop
@@ -525,6 +526,7 @@ class TuiApp:
             hooks.handlers.get(SESSION_END) or hooks.handlers.get(SESSION_START)
         ):
             self._spawn(self._switch_hooks(old_session, session))
+        herdr.report("idle", session_id=session.id)
         return True
 
     def _reload_history(self) -> None:
@@ -1328,6 +1330,7 @@ class TuiApp:
         if self._worker_manager is not None:
             self._worker_manager.confirm = self._confirm_worker_worktree
         await self._fire_hook(SESSION_START)
+        herdr.report("idle", session_id=self._session.id)
         # MCP attaches in the background so the chat opens immediately;
         # per-server status lands in the feed when the connect finishes.
         if self._runtime.ctx.extras.get(MCP_EXTRA) is None:
@@ -1377,6 +1380,7 @@ class TuiApp:
             if self._session_lock is not None:
                 self._session_lock.release()
                 self._session_lock = None
+            herdr.release()
         self.print_totals()
         return EXIT_OK
 
@@ -1799,6 +1803,7 @@ class TuiApp:
         target = target_of(tool_name, args)
         if reason:
             self._feed.info(reason)  # doom-loop coach reasons land here too
+        herdr.report("blocked", message=f"approval needed: {tool_name}")
         future = self._approval.request(
             tool_name, target, reason, worker=worker, conversation=conversation
         )
@@ -1818,10 +1823,13 @@ class TuiApp:
                 if self._approval.is_pending
                 else StatusLineState.RUNNING
             )
+            if not self._approval.is_pending:
+                herdr.report("working")
             self._invalidate()
 
     async def _confirm_worker_worktree(self, question: str) -> bool:
         """Ask the TUI user before a dirty write worker gets a separate worktree."""
+        herdr.report("blocked", message="approval needed: dirty worktree")
         future = self._approval.request(
             "dirty worktree",
             question,
@@ -1844,6 +1852,8 @@ class TuiApp:
                 if self.turn_busy()
                 else StatusLineState.IDLE
             )
+            if not self._approval.is_pending:
+                herdr.report("working" if self.turn_busy() else "idle")
             self._invalidate()
 
     def _render_question(self) -> None:
@@ -1865,6 +1875,7 @@ class TuiApp:
         """``ctx.question_callback``: inline arrow-key picker during a turn."""
         future = self._question.request(questions)
         self._render_question()
+        herdr.report("blocked", message="answer needed: ask_user")
         self._status.state = StatusLineState.QUESTION
         self._invalidate()
         self._spawn(self._notifier.approval_needed("ask_user"))
@@ -1874,6 +1885,7 @@ class TuiApp:
         finally:
             self._question.cancel()
             self._status.state = StatusLineState.RUNNING
+            herdr.report("working")
             self._invalidate()
 
     # -- turns ------------------------------------------------------------------
@@ -1958,6 +1970,7 @@ class TuiApp:
         self._feed.stream_start()
         self._activity("thinking")
         self._signals.emit(START)
+        herdr.report("working", session_id=self._session.id)
         result = None
         cancelled = False
         try:
@@ -1972,6 +1985,7 @@ class TuiApp:
         finally:
             self._feed.stream_end()
             self._signals.emit(STOP)
+            herdr.report("idle")
             self._status.state = StatusLineState.IDLE
             self._status.activity = None
         self._sync_usage()
@@ -2016,6 +2030,7 @@ class TuiApp:
         """
         self._status.state = StatusLineState.RUNNING
         self._activity(f"@{name} working")
+        herdr.report("working", session_id=self._session.id)
         outcome: SubagentOutcome | None = None
         try:
             outcome = await run_subagent(
@@ -2032,6 +2047,7 @@ class TuiApp:
             self._feed.info("turn cancelled")
         finally:
             self._status.state = StatusLineState.IDLE
+            herdr.report("idle")
             self._status.activity = None
         if outcome is not None:
             self._roster.finish(outcome.run_id, answer=outcome.text)
@@ -2068,6 +2084,7 @@ class TuiApp:
 
         async def _loop() -> None:
             self._status.state = StatusLineState.RUNNING
+            herdr.report("working", session_id=self._session.id)
             try:
                 result = await run_plan_loop(
                     run_iteration,
@@ -2087,6 +2104,7 @@ class TuiApp:
             finally:
                 self._feed.stream_end()
                 self._status.state = StatusLineState.IDLE
+                herdr.report("idle")
                 self._status.activity = None
             if result.stop_reason == "done":
                 self._feed.info(f"loop done: plan complete after {result.iterations} iteration(s)")
@@ -2135,6 +2153,7 @@ class TuiApp:
 
         self._status.state = StatusLineState.RUNNING
         self._activity("chain running")
+        herdr.report("working", session_id=self._session.id)
         try:
             result = await run_chain(
                 factory,
@@ -2153,6 +2172,7 @@ class TuiApp:
             return
         finally:
             self._status.state = StatusLineState.IDLE
+            herdr.report("idle")
             self._status.activity = None
         if result.final:
             self._last_response = result.final
