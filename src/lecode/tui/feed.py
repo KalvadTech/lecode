@@ -105,12 +105,9 @@ class Feed:
         if thinking:
             self._thinking_parts.append(text)
             return
+        self._stream_parts.append(text)
         if self.stream_sink is not None:
-            self._stream_parts.append(text)
             self.stream_sink(text)
-            self._stream_printed = True
-        else:
-            self._console.print(text, end="", markup=False, highlight=False, soft_wrap=True)
             self._stream_printed = True
 
     def _flush_stream(self) -> None:
@@ -119,16 +116,11 @@ class Feed:
         With a sink, the live region is cleared first and the full text lands
         in the scrollback newline-terminated (safe under patch_stdout).
         """
-        if not self._stream_printed:
-            return
-        if self.stream_sink is not None:
-            full = "".join(self._stream_parts)
-            self._stream_parts = []
-            if self.stream_clear is not None:
-                self.stream_clear()
-            self._console.print(full, markup=False, highlight=False, soft_wrap=True)
-        else:
-            self._console.print()
+        full = "".join(self._stream_parts)
+        self._stream_parts = []
+        if self.stream_sink is not None and self.stream_clear is not None and self._stream_printed:
+            self.stream_clear()
+        self._console.print(Markdown(full))
         self._stream_printed = False
 
     def stream_end(self) -> None:
@@ -172,8 +164,9 @@ class Feed:
         elapsed_s: float = 0.0,
     ) -> None:
         """Log per-call usage and output tok/s over model-call time when available."""
-        # The streamed answer text has no trailing newline yet — close it first.
-        self._flush_stream()
+        if self._streaming:
+            # The streamed answer text has no trailing newline yet — close it first.
+            self._flush_stream()
         line = (
             f"[{self._stamp()}] ← {model} (round {turn})"
             f" · ↑{human_tokens(input_tokens)} in · ↓{human_tokens(output_tokens)} out"
