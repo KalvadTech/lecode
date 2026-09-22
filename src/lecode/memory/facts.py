@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,7 +61,22 @@ class FactStore:
             connection = sqlite3.connect(self.path, timeout=5)
             try:
                 connection.execute("PRAGMA busy_timeout = 5000")
-                connection.execute("PRAGMA journal_mode = WAL")
+                deadline = time.monotonic() + 5
+                while True:
+                    try:
+                        connection.execute("PRAGMA journal_mode = WAL")
+                        break
+                    except sqlite3.OperationalError as error:
+                        if (
+                            error.sqlite_errorcode & 0xFF
+                            not in (
+                                sqlite3.SQLITE_BUSY,
+                                sqlite3.SQLITE_LOCKED,
+                            )
+                            or time.monotonic() >= deadline
+                        ):
+                            raise
+                        time.sleep(0.01)
                 connection.execute("PRAGMA foreign_keys = ON")
                 connection.executescript(
                     """
