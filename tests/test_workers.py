@@ -894,7 +894,8 @@ async def test_non_success_worker_stop_preserves_result_and_allows_resume(setup,
         note = store.load_events(session, "worker_notification")[-1]
         assert note["state"] == "failed" and reason in note["content"]
         ctx.config.agent.max_turns = 10
-        ctx.config.agent.context_window = 10000
+        if reason == "context_overflow":
+            ctx.config.agent.context_window = 100000
         ctx.config.compaction.enabled = False
         await manager.resume(worker.id, "continue explicitly")
         assert (await manager.wait(worker.id)).stop_reason == "done"
