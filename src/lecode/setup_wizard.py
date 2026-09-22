@@ -108,6 +108,7 @@ def import_from_pi(home: Path) -> dict[str, str]:
         if not base_url:
             return {}  # anthropic/openai/… — no equivalent in lecode
         answers["provider"] = "custom"
+        answers["provider_name"] = provider
         answers["base_url"] = base_url
     key = _auth_key(auth, provider)
     if key:
@@ -202,6 +203,7 @@ def import_from_opencode(home: Path) -> dict[str, Any]:
         base_url = options.get("baseURL", "") if isinstance(options, dict) else ""
         if base_url:
             answers["provider"] = "custom"
+            answers["provider_name"] = provider
             answers["base_url"] = base_url
             if model:
                 answers["model"] = model
@@ -235,7 +237,10 @@ def _import_summary(answers: dict[str, Any]) -> str:
     """One-line description of what an import found (key redacted)."""
     parts = []
     if answers.get("provider"):
-        parts.append(f"provider {answers['provider']}")
+        provider = answers["provider"]
+        if provider == "custom":
+            provider = answers.get("provider_name") or "custom"
+        parts.append(f"provider {provider}")
     if answers.get("base_url"):
         parts.append(f"base_url {answers['base_url']}")
     if answers.get("model"):
@@ -355,21 +360,34 @@ async def _ask_yes_no(session: PromptSession, message: str, default: bool = True
 
 def build_config(answers: dict[str, Any]) -> dict[str, Any]:
     """Assemble the raw config dict from wizard answers."""
+    provider = answers["provider"]
     llm: dict[str, Any] = {
-        "provider": answers["provider"],
+        "provider": provider,
         "model": answers["model"],
     }
-    if answers.get("api_key"):
-        llm["api_key"] = answers["api_key"]
-    if answers.get("base_url"):
-        llm["base_url"] = answers["base_url"]
+    custom_providers: dict[str, Any] = {}
+    if provider == "custom":
+        name = answers.get("provider_name") or "custom"
+        llm["provider"] = name
+        entry: dict[str, Any] = {"base_url": answers.get("base_url", "")}
+        if answers.get("api_key"):
+            entry["api_key"] = answers["api_key"]
+        custom_providers[name] = entry
+    else:
+        if answers.get("api_key"):
+            llm["api_key"] = answers["api_key"]
+        if answers.get("base_url"):
+            llm["base_url"] = answers["base_url"]
     config: dict[str, Any] = {
         "schema_version": 1,
         "llm": llm,
         "notifications": {"enabled": answers["notifications"]},
     }
+    if custom_providers:
+        config["custom_providers"] = custom_providers
     if answers.get("mcp_servers"):
         config["mcp"] = {"servers": answers["mcp_servers"]}
+
     return config
 
 
@@ -405,8 +423,21 @@ async def gather_answers(session: PromptSession, home: Path | None = None) -> di
     provider_choices: list[str] = list(PROVIDER_CHOICES)
     provider_default = imported.get("provider")
     provider = await _ask_choice(session, "Provider:", provider_choices, default=provider_default)
+    provider_name = imported.get("provider_name", "custom")
     base_url = imported.get("base_url", "")
     if provider == "custom":
+        while True:
+            provider_name = await _ask_text(
+                session,
+                "Provider name (an identifier for this endpoint)",
+                default=provider_name,
+            )
+            if provider_name and provider_name != "openrouter":
+                break
+            if not provider_name:
+                print("error: a provider name is required")
+            else:
+                print("error: 'openrouter' is reserved for the built-in provider")
         while True:
             base_url = await _ask_text(
                 session, "Base URL (OpenRouter-compatible)", default=base_url
@@ -456,6 +487,7 @@ async def gather_answers(session: PromptSession, home: Path | None = None) -> di
     notifications = await _ask_yes_no(session, "Audio notifications?", default=True)
     answers: dict[str, Any] = {
         "provider": provider,
+        "provider_name": provider_name if provider == "custom" else "",
         "base_url": base_url,
         "api_key": api_key,
         "model": model,
