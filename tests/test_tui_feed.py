@@ -107,7 +107,7 @@ def test_llm_response_closes_streamed_line(theme):
     feed.llm_response("m", 1, 10, 5, 0.001)  # must not append onto the answer line
     feed.stream_end()
     lines = out.getvalue().splitlines()
-    assert lines[0] == "the answer"
+    assert lines[0].rstrip() == "the answer"  # Markdown flush pads to console width
     assert "← m (round 1)" in lines[1]
 
 
@@ -142,12 +142,20 @@ def test_streaming_prints_tokens_as_they_arrive(theme):
     assert "Hello, world" in out.getvalue()
 
 
-def test_stream_tokens_not_interpreted_as_markup(theme):
+def test_stream_flush_renders_markdown_keeps_literal_brackets(theme):
+    """Streamed tokens render as Markdown once complete (post-stream intent).
+
+    Emphasis markup is applied, while bracket text that is not a link stays
+    literal instead of being eaten as console markup.
+    """
     feed, out = make_feed(theme)
     feed.stream_start()
     feed.stream_token("**not bold** [not-a-style]")
     feed.stream_end()
-    assert "**not bold** [not-a-style]" in out.getvalue()
+    rendered = out.getvalue()
+    assert "not bold" in rendered  # emphasis applied by the Markdown renderer
+    assert "**not bold**" not in rendered  # asterisks are gone: Markdown, not raw
+    assert "[not-a-style]" in rendered  # non-link brackets preserved verbatim
 
 
 def test_thinking_collapsed_one_liner(theme):
@@ -314,8 +322,23 @@ def test_sink_stream_closed_by_llm_response(theme):
     feed.llm_response("m", 1, 10, 5, 0.001)
     feed.stream_end()
     lines = out.getvalue().splitlines()
-    assert lines[0] == "the answer"
+    assert lines[0].rstrip() == "the answer"  # Markdown flush pads to console width
     assert "← m (round 1)" in lines[1]
+
+
+def test_sink_final_markdown_rendered_live_tokens_raw(theme):
+    """The live sink receives raw tokens; only the final flush renders Markdown."""
+    feed, out = make_feed(theme)
+    sunk: list[str] = []
+    feed.stream_sink = sunk.append
+    feed.stream_clear = lambda: None
+    feed.stream_start()
+    feed.stream_token("answer with **bold** tail")
+    assert sunk == ["answer with **bold** tail"]  # live region: verbatim tokens
+    feed.stream_end()
+    rendered = out.getvalue()
+    assert "answer with bold tail" in rendered  # scrollback: Markdown applied
+    assert "**bold**" not in rendered
 
 
 def test_sink_flush_is_idempotent(theme):

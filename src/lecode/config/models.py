@@ -256,6 +256,7 @@ class CustomProvider(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     base_url: str
+    api_key: str | None = None
     api_key_env: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
     auth_policy: AuthPolicy = "auto"
