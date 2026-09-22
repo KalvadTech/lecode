@@ -25,10 +25,13 @@ def write_agent(root, name: str, frontmatter: str, body: str = "Agent prompt.") 
 def test_builtins_present_without_files(dirs):
     _, _, project = dirs
     registry = load_agents(cwd=project)
-    assert {"build", "plan", "explore"} <= set(registry.names())
+    assert {"build", "plan", "explore", "general"} == set(registry.names())
     assert registry.get("build").mode == "primary"
     assert registry.get("plan").mode == "primary"
     assert registry.get("explore").mode == "subagent"
+    assert registry.get("general").mode == "subagent"
+    assert registry.get("general").builtin
+    assert registry.overlay_for("general") is None
 
 
 def test_builtin_overlays(dirs):
@@ -58,16 +61,17 @@ def test_project_wins_on_collision(dirs):
     assert registry.get("same").description == "project version"
 
 
-def test_user_file_overrides_builtin(dirs):
+@pytest.mark.parametrize("name", ["plan", "general"])
+def test_user_file_overrides_builtin(dirs, name):
     _, _, project = dirs
     write_agent(
         project / ".lecode" / "agents",
-        "plan",
+        name,
         "description: custom plan\nmode: primary",
         body="My own planner.",
     )
     registry = load_agents(cwd=project)
-    plan = registry.get("plan")
+    plan = registry.get(name)
     assert plan.description == "custom plan"
     assert plan.body == "My own planner."
     assert plan.overlay is None  # user file replaces the built-in wholesale
@@ -197,7 +201,7 @@ def test_subagents_listing(dirs):
     write_agent(project / ".lecode" / "agents", "helper", "description: h\nmode: all")
     write_agent(project / ".lecode" / "agents", "sub", "description: s\nmode: subagent")
     registry = load_agents(cwd=project)
-    assert [a.name for a in registry.subagents()] == ["explore", "helper", "sub"]
+    assert [a.name for a in registry.subagents()] == ["explore", "general", "helper", "sub"]
 
 
 def test_cycle_wraps_around(dirs):

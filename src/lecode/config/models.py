@@ -82,6 +82,14 @@ class ToolsConfig(BaseModel):
     allowlist: list[str] = Field(default_factory=list)
 
 
+class WorktreeConfig(BaseModel):
+    """``[worktree]``: integration checks; empty requires explicit human approval."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    validation: list[str] = Field(default_factory=list)
+
+
 class UiConfig(BaseModel):
     """``[ui]`` — display preferences."""
 
@@ -272,6 +280,7 @@ class Config(BaseModel):
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    worktree: WorktreeConfig = Field(default_factory=WorktreeConfig)
     ui: UiConfig = Field(default_factory=UiConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)

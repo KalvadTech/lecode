@@ -3,7 +3,7 @@
 Three-line layout, every element labelled::
 
     dir: <folder> · commit: <hash> · branch: <branch> · diff: <diff-stat>
-    model: <model> · cost: <$0.00> · ctx: ▓▓▓░░ 84.0k/200k 42%
+    total cost: <$0.00> · ctx: ▓▓▓░░ 84.0k/200k 42% · model: <model>
     session: <name> · agent: <agent> · in: 1.2k · out: 0.4k · <state>
 
 Not user-configurable. Lines are truncated to the terminal width.
@@ -71,6 +71,7 @@ class StatusState:
     timed_output_tokens: int = 0
     model_elapsed_s: float = 0.0
     cost_usd: float = 0.0
+    usage_incomplete: bool = False
     state: StatusLineState = StatusLineState.IDLE
     queued: int = 0
     steered: int = 0
@@ -151,20 +152,26 @@ def render_statusline(state: StatusState, theme: Theme, width: int = 100) -> Tex
             if value:
                 labelled(line1, label, value, theme.muted)
 
-    # Line 2: model · cost · ctx meter x/y pct%
+    # Keep total cost and missing usage visible even with a long model name.
     bar, pct = context_meter(state.context_used, state.context_window)
     line2 = Text()
-    labelled(line2, "model", state.model, theme.text, first=True)
-    if state.reasoning is not None:
-        line2.append_text(sep.copy())
-        line2.append(state.reasoning, style=theme.muted)
-    labelled(line2, "cost", format_cost(state.cost_usd), theme.muted)
+    labelled(
+        line2,
+        "total cost",
+        format_cost(state.cost_usd) + (" incomplete" if state.usage_incomplete else ""),
+        theme.warning if state.usage_incomplete else theme.muted,
+        first=True,
+    )
     labelled(
         line2,
         "ctx",
         f"{bar} {human_tokens(state.context_used)}/{human_tokens(state.context_window)} {pct}%",
         theme.text,
     )
+    labelled(line2, "model", state.model, theme.text)
+    if state.reasoning is not None:
+        line2.append_text(sep.copy())
+        line2.append(state.reasoning, style=theme.muted)
 
     # Line 3: session · agent · in/out tokens · state
     state_seg, state_color = _state_segment(state)

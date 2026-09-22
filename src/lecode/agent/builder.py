@@ -64,6 +64,11 @@ def refresh_system_prompt(runtime: Runtime) -> str:
     agent = runtime.agents.get(runtime.agent_name) if runtime.agent_name else None
     if agent is not None and agent.body:
         extra_parts.append(agent.body)
+    if "task" in runtime.registry.names():
+        extra_parts.append(
+            "Available subagents for task(agent=..., prompt=...):\n"
+            + "\n".join(f"- {a.name}: {a.description}" for a in runtime.agents.subagents())
+        )
     listing = runtime.skills.render_listing()
     if listing:
         extra_parts.append(listing)
@@ -104,6 +109,7 @@ def build_runtime(
     catalog: Catalog | None = None,
     project_root: Path | None = None,
     scope: str | None = None,
+    worker_manager: object | None = None,
 ) -> Runtime:
     """Build the permission checker, tool context, registry, and system prompt.
 
@@ -151,6 +157,15 @@ def build_runtime(
     from lecode.agent.tools import task as task_tool
 
     tools.append(task_tool.make_tool())
+    if session is not None and store is not None:
+        # Local: workers imports this module to build child runtimes.
+        from lecode.agent.tools import workers as workers_tool
+        from lecode.extras.workers import WORKER_EXTRA, WorkerManager
+
+        ctx.extras[WORKER_EXTRA] = worker_manager or WorkerManager(
+            config, cwd=Path(cwd), root_ctx=ctx, session=session, store=store
+        )
+        tools.append(workers_tool.make_tool())
     if config.memory.enabled:
         migrate_legacy_memory(cwd, effective_root)
         memory_store = MemoryStore(memory_root(effective_root), max_bytes=config.memory.max_bytes)

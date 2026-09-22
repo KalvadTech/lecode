@@ -24,7 +24,7 @@ import asyncio
 import inspect
 import time
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from lecode.agent.review import review, user_request
@@ -81,6 +81,8 @@ class ToolResult:
     name: str
     content: str
     is_error: bool
+    #: Tool-attached metadata (e.g. the task tool's run id for roster lookup).
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,7 @@ class LlmResponse:
     cost_usd: float
     #: Characters sent in this call's prompt — calibrates live token estimates.
     prompt_chars: int = 0
+    usage_incomplete: bool = False
     #: Model-call seconds, including latency/retries but excluding tool execution.
     elapsed_s: float = 0.0
 
@@ -225,6 +228,7 @@ class UsageTotals:
     #: accumulated ``input_tokens`` double-counts across tool-call rounds).
     context_tokens: int = 0
     unknown_usage_calls: int = 0
+    usage_incomplete: bool = False
 
 
 @dataclass(frozen=True)
@@ -302,20 +306,29 @@ class AgentRunner:
                 history.insert(0, {"role": "system", "content": ""})
         # The live conversation, visible through ctx (subagents, hooks).
         self.ctx.extras["conversation"] = history
+        manager = self.ctx.extras.get("workers")
+        if manager is not None and self.session is not None:
+            manager.repair_interrupted_tools(self.session, history)
+        # Background tasks finished between runs surface at the start.
+        await self._drain_background(history, on_event)
+        await self._consume_workers(history, on_event)
         input_tokens = 0
         output_tokens = 0
         cost_usd = 0.0
+        usage_incomplete = False
         unknown_usage_calls = 0
 
         def memory_usage(usage: dict | None) -> None:
-            nonlocal input_tokens, output_tokens, cost_usd, unknown_usage_calls
+            nonlocal input_tokens, output_tokens, cost_usd, usage_incomplete, unknown_usage_calls
             if usage is None:
                 unknown_usage_calls += 1
+                usage_incomplete = True
             else:
-                in_tok, out_tok, cost = self._usage_cost(self.model, usage)
+                in_tok, out_tok, cost, incomplete = self._usage_cost(self.model, usage)
                 input_tokens += in_tok
                 output_tokens += out_tok
                 cost_usd += cost
+                usage_incomplete |= incomplete
 
         context_tokens = 0
         turns = 0
@@ -337,13 +350,13 @@ class AgentRunner:
                 else None,
             )
             self._request_generation = self._seen_generation
-            await self._drain_background(history, on_event)
             while True:
                 if turns >= max_turns:
                     stop_reason = "max_turns"
                     break
                 if turns > 0:
                     await self._drain_queues(history, on_event)
+                    await self._consume_workers(history, on_event)
                     if self.config.agent.turn_cooldown_ms > 0:
                         await asyncio.sleep(self.config.agent.turn_cooldown_ms / 1000)
 
@@ -387,10 +400,20 @@ class AgentRunner:
                 call_elapsed_s = time.monotonic() - call_started_at
                 turns += 1
 
-                in_tok, out_tok, cost = self._turn_cost(completed)
+                in_tok, out_tok, cost, incomplete = self._turn_cost(completed)
+                usage_incomplete |= incomplete
                 if in_tok:
                     self._bytes_per_token = min(
                         self._bytes_per_token, request_size(history, specs) / in_tok
+                    )
+                self._check_generation()
+                if (
+                    self.store is not None
+                    and self.session is not None
+                    and self.store.source_version(self.session) != source_version
+                ):
+                    raise ContextPaused(
+                        "Session sources changed during the request; response discarded."
                     )
                 await self._emit(
                     on_event,
@@ -401,6 +424,7 @@ class AgentRunner:
                         output_tokens=out_tok,
                         cost_usd=cost,
                         prompt_chars=prompt_chars,
+                        usage_incomplete=incomplete,
                         elapsed_s=call_elapsed_s,
                     ),
                 )
@@ -408,17 +432,8 @@ class AgentRunner:
                 output_tokens += out_tok
                 cost_usd += cost
                 context_tokens = in_tok or context_tokens
-                self._check_generation()
-                if (
-                    self.store is not None
-                    and self.session is not None
-                    and self.store.source_version(self.session) != source_version
-                ):
-                    raise ContextPaused(
-                        "Session sources changed during the request; response discarded."
-                    )
                 history.append(completed.as_message())
-                self._persist_assistant(completed, in_tok, out_tok, cost)
+                self._persist_assistant(completed, in_tok, out_tok, cost, incomplete)
 
                 if completed.tool_calls:
                     final_text = ""
@@ -443,6 +458,30 @@ class AgentRunner:
                     continuing = True
                     continue
                 final_text = (final_text if continuing else "") + completed.content
+                manager = self.ctx.extras.get("workers")
+                worker_id = self.ctx.extras.get("worker_id")
+                if (
+                    turns >= max_turns
+                    and manager is not None
+                    and (
+                        any(w.is_active for w in manager.descendants(worker_id))
+                        or manager.pending_notifications(worker_id)
+                        or (
+                            worker_id is not None
+                            and (manager.pending(worker_id) or manager.questions(worker_id))
+                        )
+                        or any(
+                            q is not None and not q.empty()
+                            for q in (self.steer_queue, self.input_queue)
+                        )
+                    )
+                ):
+                    stop_reason = "max_turns"
+                    break
+                if turns < max_turns and await self._consume_workers(
+                    history, on_event, completing=True
+                ):
+                    continue
                 stop_reason = "done"
                 break
         except ContextPaused as exc:
@@ -453,6 +492,23 @@ class AgentRunner:
             self._persist_partial(history)
             raise
 
+        if stop_reason != "done":
+            manager = self.ctx.extras.get("workers")
+            message = (
+                manager.stop_message(self.ctx.extras.get("worker_id"), stop_reason)
+                if manager is not None
+                else f"Run stopped: {stop_reason}."
+            )
+            if self.session is not None and self.store is not None:
+                self.store.append_event(
+                    self.session,
+                    "run_stopped",
+                    {
+                        "reason": stop_reason,
+                        "message": message,
+                    },
+                )
+            await self._emit(on_event, Error(message))
         await self._emit(on_event, Done(stop_reason=stop_reason, turns=turns))
         hooks = self.ctx.extras.get("hooks")
         if hooks is not None and hooks.handlers.get(STOP):
@@ -479,7 +535,8 @@ class AgentRunner:
                 stop_reason = "context_overflow"
             if outcome is not None:
                 review_text = outcome.feedback
-                in_tok, out_tok, cost = self._usage_cost(outcome.model, outcome.usage or {})
+                in_tok, out_tok, cost, incomplete = self._usage_cost(outcome.model, outcome.usage)
+                usage_incomplete |= incomplete
                 input_tokens += in_tok
                 output_tokens += out_tok
                 cost_usd += cost
@@ -494,6 +551,7 @@ class AgentRunner:
                                 "input_tokens": in_tok,
                                 "output_tokens": out_tok,
                                 "cost_usd": cost,
+                                "incomplete": incomplete,
                             },
                         },
                     )
@@ -523,6 +581,7 @@ class AgentRunner:
                 cost_usd=cost_usd,
                 context_tokens=context_tokens,
                 unknown_usage_calls=unknown_usage_calls,
+                usage_incomplete=usage_incomplete,
             ),
             tool_calls=tool_calls,
             elapsed_s=elapsed_s,
@@ -703,20 +762,27 @@ class AgentRunner:
             )
             for call in completed.tool_calls
         ]
+        manager = self.ctx.extras.get("workers")
+        worker_id = self.ctx.extras.get("worker_id")
         try:
-            pairs = await asyncio.gather(*tasks)
+            if manager is not None:
+                pairs = await manager.await_tools(worker_id, tasks)
+            else:
+                pairs = await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             # Cancel in-flight tools; persist the results that did complete.
             for task in tasks:
                 task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             for task in tasks:
+                usage = manager.result_usage(task) if manager else None
                 if task.done() and not task.cancelled():
-                    self._persist_message(task.result()[0])
+                    self._persist_message(task.result()[0], usage)
             raise
         messages: list[ChatMessage] = []
-        for call, (message, result) in zip(completed.tool_calls, pairs, strict=True):
+        for call, task, (message, result) in zip(completed.tool_calls, tasks, pairs, strict=True):
             messages.append(message)
-            self._persist_message(message)
+            self._persist_message(message, manager.result_usage(task) if manager else None)
             await self._emit(
                 on_event,
                 ToolResult(
@@ -724,32 +790,41 @@ class AgentRunner:
                     name=call["function"]["name"],
                     content=result.content,
                     is_error=result.is_error,
+                    metadata=result.metadata,
                 ),
             )
         return messages
 
     # -- queues -------------------------------------------------------------------
 
-    async def _drain_queues(self, history: list[ChatMessage], on_event: OnEvent | None) -> None:
+    async def _drain_queues(
+        self, history: list[ChatMessage], on_event: OnEvent | None, *, prefetched=None
+    ) -> bool:
         """Drain the steer queue first (priority), then the input queue.
 
         Drained items are appended to the history as user messages, with a
         ``QueuedMessage`` event each so the TUI echoes them when the model
         actually sees them.
         """
+        messages = []
+        prefetched = dict(prefetched or {})
         for queue in (self.steer_queue, self.input_queue):
             if queue is None:
                 continue
             while True:
                 try:
-                    item = queue.get_nowait()
+                    item = prefetched.pop(queue) if queue in prefetched else queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
                 message: ChatMessage = {"role": "user", "content": item}
                 history.append(message)
                 self._persist_message(message)
-                await self._emit(on_event, QueuedMessage(content=item))
+                messages.append(item)
+        # Persist every fetched item before yielding, including cancellation races.
+        for item in messages:
+            await self._emit(on_event, QueuedMessage(content=item))
         await self._drain_background(history, on_event)
+        return bool(messages)
 
     async def _drain_background(self, history: list[ChatMessage], on_event: OnEvent | None) -> None:
         """Feed background-task completions in as synthetic user messages.
@@ -765,6 +840,42 @@ class AgentRunner:
             history.append(message)
             self._persist_message(message, derived=True)
             await self._emit(on_event, QueuedMessage(content=note))
+
+    async def _consume_workers(
+        self, history: list[ChatMessage], on_event: OnEvent | None, *, completing=False
+    ) -> bool:
+        """Deliver worker inboxes only between model turns, never mid tool batch."""
+        manager = self.ctx.extras.get("workers")
+        if manager is None:
+            return False
+        worker_id = self.ctx.extras.get("worker_id")
+        getters = {}
+        if completing and worker_id is None:
+            for queue in (self.steer_queue, self.input_queue):
+                if queue is not None and queue not in getters:
+                    getters[queue] = asyncio.create_task(queue.get())
+                    getters[queue].add_done_callback(manager._signal)
+        queued = False
+        try:
+            items = await manager.boundary(
+                worker_id,
+                history,
+                completing=completing,
+                input_ready=lambda: any(task.done() for task in getters.values()),
+            )
+        finally:
+            for task in getters.values():
+                if not task.done():
+                    task.cancel()
+            if getters:
+                await asyncio.gather(*getters.values(), return_exceptions=True)
+                prefetched = {
+                    q: task.result() for q, task in getters.items() if not task.cancelled()
+                }
+                queued = await self._drain_queues(history, on_event, prefetched=prefetched)
+        for item in items:
+            await self._emit(on_event, QueuedMessage(content=item["text"]))
+        return bool(items or queued)
 
     # -- automatic compaction -----------------------------------------------------
 
@@ -826,33 +937,35 @@ class AgentRunner:
 
     # -- usage / cost ---------------------------------------------------------------
 
-    def _usage_cost(self, model: str, usage: dict[str, Any]) -> tuple[int, int, float]:
-        """(input tokens, output tokens, cost in USD) for one usage dict."""
+    def _usage_cost(self, model: str, usage: dict[str, Any] | None) -> tuple[int, int, float, bool]:
+        """Input/output tokens, known cost in USD, and whether usage is incomplete."""
+        if not usage:
+            return 0, 0, 0.0, True
         in_tok, out_tok = _usage_tokens(usage)
+        incomplete = bool(usage.get("incomplete"))
         if usage.get("cost_usd") is not None:
-            return in_tok, out_tok, float(usage["cost_usd"])
-        if not (in_tok or out_tok):
-            return in_tok, out_tok, 0.0
+            return in_tok, out_tok, float(usage["cost_usd"]), incomplete
         if self._catalog is None:
-            self._catalog = Catalog.default()
+            self._catalog = self.ctx.catalog or Catalog.default()
         try:
             pricing = self._catalog.get(model).pricing
         except (ModelNotFoundError, AmbiguousModelError):
-            return in_tok, out_tok, 0.0
-        return in_tok, out_tok, (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
+            return in_tok, out_tok, 0.0, True
+        cost = (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
+        return in_tok, out_tok, cost, incomplete
 
-    def _turn_cost(self, completed: CompletedMessage) -> tuple[int, int, float]:
-        """(input tokens, output tokens, cost in USD) for one turn."""
-        return self._usage_cost(self.model, completed.usage or {})
+    def _turn_cost(self, completed: CompletedMessage) -> tuple[int, int, float, bool]:
+        """Input/output tokens, known cost, and completeness for one turn."""
+        return self._usage_cost(self.model, completed.usage)
 
     # -- persistence ------------------------------------------------------------------
 
     def _persist_assistant(
-        self, completed: CompletedMessage, in_tok: int, out_tok: int, cost: float
+        self, completed: CompletedMessage, in_tok: int, out_tok: int, cost: float, incomplete: bool
     ) -> None:
-        usage = None
-        if completed.usage is not None:
-            usage = {"input_tokens": in_tok, "output_tokens": out_tok, "cost_usd": cost}
+        usage = {"input_tokens": in_tok, "output_tokens": out_tok, "cost_usd": cost}
+        if incomplete:
+            usage["incomplete"] = True
         self._persist_message(completed.as_message(), usage)
 
     def _persist_message(
@@ -878,10 +991,19 @@ class AgentRunner:
         self._partial = None
         if self.memory_generation() != self._request_generation:
             return
-        if partial is None or not (partial.content or partial.tool_calls):
+        if partial is None:
             return
         history.append(partial.as_message())
-        self._persist_message({**partial.as_message(), "incomplete": True})
+        in_tok, out_tok, cost, incomplete = self._turn_cost(partial)
+        self._persist_message(
+            {**partial.as_message(), "incomplete": True},
+            {
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+                "cost_usd": cost,
+                **({"incomplete": True} if incomplete else {}),
+            },
+        )
 
     # -- events -------------------------------------------------------------------------
 

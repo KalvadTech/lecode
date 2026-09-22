@@ -9,10 +9,13 @@ so. Pickers are inline numbered lists — no dialogs.
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, get_args
 
 from lecode.agent.tools.background import format_row
+from lecode.agent.tools.workers import HUMAN_CONTROL_EXTRA
 from lecode.config.models import PermissionMode, ThinkingLevel
 from lecode.context.resources import load_text
 from lecode.extras.background import BACKGROUND_EXTRA
@@ -20,6 +23,7 @@ from lecode.extras.export import ShareError, export_html, share_gist
 from lecode.extras.loop_mode import DEFAULT_MAX_ITERATIONS
 from lecode.extras.proc import run_proc
 from lecode.extras.status_signals import GIT_CONFLICT
+from lecode.extras.subagents import SubagentError
 from lecode.extras.worktree import WorktreeError, WorktreeManager
 from lecode.hooks import hooks_status
 from lecode.memory import MemoryStore, memory_command, memory_root
@@ -211,6 +215,7 @@ async def cmd_session(app: TuiApp, args: list[str]) -> None:
     """``/session``: metadata plus token/cost stats."""
     session = app.session
     stats = session_stats(app.store, session)
+    input_tokens, output_tokens, cost_usd, incomplete = app.current_session_usage()
     roles = " · ".join(f"{role} x{count}" for role, count in sorted(stats.role_counts.items()))
     lines = [
         f"session: {session.name} ({session.id})",
@@ -220,7 +225,8 @@ async def cmd_session(app: TuiApp, args: list[str]) -> None:
         f"agent: {session.meta.agent} · model: {session.meta.model or app.config.llm.model}",
         f"messages: {stats.message_count} ({roles or 'none'})"
         f" · tombstones: {stats.tombstone_count}",
-        f"tokens: {stats.input_tokens} in / {stats.output_tokens} out · cost ${stats.cost_usd:.4f}",
+        f"tokens: {input_tokens} in / {output_tokens} out · cost ${cost_usd:.4f}"
+        + (" (incomplete)" if incomplete else ""),
     ]
     app.feed.info("\n".join(lines))
 
@@ -770,6 +776,102 @@ async def cmd_queue(app: TuiApp, args: list[str]) -> None:
         lines.append("queued:")
         lines += [f"  {_clip(describe_content(text), 72)}" for text in queued]
     app.feed.info("\n".join(lines))
+
+
+async def cmd_runs(app: TuiApp, args: list[str]) -> None:
+    """``/runs [number|id]``: list this session's agent runs, or open one in
+    the live detail panel (Escape closes it)."""
+    if not args:
+        runs = app.roster.runs()
+        if not runs:
+            app.feed.info("(no agent runs this session)")
+            return
+        lines = [f"{run.index}. {run.agent} · {run.description} · {run.status}" for run in runs]
+        lines.append("")
+        lines.append("open: /runs <number|id> · close: Esc")
+        app.feed.info("\n".join(lines))
+        return
+    run = app.roster.resolve(args[0])
+    if run is None:
+        app.feed.error(f"no such agent run: {args[0]}")
+        return
+    app.open_agent_run(run.run_id)
+
+
+_AGENT_USAGE = (
+    "[id|number] [send TEXT|stop [tree]|resume [TEXT]|submit|focus|"
+    "inspect|integrate WORKER_HASH PARENT_HASH|cleanup|recover] | root"
+)
+
+
+async def cmd_agent(app: TuiApp, args: list[str]) -> None:
+    """Human worker controls use the same tool permission gate as the model."""
+    if args == ["root"]:
+        app.focus_worker(None)
+        return
+    manager = app.worker_manager
+    if manager is None:
+        app.feed.info("(no workers this session)")
+        return
+    if not args:
+        workers = [run for run in app.roster.runs() if run.worker]
+        if not workers:
+            app.feed.info("(no workers this session)")
+            return
+        app.feed.info(
+            "\n".join(
+                f"{run.index}. {run.agent} · {run.status} · {run.description} · {run.run_id}"
+                for run in workers
+            )
+            + f"\n\ncontrol: /agent {_AGENT_USAGE}"
+        )
+        return
+    worker = app.resolve_worker(args[0])
+    if worker is None:
+        app.feed.error(f"no such worker: {args[0]}")
+        return
+    if len(args) == 1:
+        app.open_agent_run(worker.id)
+        return
+    action = args[1]
+    rest = args[2:]
+    try:
+        if action == "focus" and not rest:
+            app.focus_worker(worker.id)
+            app.feed.info(
+                f"composer focused on @{worker.agent} ({worker.id[:8]}); "
+                "Esc returns to parent; /agent root returns to main"
+            )
+            return
+        params = {"action": action, "id": worker.id}
+        if action == "send" and rest:
+            params["text"] = " ".join(rest)
+        elif action == "resume":
+            if rest:
+                params["text"] = " ".join(rest)
+        elif action == "stop" and rest in ([], ["tree"]):
+            params["tree"] = bool(rest)
+        elif action == "integrate" and len(rest) == 2:
+            params["reviewed_head"] = rest[0]
+            params["reviewed_parent_head"] = rest[1]
+        elif action in {"submit", "inspect", "review", "cleanup", "recover"} and not rest:
+            pass
+        else:
+            raise ValueError(f"usage: /agent {_AGENT_USAGE}")
+        ctx = app.runtime.ctx
+        ctx = replace(ctx, extras={**ctx.extras, HUMAN_CONTROL_EXTRA: True})
+        _, result = await ctx.extras["registry"].dispatch_result(
+            "human-worker-control", "workers", json.dumps(params), ctx
+        )
+        if result.is_error:
+            app.feed.error(result.content)
+        else:
+            app.feed.info(result.content)
+            note = result.metadata.get("notification")
+            if note and note["new"] and note["deliver"]:
+                await app._on_worker_notification(note)
+    except (KeyError, RuntimeError, SubagentError, ValueError) as e:
+        app.feed.error(str(e))
 
 
 async def cmd_tasks(app: TuiApp, args: list[str]) -> None:
@@ -1428,6 +1530,42 @@ def _complete_resume(app: TuiApp, args: list[str]) -> list[CompletionRow]:
     return rows
 
 
+def _complete_runs(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if args:
+        return []  # one reference only
+    return [
+        (run.run_id, f"{run.index} {run.agent} · {run.description}", run.status)
+        for run in app.roster.runs()
+    ]
+
+
+def _complete_agent(app: TuiApp, args: list[str]) -> list[CompletionRow]:
+    if not args:
+        return [("root", "root", "return to main conversation")] + [
+            (run.run_id, f"{run.index} {run.agent} · {run.description}", run.status)
+            for run in app.roster.runs()
+            if run.worker
+        ]
+    if len(args) == 1:
+        return [
+            (action, action, "worker control")
+            for action in (
+                "send",
+                "stop",
+                "resume",
+                "submit",
+                "focus",
+                "inspect",
+                "integrate",
+                "cleanup",
+                "recover",
+            )
+        ]
+    if len(args) == 2 and args[1] == "stop":
+        return [("tree", "tree", "stop descendants too")]
+    return []
+
+
 def _complete_rewind(app: TuiApp, args: list[str]) -> list[CompletionRow]:
     if args:
         return []
@@ -1489,6 +1627,8 @@ _ARG_COMPLETIONS: dict[str, tuple[ArgCompletions, str | None]] = {
     "tutor": (_complete_tutor, None),
     "memory": (_complete_memory, None),
     "wt-exit": (_complete_wt_exit, None),
+    "runs": (_complete_runs, "no agent runs this session"),
+    "agent": (_complete_agent, "no workers this session"),
 }
 
 
@@ -1529,7 +1669,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ),
     ("Permissions", ["permissions", "mode", "toggle"]),
     ("Worktrees", ["worktree", "wt-merge", "wt-exit"]),
-    ("Power features", ["loop", "chain", "mcp", "review", "tasks"]),
+    ("Power features", ["loop", "chain", "mcp", "review", "tasks", "runs", "agent"]),
     (
         "Interface",
         [
@@ -1589,6 +1729,8 @@ _HANDLERS = {
     "hooks": cmd_hooks,
     "agents": cmd_agents,
     "queue": cmd_queue,
+    "runs": cmd_runs,
+    "agent": cmd_agent,
     "tasks": cmd_tasks,
     "btw": cmd_btw,
     "copy": cmd_copy,
@@ -1645,6 +1787,8 @@ ARG_HINTS = {
     "tutor": "<topic>",
     "review": "[file…]",
     "notifications": "[on|off]",
+    "runs": "[number|id]",
+    "agent": _AGENT_USAGE,
 }
 
 

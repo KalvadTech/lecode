@@ -58,19 +58,30 @@ def test_line1_omits_missing_git_fields(state, theme):
 
 def test_line2_model_cost_context(state, theme):
     line2 = render_statusline(state, theme, width=200).plain.splitlines()[1]
-    assert line2 == "model: openai/gpt-5-mini · cost: $0.0123 · ctx: ▓▓▓░░ 84.0k/200.0k 42%"
+    assert line2 == "total cost: $0.0123 · ctx: ▓▓▓░░ 84.0k/200.0k 42% · model: openai/gpt-5-mini"
 
 
 def test_line2_shows_reasoning_override_after_model(state, theme):
     state.reasoning = "High"
     line2 = render_statusline(state, theme, width=200).plain.splitlines()[1]
-    assert line2 == "model: openai/gpt-5-mini · High · cost: $0.0123 · ctx: ▓▓▓░░ 84.0k/200.0k 42%"
+    assert (
+        line2
+        == "total cost: $0.0123 · ctx: ▓▓▓░░ 84.0k/200.0k 42% · model: openai/gpt-5-mini · High"
+    )
 
 
 def test_line2_omits_reasoning_at_baseline(state, theme):
     line2 = render_statusline(state, theme, width=200).plain.splitlines()[1]
     assert "High" not in line2
-    assert line2 == "model: openai/gpt-5-mini · cost: $0.0123 · ctx: ▓▓▓░░ 84.0k/200.0k 42%"
+    assert line2 == "total cost: $0.0123 · ctx: ▓▓▓░░ 84.0k/200.0k 42% · model: openai/gpt-5-mini"
+
+
+def test_incomplete_total_stays_visible_with_long_model(state, theme):
+    state.model = "very-long-provider/" + "model" * 20
+    state.usage_incomplete = True
+    line2 = render_statusline(state, theme, width=80).plain.splitlines()[1]
+    assert "total cost: $0.0123 incomplete" in line2
+    assert "84.0k/200.0k" in line2
 
 
 def test_line3_session_agent_tokens_state(state, theme):

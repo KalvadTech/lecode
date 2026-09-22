@@ -16,13 +16,16 @@ child with it (the child is awaited inside the parent's tool dispatch).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
+import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from lecode.agent.prompts import build_system_prompt
-from lecode.agent.runner import AgentRunner
+from lecode.agent.runner import AgentRunner, ToolCall, ToolResult
 from lecode.agent.tools.base import ToolContext, ToolRegistry
 from lecode.hooks import SUBAGENT_END, SUBAGENT_START, build_envelope, dispatch_event
 from lecode.memory.recall import RecallContext
@@ -56,8 +59,23 @@ SUBAGENT_EVENTS_EXTRA = "subagent_events"
 #: Clip for the SubagentEnd hook envelope's result content.
 _END_CONTENT_CLIP = 2000
 
-#: ``on_event(agent_name, event)`` — one call per child runner event.
-OnSubagentEvent = Callable[[str, "AgentEvent"], Any]
+
+@dataclass(frozen=True)
+class SubagentProgress:
+    """One child runner event, tagged with the run's stable identity.
+
+    ``run_id`` distinguishes two concurrent runs of the same agent;
+    ``description`` is the human label the caller supplied (task description).
+    """
+
+    run_id: str
+    agent: str
+    description: str
+    event: AgentEvent
+
+
+#: ``on_event(progress)`` — one call per child runner event.
+OnSubagentEvent = Callable[[SubagentProgress], Any]
 
 
 class SubagentError(Exception):
@@ -74,6 +92,8 @@ class SubagentOutcome:
     input_tokens: int
     output_tokens: int
     cost_usd: float
+    run_id: str = ""
+    description: str = ""
 
 
 def child_registry(parent: ToolRegistry) -> ToolRegistry:
@@ -103,6 +123,52 @@ async def _fire_hook(
     await dispatch_event(event, envelope, handlers)
 
 
+def _persist_agent_run(
+    ctx: ToolContext,
+    *,
+    run_id: str,
+    agent: str,
+    description: str,
+    prompt: str,
+    status: str,
+    answer: str,
+    error: str | None,
+    trail: dict[str, dict[str, Any]],
+    trail_order: list[str],
+    duration_s: float,
+    result: RunResult | None,
+) -> None:
+    """Append the run's bounded activity trail to the parent session.
+
+    Fail-open: activity is display-only, so a storage failure must not break
+    the run or mask its outcome.
+    """
+    store = ctx.session_store
+    session = ctx.session
+    if store is None or session is None:
+        return
+    run: dict[str, Any] = {
+        "run_id": run_id,
+        "agent": agent,
+        "description": description,
+        "prompt": prompt,
+        "status": status,
+        "answer": answer or error or "",
+        "tool_calls": [trail[call_id] for call_id in trail_order],
+        "duration_s": duration_s,
+    }
+    if result is not None:
+        totals = result.usage_totals
+        run.update(
+            turns=result.turns,
+            input_tokens=totals.input_tokens,
+            output_tokens=totals.output_tokens,
+            cost_usd=totals.cost_usd,
+        )
+    with contextlib.suppress(Exception):
+        store.record_agent_run(session, run)
+
+
 async def run_subagent(
     ctx: ToolContext,
     parent_registry: ToolRegistry,
@@ -110,13 +176,16 @@ async def run_subagent(
     *,
     name: str,
     prompt: str,
+    description: str = "",
     on_event: OnSubagentEvent | None = None,
 ) -> SubagentOutcome:
     """Run subagent ``name`` on ``prompt``; returns its final text and usage.
 
-    Raises :class:`SubagentError` for unknown agents, a missing provider,
-    timeouts, and provider failures; ``asyncio.CancelledError`` propagates
-    so a cancelled parent turn takes the child down with it.
+    ``description`` labels the run for the UI and the persisted activity
+    record; empty falls back to a prompt preview. Raises :class:`SubagentError`
+    for unknown agents, a missing provider, timeouts, and provider failures;
+    ``asyncio.CancelledError`` propagates so a cancelled parent turn takes the
+    child down with it.
     """
     available = [a.name for a in agents.subagents()]
     agent = agents.get(name)
@@ -127,6 +196,9 @@ async def run_subagent(
     provider = ctx.extras.get(PROVIDER_EXTRA)
     if provider is None:
         raise SubagentError("no provider available for subagents")
+
+    run_id = uuid.uuid4().hex[:8]
+    label = description or prompt[:60]
 
     checker = ctx.permission_checker
     if agent.overlay is not None:
@@ -166,19 +238,47 @@ async def run_subagent(
     child = AgentRunner(provider, child_registry(parent_registry), child_ctx, config=child_config)
     child.model = agent.model or ctx.config.agent.subagent_model or ctx.config.llm.model
 
-    forward = (lambda event: on_event(name, event)) if on_event is not None else None
+    # Bounded activity trail for the persisted record (tool calls paired by id).
+    trail: dict[str, dict[str, Any]] = {}
+    trail_order: list[str] = []
+
+    def forward(event: AgentEvent) -> Any:
+        if isinstance(event, ToolCall):
+            trail[event.id] = {
+                "name": event.name,
+                "args": event.arguments,
+                "result": "",
+                "is_error": False,
+            }
+            trail_order.append(event.id)
+        elif isinstance(event, ToolResult):
+            entry = trail.setdefault(
+                event.id,
+                {"name": event.name, "args": "", "result": "", "is_error": False},
+            )
+            entry["result"] = event.content
+            entry["is_error"] = event.is_error
+        if on_event is None:
+            return None
+        return on_event(SubagentProgress(run_id=run_id, agent=name, description=label, event=event))
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": prompt},
     ]
+    started_at = time.monotonic()
     await _fire_hook(ctx, SUBAGENT_START, name, prompt=prompt)
     result: RunResult | None = None
     error: str | None = None
+    cancelled = False
     try:
         async with asyncio.timeout(SUBAGENT_TIMEOUT_S):
             result = await child.run(
                 messages, on_event=forward, expected_generation=ctx.memory_generation
             )
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
     except TimeoutError as e:
         error = f"subagent '{name}' timed out after {SUBAGENT_TIMEOUT_S:.0f}s"
         raise SubagentError(error) from e
@@ -186,6 +286,20 @@ async def run_subagent(
         error = str(e)
         raise SubagentError(error) from e
     finally:
+        _persist_agent_run(
+            ctx,
+            run_id=run_id,
+            agent=name,
+            description=label,
+            prompt=prompt,
+            status="cancelled" if cancelled else ("ok" if result is not None else "error"),
+            answer=result.final_text if result is not None else "",
+            error=error,
+            trail=trail,
+            trail_order=trail_order,
+            duration_s=time.monotonic() - started_at,
+            result=result,
+        )
         end_content = result.final_text[:_END_CONTENT_CLIP] if result is not None else error
         await _fire_hook(
             ctx,
@@ -205,4 +319,6 @@ async def run_subagent(
         input_tokens=totals.input_tokens,
         output_tokens=totals.output_tokens,
         cost_usd=totals.cost_usd,
+        run_id=run_id,
+        description=label,
     )

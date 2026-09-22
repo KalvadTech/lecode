@@ -4,7 +4,7 @@ Agents are markdown files with YAML frontmatter in
 ``~/.config/lecode/agents/*.md`` (global, ``LECODE_CONFIG_DIR`` aware) and
 ``.lecode/agents/*.md`` (project, nearest from the cwd up to the git root).
 The project layer wins on name collisions; user files may also override the
-built-in agents (``build`` / ``plan`` / ``explore``) by name.
+built-in agents (``build`` / ``plan`` / ``explore`` / ``general``) by name.
 
 Frontmatter: ``description`` (required), ``mode: primary|subagent|all``
 (default ``all``), ``model``, ``temperature``, ``permission`` (overlay mapping
@@ -75,6 +75,14 @@ def _builtin_agents() -> dict[str, AgentDefinition]:
             body=_PLAN_BODY,
             mode="primary",
             overlay=BUILTIN_AGENT_OVERLAYS["plan"],
+            builtin=True,
+        ),
+        "general": AgentDefinition(
+            name="general",
+            description="General-purpose coding subagent; can write within inherited permissions.",
+            body="Complete the delegated task, implement and verify changes as needed, "
+            "and report the result to your supervisor. Respect inherited permissions.",
+            mode="subagent",
             builtin=True,
         ),
         "explore": AgentDefinition(

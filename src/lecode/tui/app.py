@@ -16,6 +16,8 @@ import asyncio
 import contextlib
 import os
 import sys
+from contextvars import ContextVar
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -67,7 +69,14 @@ from lecode.extras.loop_mode import run_plan_loop
 from lecode.extras.mcp_client import MCP_EXTRA, attach_mcp
 from lecode.extras.proc import run_proc
 from lecode.extras.status_signals import START, STOP, StatusEmitter
-from lecode.extras.subagents import SubagentError, SubagentOutcome, run_subagent
+from lecode.extras.subagents import (
+    SubagentError,
+    SubagentOutcome,
+    SubagentProgress,
+    run_subagent,
+)
+from lecode.extras.workers import WORKER_EXTRA
+from lecode.extras.worktree import WorktreeError
 from lecode.hooks import (
     INTERRUPT,
     NOTIFICATION,
@@ -97,7 +106,9 @@ from lecode.permission import (
 )
 from lecode.providers.openai_compat import ProviderError
 from lecode.providers.types import ContentPart
+from lecode.session.model import MessageRecord
 from lecode.session.stats import session_stats
+from lecode.slash.catalog import BUILTIN_COMMANDS
 from lecode.slash.handlers import build_registry
 from lecode.slash.registry import (
     AmbiguousCommandError,
@@ -105,6 +116,12 @@ from lecode.slash.registry import (
     CompletionRow,
     SlashCommand,
     UnknownCommandError,
+)
+from lecode.tui.agents import (
+    DETAIL_MAX_ROWS,
+    AgentRoster,
+    detail_lines,
+    roster_lines,
 )
 from lecode.tui.clipboard import copy_to_clipboard
 from lecode.tui.feed import Feed
@@ -156,6 +173,10 @@ SHELL_TIMEOUT_S = 120.0
 
 #: Exit code returned by :meth:`TuiApp.run` (interactive exits cleanly).
 EXIT_OK = 0
+
+
+class _PromptBlocked(Exception):
+    """Stop a generated sequence after its submission hook denies a prompt."""
 
 
 def _register_shift_enter() -> None:
@@ -232,6 +253,12 @@ class TuiApp:
         self._steer_queue: asyncio.Queue[MessageContent] = asyncio.Queue(maxsize=QUEUE_LIMIT)
         #: ``/btw`` side notes prepended to the next user submission.
         self._pending_notes: list[str] = []
+        self._approved_prompt: ContextVar[tuple[str, str] | None] = ContextVar(
+            "approved_prompt", default=None
+        )
+        self._command_input: ContextVar[list[str] | None] = ContextVar(
+            "command_input", default=None
+        )
         #: Pending attachments for the next user submission (``/add``, ``@path``).
         self._attachments = AttachmentStore()
         #: Model catalog for ``/model``/``/models``; the live-fetched one when
@@ -253,6 +280,16 @@ class TuiApp:
         # inline through the feed; installed here so tests driving _submit
         # directly get it too.
         self._runtime.ctx.extras["subagent_events"] = self._on_child_event
+        #: Live agent-run roster (compact above the composer; /runs opens detail).
+        self._roster = AgentRoster()
+        #: A focused worker shares this composer; it never opens another TUI.
+        self._focused_worker_id: str | None = None
+        self._composer_drafts: dict[str, str] = {}
+        self._root_stopped = False
+        self._worker_wake_task: asyncio.Task[None] | None = None
+        self._worker_usage = (0, 0, 0.0)
+        self._detail_run_id: str | None = None
+        self._roster_window: Any | None = None
         # Background-task completions surface as feed info lines as they land.
         background = self._runtime.ctx.extras.get(BACKGROUND_EXTRA)
         if background is not None:
@@ -277,7 +314,13 @@ class TuiApp:
         self._status.input_tokens = stats.input_tokens
         self._status.output_tokens = stats.output_tokens
         self._status.cost_usd = stats.cost_usd
+        self._status.usage_incomplete = stats.usage_incomplete
         self._status.context_used = stats.context_tokens
+        self._worker_manager = runtime.ctx.extras.get(WORKER_EXTRA)
+        if self._worker_manager is not None:
+            self._worker_manager.notify = self._on_worker_notification
+            self._worker_manager.progress = self._on_worker_progress
+        self._hydrate_workers()
         # Logbook suffix: the feed reads live context/cost from the statusline.
         self._feed.metrics = lambda: (
             self._status.context_used,
@@ -380,8 +423,36 @@ class TuiApp:
 
     def submit_prompt(self, text: str, *, echo: str | None = None) -> None:
         """Render and queue/start a user prompt (skill commands, ``/retry``)."""
-        self._feed.user_message(text if echo is None else echo)
-        self._enqueue_or_start(text)
+        command = self._take_command_input()
+
+        def dispatch(prompt: str) -> None:
+            if command is not None:
+                self._input_history.append_string(command)
+            self._root_stopped = False
+            self._feed.user_message(text if echo is None else echo)
+            self._enqueue_or_start(prompt)
+
+        async def submit() -> None:
+            prompt = await self._guard_prompt(text)
+            if prompt is not None:
+                dispatch(prompt)
+
+        hooks = self._runtime.hooks
+        approved = self._approved_prompt.get()
+        if approved is not None and approved[0] == text:
+            self._approved_prompt.set(None)
+            dispatch(approved[1])
+        elif hooks is None or not hooks.handlers.get(USER_PROMPT_SUBMIT):
+            prompt = self._with_notes(text)
+            self._pending_notes.clear()
+            dispatch(prompt)
+        else:
+            self._spawn(submit())
+
+    def _take_command_input(self) -> str | None:
+        """Defer a submitting command's history entry until its prompt is approved."""
+        pending = self._command_input.get()
+        return pending.pop() if pending else None
 
     def request_quit(self) -> None:
         """``/quit``/``/exit``: cancel any turn and leave the loop."""
@@ -409,6 +480,9 @@ class TuiApp:
         """
         from lecode.session.storage import SessionInUseError
 
+        if self.workers_active():
+            self._feed.error("stop or finish all workers before switching sessions")
+            return False
         try:
             new_lock = self._store.acquire_lock(session)
         except SessionInUseError as e:
@@ -441,6 +515,14 @@ class TuiApp:
             self._input_area.history = self._input_history
         self._status.session_name = session.name
         self._status.agent = self._agent_name
+        if self._worker_manager is not None:
+            self._worker_manager.attach(session)
+            self._roster = AgentRoster()
+            self._detail_run_id = None
+            self._focused_worker_id = None
+            self._composer_drafts.clear()
+            self._worker_usage = (0, 0, 0.0)
+            self._hydrate_workers()
         self._invalidate()
         hooks = self._runtime.hooks
         if hooks is not None and (
@@ -469,10 +551,154 @@ class TuiApp:
     def reload_history(self) -> None:
         """Public wrapper used by undo/redo/rewind/clear/compact handlers."""
         self._reload_history()
+        self._sync_usage()
 
     def turn_busy(self) -> bool:
         """Whether a turn or plan loop is in flight (switching commands refuse)."""
-        return self._turn_running() or self.loop_running()
+        return self._turn_running() or self.loop_running() or self.workers_active()
+
+    def workers_active(self) -> bool:
+        return self._worker_manager is not None and any(
+            worker.is_active for worker in self._worker_manager.list()
+        )
+
+    def resolve_worker(self, ref: str) -> Any | None:
+        """Resolve a worker by stable roster number, exact id, or unique prefix."""
+        if self._worker_manager is None:
+            return None
+        run = self._roster.resolve(ref)
+        if run is not None and run.worker:
+            return self._worker_manager.get(run.run_id)
+        matches = [worker for worker in self._worker_manager.list() if worker.id.startswith(ref)]
+        return matches[0] if len(matches) == 1 else None
+
+    def focus_worker(self, worker_id: str | None) -> bool:
+        """Switch the shared composer to a worker, retaining both drafts."""
+        if worker_id is not None:
+            worker = self.resolve_worker(worker_id)
+            if worker is None:
+                return False
+            worker_id = worker.id
+        current = self._focused_worker_id or "main"
+        if self._input_area is not None:
+            self._composer_drafts[current] = self._input_area.text
+        self._focused_worker_id = worker_id
+        self._detail_run_id = worker_id
+        if self._roster_window is not None:
+            self._roster_window.vertical_scroll = 0
+        if self._input_area is not None:
+            draft = self._composer_drafts.get(worker_id or "main", "")
+            self._input_area.buffer.set_document(Document(draft, len(draft)), bypass_readonly=True)
+        self._sync_queue_status()
+        return True
+
+    def _hydrate_workers(self) -> None:
+        """Load persisted workers once per attached root session."""
+        if self._worker_manager is not None:
+            for worker in self._worker_manager.load():
+                self._roster.sync_worker(worker, context_window=self._worker_context_window(worker))
+            self._worker_usage = self._worker_totals()
+        self._sync_usage()
+
+    def _worker_context_window(self, worker: Any) -> int:
+        try:
+            return self.catalog.get(worker.session.meta.model).context_window
+        except KeyError:
+            return self._config.agent.context_window
+
+    def _worker_totals(self) -> tuple[int, int, float]:
+        if self._worker_manager is None:
+            return (0, 0, 0.0)
+        totals = [worker.usage_totals for worker in self._worker_manager.list()]
+        return (
+            sum(total.input_tokens for total in totals),
+            sum(total.output_tokens for total in totals),
+            sum(total.cost_usd for total in totals),
+        )
+
+    def current_session_usage(self) -> tuple[int, int, float, bool]:
+        """Session totals with live worker usage substituted for persisted deltas."""
+        stats = session_stats(self._store, self._session)
+        worker_ids = (
+            {worker.id for worker in self._worker_manager.list()}
+            if self._worker_manager is not None
+            else set()
+        )
+        persisted = [
+            event.get("usage", event)
+            for event in self._store.load_events(self._session, "worker_usage")
+            if event.get("worker_id") in worker_ids
+        ]
+        live = self._worker_totals()
+        recorded = (
+            sum(int(item.get("input_tokens") or 0) for item in persisted),
+            sum(int(item.get("output_tokens") or 0) for item in persisted),
+            sum(float(item.get("cost_usd") or 0.0) for item in persisted),
+        )
+        incomplete = (
+            stats.usage_incomplete
+            or any(worker.usage_incomplete for worker in self._worker_manager.list())
+            if self._worker_manager is not None
+            else stats.usage_incomplete
+        )
+        incomplete |= any(
+            isinstance(record, MessageRecord)
+            and record.role == "assistant"
+            and (record.usage is None or record.usage.get("incomplete", False))
+            for record in self._store.read_records(self._session)
+        )
+        return (
+            stats.input_tokens + live[0] - recorded[0],
+            stats.output_tokens + live[1] - recorded[1],
+            stats.cost_usd + live[2] - recorded[2],
+            incomplete,
+        )
+
+    def _sync_usage(self) -> None:
+        (
+            self._status.input_tokens,
+            self._status.output_tokens,
+            self._status.cost_usd,
+            self._status.usage_incomplete,
+        ) = self.current_session_usage()
+
+    def _on_worker_progress(self, worker: Any) -> None:
+        """WorkerManager callback: update exactly that roster entry and live totals."""
+        before = self._worker_usage
+        self._roster.sync_worker(worker, context_window=self._worker_context_window(worker))
+        after = self._worker_totals()
+        self._status.input_tokens += after[0] - before[0]
+        self._status.output_tokens += after[1] - before[1]
+        self._status.cost_usd += after[2] - before[2]
+        self._status.usage_incomplete |= worker.usage_incomplete
+        self._worker_usage = after
+        self._invalidate()
+
+    async def _on_worker_notification(self, note: dict[str, Any]) -> None:
+        """Render completed-worker attribution and wake only delegated root work."""
+        worker = self.resolve_worker(note["worker_id"])
+        if worker is None:
+            return
+        run = self._roster.sync_worker(worker, context_window=self._worker_context_window(worker))
+        if note.get("kind") == "human_message":
+            self._feed.info(f"[human → @{worker.agent} {worker.id[:8]}] {note['content']}")
+        else:
+            self._feed.agent_summary(run)
+        if (
+            (note["origin"] == "delegated" or note["deliver"])
+            and note["parent_id"] is None
+            and not self._root_stopped
+            and not self._turn_running()
+            and (self._worker_wake_task is None or self._worker_wake_task.done())
+        ):
+            self._worker_wake_task = asyncio.create_task(self._wake_for_workers())
+        self._invalidate()
+
+    async def _wake_for_workers(self) -> None:
+        """Coalesce same-loop worker completions into one parent wake-up."""
+        await asyncio.sleep(0)
+        if not self._root_stopped and not self._turn_running() and not self._quit:
+            self._enqueue_or_start("Worker updates are available.")
 
     def loop_running(self) -> bool:
         return self._loop_task is not None and not self._loop_task.done()
@@ -554,7 +780,18 @@ class TuiApp:
 
     def _toolbar(self) -> ANSI:
         """The statusline as prompt_toolkit formatted text (ANSI via Rich)."""
-        text = render_statusline(self._status, self._theme, width=self._console.width)
+        state = self._status
+        if self._focused_worker_id is not None:
+            worker = self.resolve_worker(self._focused_worker_id)
+            if worker is not None:
+                state = replace(
+                    state,
+                    agent=worker.agent,
+                    model=worker.session.meta.model or state.model,
+                    context_used=worker.usage_totals.context_tokens,
+                    context_window=self._worker_context_window(worker),
+                )
+        text = render_statusline(state, self._theme, width=self._console.width)
         with self._console.capture() as capture:
             self._console.print(text, end="")
         return ANSI(capture.get())
@@ -609,21 +846,23 @@ class TuiApp:
 
         @kb.add("y", filter=approval_pending)
         def _approve_once(event: Any) -> None:
-            self._approval.resolve(AllowOnce())
+            self._resolve_approval(AllowOnce())
 
         @kb.add("a", filter=approval_pending)
         def _approve_always(event: Any) -> None:
             pending = self._approval.pending
+            if pending is not None and not pending.allow_always:
+                return
             pattern = pending.target if pending is not None else "*"
-            self._approval.resolve(AllowAlways(pattern=pattern))
+            self._resolve_approval(AllowAlways(pattern=pattern))
 
         @kb.add("n", filter=approval_pending)
         def _deny(event: Any) -> None:
-            self._approval.resolve(Deny())
+            self._resolve_approval(Deny())
 
         @kb.add("escape", filter=approval_pending)
         def _deny_escape(event: Any) -> None:
-            self._approval.resolve(Deny())
+            self._resolve_approval(Deny())
 
         @kb.add("up", filter=question_picker)
         def _question_up(event: Any) -> None:
@@ -651,14 +890,38 @@ class TuiApp:
             event.current_buffer.reset()
             self._invalidate()
 
+        detail_open = Condition(lambda: self._detail_run_id is not None)
+
+        @kb.add("pageup", filter=detail_open)
+        def _detail_scroll_up(event: Any) -> None:
+            if self._roster_window is not None:
+                self._roster_window.vertical_scroll = max(
+                    0, self._roster_window.vertical_scroll - 5
+                )
+                self._invalidate()
+
+        @kb.add("pagedown", filter=detail_open)
+        def _detail_scroll_down(event: Any) -> None:
+            if self._roster_window is not None:
+                self._roster_window.vertical_scroll += 5
+                self._invalidate()
+
         @kb.add("escape", filter=~approval_pending & ~question_pending)
         def _close_completion_menu(event: Any) -> None:
-            # Approval and question prompts own Escape while pending; otherwise
-            # dismiss the dropdown, restoring typed text a navigation
-            # overwrote. The no-match rows (slash and argument pickers) have
-            # no completion state, so their dismissal is remembered per typed
-            # text (any edit or Tab brings it back). Longer M-* sequences
-            # still win over this bare-key handler.
+            # Approval and question prompts own Escape while pending; an open
+            # detail panel closes before anything else. Then dismiss the
+            # dropdown, restoring typed text a navigation overwrote. The
+            # no-match rows (slash and argument pickers) have no completion
+            # state, so their dismissal is remembered per typed text (any edit
+            # or Tab brings it back). Longer M-* sequences still win over this
+            # bare-key handler.
+            if self._focused_worker_id is not None:
+                worker = self.resolve_worker(self._focused_worker_id)
+                self.focus_worker(worker.parent_id if worker is not None else None)
+                return
+            if self._detail_run_id is not None:
+                self.close_agent_run()
+                return
             buffer = event.current_buffer
             if buffer.complete_state is not None:
                 buffer.cancel_completion()
@@ -692,8 +955,6 @@ class TuiApp:
                 self._accept_completion(buffer)
                 return
             text = buffer.text
-            if text.strip():
-                buffer.append_to_history()
             buffer.reset()
             self._spawn(self._submit(text))
 
@@ -702,8 +963,6 @@ class TuiApp:
             if self._approval.is_pending or self._question.is_pending:
                 return
             text = event.current_buffer.text
-            if text.strip():
-                event.current_buffer.append_to_history()
             event.current_buffer.reset()
             self._spawn(self._submit(text, steer=True))
 
@@ -717,10 +976,15 @@ class TuiApp:
         @kb.add("c-c")
         def _ctrl_c(event: Any) -> None:
             if self._approval.is_pending:
-                self._approval.resolve(Deny())
+                self._resolve_approval(Deny())
                 return
             if self._question.is_pending:
                 self._question.dismiss()
+                return
+            if self._focused_worker_id is not None:
+                worker = self.resolve_worker(self._focused_worker_id)
+                if worker is not None and worker.is_active:
+                    self._spawn(self._stop_viewed_worker(worker.id))
                 return
             if self.cancel_turn():
                 self._spawn(self._fire_hook(INTERRUPT))
@@ -920,6 +1184,15 @@ class TuiApp:
             height=Dimension(min=1, max=10),
         )
         live_area = ConditionalContainer(live_window, Condition(lambda: bool(self._live_text)))
+        # Agent roster / detail panel: compact rows above the composer while
+        # runs are live (or one run is open for inspection).
+        self._roster_window = Window(
+            FormattedTextControl(self._roster_text),
+            wrap_lines=False,
+            dont_extend_height=True,
+            height=Dimension(min=1, max=DETAIL_MAX_ROWS),
+        )
+        roster_area = ConditionalContainer(self._roster_window, Condition(self._roster_visible))
         # The chatbox: a framed input area directly above the statusline.
         # Enter submits the text into the transcript above (see _enter).
         self._chatbox = Frame(self._input_area, title="message")
@@ -1040,7 +1313,7 @@ class TuiApp:
             picker_menu_visible,
         )
         return Application(
-            layout=Layout(HSplit([live_area, self._chatbox, picker_panel, toolbar])),
+            layout=Layout(HSplit([live_area, roster_area, self._chatbox, picker_panel, toolbar])),
             style=Style.from_dict(
                 {
                     "picker-menu": f"bg:{PICKER_MENU_BG} {self._theme.muted}",
@@ -1062,10 +1335,13 @@ class TuiApp:
 
     async def run(self, *, input: Input | None = None, output: Output | None = None) -> int:
         """Run the interactive loop until quit; returns the exit code."""
+        self._hydrate_workers()
         self._status.git = await self._git.get(self._cwd)
         self._app = self._build_app(input=input, output=output)
         self._runtime.ctx.approval_callback = self._request_approval
         self._runtime.ctx.question_callback = self._request_question
+        if self._worker_manager is not None:
+            self._worker_manager.confirm = self._confirm_worker_worktree
         await self._fire_hook(SESSION_START)
         herdr.report("idle", session_id=self._session.id)
         # MCP attaches in the background so the chat opens immediately;
@@ -1090,6 +1366,8 @@ class TuiApp:
             self._spinner_task.cancel()
             self._approval.cancel()
             self._runtime.ctx.approval_callback = None
+            if self._worker_manager is not None:
+                self._worker_manager.confirm = None
             self._question.cancel()
             self._runtime.ctx.question_callback = None
             self.cancel_turn()
@@ -1104,6 +1382,8 @@ class TuiApp:
             background = self._runtime.ctx.extras.get(BACKGROUND_EXTRA)
             if background is not None:
                 await background.shutdown()
+            if self._worker_manager is not None:
+                await self._worker_manager.shutdown()
             mcp = self._runtime.ctx.extras.get(MCP_EXTRA)
             if mcp is not None:
                 await mcp.shutdown()
@@ -1144,6 +1424,9 @@ class TuiApp:
         self._arg_rows_cache = None  # an open "/model " picker may now have rows
         with contextlib.suppress(Exception):  # unknown model — keep the default
             self._status.context_window = catalog.get(self._config.llm.model).context_window
+        if self._worker_manager is not None:
+            for worker in self._worker_manager.list():
+                self._roster.sync_worker(worker, context_window=self._worker_context_window(worker))
         if origin == "live":
             self._feed.info(f"models: {count} fetched live from the provider")
         else:
@@ -1187,51 +1470,124 @@ class TuiApp:
             await dispatch_event(SESSION_END, envelope, end_handlers)
         await hooks.fire(SESSION_START)
 
+    async def _allow_prompt(self, text: str) -> bool:
+        verdict = await self._fire_hook(USER_PROMPT_SUBMIT, prompt=text)
+        if verdict is not None and verdict.verdict == "deny":
+            self._feed.info(f"prompt blocked by hook: {verdict.reason or 'UserPromptSubmit hook'}")
+            return False
+        return True
+
+    def _with_notes(self, text: str) -> str:
+        return "\n".join(self._pending_notes) + "\n\n" + text if self._pending_notes else text
+
+    async def _guard_prompt(self, text: str) -> str | None:
+        """Approve the final text, consuming only the notes included in it."""
+        note_count = len(self._pending_notes)
+        prompt = self._with_notes(text)
+        if not await self._allow_prompt(prompt):
+            return None
+        del self._pending_notes[:note_count]
+        return prompt
+
     async def _submit(self, text: str, *, steer: bool = False) -> None:
         """Route one submitted line: shell-outs, slash commands, or LLM input."""
         text = text.rstrip("\n")
         if not text.strip():
             return
+        focused_worker_id = self._focused_worker_id
         if text.startswith("!!"):
             await self._run_shell(text[2:].strip(), share_with_llm=True, steer=steer)
         elif text.startswith("!"):
             await self._run_shell(text[1:].strip(), share_with_llm=False, steer=steer)
         elif text.startswith("/"):
             await self.handle_command(text)
-        elif text.startswith(".") and self._submit_persona(text, steer=steer):
+        elif text.startswith(".") and await self._submit_persona(text, steer=steer):
             pass  # .persona <text>: handled (persona system-prompt overlay)
         else:
+            if focused_worker_id is not None:
+                worker = self.resolve_worker(focused_worker_id)
+                if worker is None:
+                    self._feed.error("focused worker no longer exists")
+                    self.focus_worker(None)
+                    return
+                prompt = await self._guard_prompt(text)
+                if prompt is None:
+                    return
+                self._input_history.append_string(text)
+                self._feed.user_message(f"[@{worker.agent}] {text}")
+                await self._worker_manager.send(worker.id, prompt, steer, from_human=True)
+                self._feed.info(f"sent to @{worker.agent} ({worker.id[:8]})")
+                return
             if self.loop_running():
                 self._feed.info("a plan loop is running — /loop stop first")
-                return
-            verdict = await self._fire_hook(USER_PROMPT_SUBMIT, prompt=text)
-            if verdict is not None and verdict.verdict == "deny":
-                self._feed.info(
-                    f"prompt blocked by hook: {verdict.reason or 'UserPromptSubmit hook'}"
-                )
                 return
             mentions, cleaned = parse_mentions(text, self._runtime.agents)
             invocable = {a.name for a in self._runtime.agents.subagents()}
             targets = [name for name in mentions if name in invocable]
             if targets and not self._turn_running():
-                # Direct @agent dispatch: a side query run by the subagent.
-                # While a turn runs, mentions keep the note behavior in
-                # _prepare_message (the message queues as normal input).
+                prompt = await self._guard_prompt(cleaned or text)
+                if prompt is None:
+                    return
+                self._input_history.append_string(text)
                 self._feed.user_message(text)
-                self._turn_task = asyncio.ensure_future(
-                    self._run_subagent_turn(targets[0], cleaned or text)
-                )
+                worker = await self._start_human_worker(targets[0], prompt)
+                if worker is not None:
+                    # Compatibility: direct @agent work remains awaitable through
+                    # the established turn-task seam, but execution stays in the
+                    # persistent human-origin worker manager.
+                    self._turn_task = asyncio.create_task(self._wait_for_worker(worker.id))
                 return
+            self._root_stopped = False
             prepared = self._prepare_message(text)
             echo = self._attachment_echo()
+            error = check_modalities(self._attachments.list(), self._runner.model, self.catalog)
+            if error is not None:
+                self._feed.error(error)
+                return
+            prepared = await self._guard_prompt(prepared)
+            if prepared is None:
+                return
             content = self._with_attachments(prepared)
             if content is None:
                 return  # modality error already rendered; attachments kept
+            self._input_history.append_string(text)
             if not self._turn_running():
                 # Queued messages are listed in the chatbox instead of the
                 # transcript; they echo when the model actually sees them.
                 self._feed.user_message(text + echo)
             self._enqueue_or_start(content, steer=steer)
+
+    async def _start_human_worker(self, agent: str, prompt: str) -> Any | None:
+        """Start direct ``@agent`` work as a persistent human-origin worker."""
+        if self._worker_manager is None:
+            self._feed.error("workers are unavailable")
+            return None
+        try:
+            worker = await self._worker_manager.start(
+                self._runtime.ctx,
+                agent=agent,
+                prompt=prompt,
+                description=prompt.splitlines()[0][:80],
+                origin="human",
+                background=True,
+            )
+        except (RuntimeError, SubagentError, WorktreeError) as e:
+            self._feed.error(str(e))
+            return None
+        self._roster.sync_worker(worker, context_window=self._worker_context_window(worker))
+        self._feed.info(
+            f"worker {worker.id[:8]} started for @{agent} · /agent {worker.id[:8]} focus"
+        )
+        self._invalidate()
+        return worker
+
+    async def _wait_for_worker(self, worker_id: str) -> None:
+        """Keep direct worker execution compatible with the legacy turn seam."""
+        assert self._worker_manager is not None
+        try:
+            await self._worker_manager.wait(worker_id)
+        except SubagentError as e:
+            self._feed.error(str(e))
 
     def _with_attachments(self, text: str) -> MessageContent | None:
         """Attach pending attachments to ``text``; ``None`` = blocked (modality)."""
@@ -1256,7 +1612,7 @@ class TuiApp:
 
     def _prepare_message(self, text: str) -> str:
         """Pull ``@path`` media refs into attachments, then apply ``@agent``
-        routing notes and ``/btw`` pending notes."""
+        routing context."""
         before = len(self._attachments)
         text = extract_attachment_refs(text, self._cwd, self._attachments)
         for attachment in self._attachments.list()[before:]:
@@ -1271,13 +1627,9 @@ class TuiApp:
                 f"(The user mentioned agent(s) {names}; no subagent was "
                 f"dispatched — treat the mention as context.)\n{cleaned}"
             )
-        if self._pending_notes:
-            notes = "\n".join(self._pending_notes)
-            self._pending_notes = []
-            text = f"{notes}\n\n{text}"
         return text
 
-    def _submit_persona(self, text: str, *, steer: bool) -> bool:
+    async def _submit_persona(self, text: str, *, steer: bool) -> bool:
         """``.persona <text>``: submit with a persona system-prompt overlay.
 
         Returns ``True`` when the input was consumed (known persona).
@@ -1293,9 +1645,18 @@ class TuiApp:
         if not rest.strip():
             self._feed.error(f"usage: .{name} <text>")
             return True
+        prompt = rest.strip()
+        overlay = body.strip()
+        if self._turn_running():
+            prompt = f"{overlay}\n\n{prompt}"
+            overlay = None
+        prompt = await self._guard_prompt(prompt)
+        if prompt is None:
+            return True
+        self._input_history.append_string(text)
         if not self._turn_running():
             self._feed.user_message(text)
-        self._enqueue_or_start(rest.strip(), steer=steer, overlay=body.strip())
+        self._enqueue_or_start(prompt, steer=steer, overlay=overlay)
         return True
 
     def _enqueue_or_start(
@@ -1324,6 +1685,8 @@ class TuiApp:
         """``!cmd`` shows output locally; ``!!cmd`` also feeds it to the LLM."""
         if not cmd:
             return
+        if not share_with_llm:
+            self._input_history.append_string("!" + cmd)
         self._feed.user_message(("!!" if share_with_llm else "!") + cmd)
         self._activity("running shell")
         self._shell_task = asyncio.current_task()
@@ -1342,7 +1705,10 @@ class TuiApp:
         is_error = result.exit_code != 0 or result.timed_out
         self._feed.tool_result("shell", output or "(no output)", is_error=is_error)
         if share_with_llm:
-            self._enqueue_or_start(f"!{cmd}\n\n{output}", steer=steer)
+            prompt = await self._guard_prompt(f"!{cmd}\n\n{output}")
+            if prompt is not None:
+                self._input_history.append_string("!!" + cmd)
+                self._enqueue_or_start(prompt, steer=steer)
 
     async def handle_command(self, text: str) -> None:
         """Dispatch a ``/command`` line through the slash registry."""
@@ -1353,13 +1719,52 @@ class TuiApp:
         try:
             command = self._commands.match(query)
         except UnknownCommandError:
+            self._input_history.append_string(text)
             self._feed.info(f"unknown command: /{query}")
             return
         except AmbiguousCommandError as e:
+            self._input_history.append_string(text)
             matches = ", ".join(f"/{name}" for name in e.matches)
             self._feed.info(f"ambiguous command: /{query} ({matches})")
             return
-        await command.handler(self, args)
+        if (
+            command.name == "agent"
+            and len(args) > 2
+            and args[1] in {"send", "resume"}
+            and not await self._allow_prompt(" ".join(args[2:]))
+        ):
+            return
+        approved_prompt = None
+        if command.name == "retry" and not self.turn_busy():
+            last_user = next(
+                (m for m in reversed(self._store.load_messages(self._session)) if m.role == "user"),
+                None,
+            )
+            content = last_user.message.get("content") if last_user is not None else None
+            if isinstance(content, str):
+                prompt = await self._guard_prompt(content)
+                if prompt is None:
+                    return
+                approved_prompt = (content, prompt)
+        # /retry mutates history before submitting; approve before that mutation,
+        # then let its exact prompt consume this task-local approval once.
+        token = self._approved_prompt.set(approved_prompt)
+        defer_history = command.name in {"retry", "chain", "loop", "review", "redo"} or (
+            command.name not in {name for name, _ in BUILTIN_COMMANDS}
+        )
+        # Non-submitting commands retain their original ordering: undo/rewind
+        # must leave a tombstone last, and session switches log in the old session.
+        if not defer_history:
+            self._input_history.append_string(text)
+        command_token = self._command_input.set([text] if defer_history else [])
+        try:
+            await command.handler(self, args)
+            remaining = self._take_command_input()
+            if remaining is not None:
+                self._input_history.append_string(remaining)
+        finally:
+            self._approved_prompt.reset(token)
+            self._command_input.reset(command_token)
 
     # -- inline permission prompt ----------------------------------------------
 
@@ -1377,16 +1782,49 @@ class TuiApp:
         self._status.activity = label
         self._invalidate()
 
+    def _show_approval_head(self) -> None:
+        """Print the FIFO head once, keeping worker attribution with the ask."""
+        pending = self._approval.pending
+        if pending is None:
+            return
+        shown = getattr(self, "_shown_approval", None)
+        if shown is pending.future:
+            return
+        self._shown_approval = pending.future
+        attribution = (
+            f"[worker {pending.worker[:8]} · {pending.conversation}] " if pending.worker else ""
+        )
+        self._feed.permission(
+            attribution
+            + approval_prompt_text(
+                pending.tool_name, pending.target, allow_always=pending.allow_always
+            )
+        )
+
+    def _resolve_approval(self, decision: ApprovalDecision) -> None:
+        self._approval.resolve(decision)
+        self._shown_approval = None
+        self._show_approval_head()
+        self._invalidate()
+
     async def _request_approval(
-        self, tool_name: str, args: dict[str, Any], reason: str
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        reason: str,
+        *,
+        worker: str | None = None,
+        conversation: str = "main",
     ) -> ApprovalDecision:
         """``ctx.approval_callback``: inline y/a/n/ESC ask during a turn."""
         target = target_of(tool_name, args)
         if reason:
             self._feed.info(reason)  # doom-loop coach reasons land here too
-        self._feed.permission(approval_prompt_text(tool_name, target))
         herdr.report("blocked", message=f"approval needed: {tool_name}")
-        future = self._approval.request(tool_name, target, reason)
+        future = self._approval.request(
+            tool_name, target, reason, worker=worker, conversation=conversation
+        )
+        self._show_approval_head()
         self._status.state = StatusLineState.AWAITING_APPROVAL
         self._invalidate()
         self._spawn(self._notifier.approval_needed(tool_name))
@@ -1394,9 +1832,45 @@ class TuiApp:
         try:
             return await future
         finally:
-            self._approval.cancel()
-            self._status.state = StatusLineState.RUNNING
-            herdr.report("working")
+            self._approval.cancel(future)
+            self._shown_approval = None
+            self._show_approval_head()
+            self._status.state = (
+                StatusLineState.AWAITING_APPROVAL
+                if self._approval.is_pending
+                else StatusLineState.RUNNING
+            )
+            if not self._approval.is_pending:
+                herdr.report("working")
+            self._invalidate()
+
+    async def _confirm_worker_worktree(self, question: str) -> bool:
+        """Ask the TUI user before a dirty write worker gets a separate worktree."""
+        herdr.report("blocked", message="approval needed: dirty worktree")
+        future = self._approval.request(
+            "dirty worktree",
+            question,
+            "",
+            allow_always=False,
+        )
+        self._show_approval_head()
+        self._status.state = StatusLineState.AWAITING_APPROVAL
+        self._invalidate()
+        try:
+            return isinstance(await future, AllowOnce)
+        finally:
+            self._approval.cancel(future)
+            self._shown_approval = None
+            self._show_approval_head()
+            self._status.state = (
+                StatusLineState.AWAITING_APPROVAL
+                if self._approval.is_pending
+                else StatusLineState.RUNNING
+                if self.turn_busy()
+                else StatusLineState.IDLE
+            )
+            if not self._approval.is_pending:
+                herdr.report("working" if self.turn_busy() else "idle")
             self._invalidate()
 
     def _render_question(self) -> None:
@@ -1439,9 +1913,15 @@ class TuiApp:
     def cancel_turn(self) -> bool:
         """Cancel the in-flight turn (Ctrl-C); ``True`` if one was cancelled."""
         if self._turn_running():
+            self._root_stopped = True
             self._turn_task.cancel()
             return True
         return False
+
+    async def _stop_viewed_worker(self, worker_id: str) -> None:
+        await self._worker_manager.stop(worker_id)
+        await self._fire_hook(INTERRUPT)
+        self._invalidate()
 
     def cancel_action(self) -> bool:
         """Cancel a non-turn action (plan loop, ``!cmd`` shell-out); ``True``
@@ -1484,7 +1964,12 @@ class TuiApp:
             parts.append("queue: " + ", ".join(self._queue_label(m) for m in queued))
         if steered:
             parts.append("steer: " + ", ".join(self._queue_label(m) for m in steered))
-        return "message" if not parts else "message · " + " · ".join(parts)
+        recipient = "message"
+        if self._focused_worker_id is not None:
+            worker = self.resolve_worker(self._focused_worker_id)
+            if worker is not None:
+                recipient = f"to @{worker.agent} ({worker.id[:8]})"
+        return recipient if not parts else recipient + " · " + " · ".join(parts)
 
     async def _run_turn(self, text: MessageContent, *, overlay: str | None = None) -> None:
         message: dict[str, Any] = {"role": "user", "content": text}
@@ -1510,6 +1995,8 @@ class TuiApp:
         except asyncio.CancelledError:
             cancelled = True
             self._feed.info("turn cancelled")
+            for run in self._roster.cancel_running():
+                self._feed.agent_summary(run)
         except ProviderError:
             pass  # already rendered via the Error event
         finally:
@@ -1518,13 +2005,12 @@ class TuiApp:
             herdr.report("idle")
             self._status.state = StatusLineState.IDLE
             self._status.activity = None
+        self._sync_usage()
+        self._status.usage_incomplete |= cancelled
         if result is not None:
             if result.final_text:
                 self._last_response = result.final_text
             totals = result.usage_totals
-            self._status.input_tokens += totals.input_tokens
-            self._status.output_tokens += totals.output_tokens
-            self._status.cost_usd += totals.cost_usd
             # Last API call's prompt size — the real context fill.
             self._status.context_used = totals.context_tokens or totals.input_tokens
             self._feed.turn_stats(
@@ -1554,8 +2040,11 @@ class TuiApp:
             self._turn_task = asyncio.ensure_future(self._run_turn(follow_up))
 
     async def _run_subagent_turn(self, name: str, prompt: str) -> None:
-        """A direct ``@agent`` submission: the subagent answers as a side
-        query — the exchange is not persisted to the session."""
+        """A direct ``@agent`` submission: the subagent answers as a side query.
+
+        The exchange never enters the message history the model replays, but
+        the run's activity record is persisted for resume/inspection.
+        """
         self._status.state = StatusLineState.RUNNING
         self._activity(f"@{name} working")
         herdr.report("working", session_id=self._session.id)
@@ -1578,6 +2067,7 @@ class TuiApp:
             herdr.report("idle")
             self._status.activity = None
         if outcome is not None:
+            self._roster.finish(outcome.run_id, answer=outcome.text)
             self._feed.assistant_text(outcome.text)
             self._last_response = outcome.text
             self._status.input_tokens += outcome.input_tokens
@@ -1588,8 +2078,16 @@ class TuiApp:
 
     def start_loop(self, plan_path: Path, max_iterations: int) -> None:
         """``/loop``: run a plan loop over this session in the background."""
+        command = self._take_command_input()
 
         async def run_iteration(prompt: str) -> str:
+            nonlocal command
+            prompt = await self._guard_prompt(prompt)
+            if prompt is None:
+                raise _PromptBlocked
+            if command is not None:
+                self._input_history.append_string(command)
+                command = None
             message: dict[str, Any] = {"role": "user", "content": prompt}
             self._history.append(message)
             self._store.append_message(self._session, message)
@@ -1612,6 +2110,8 @@ class TuiApp:
                     max_iterations=max_iterations,
                     on_progress=self._feed.info,
                 )
+            except _PromptBlocked:
+                return
             except asyncio.CancelledError:
                 self._feed.info("loop stopped")
                 return
@@ -1637,15 +2137,28 @@ class TuiApp:
 
     def start_chain(self, topic: str) -> None:
         """``/chain``: brainstorm → plan → code → review as the turn task."""
-        self._turn_task = asyncio.ensure_future(self._run_chain(topic))
+        self._turn_task = asyncio.ensure_future(self._run_chain(topic, self._take_command_input()))
 
-    async def _run_chain(self, topic: str) -> None:
+    async def _run_chain(self, topic: str, command: str | None = None) -> None:
         """Run the chain; each phase renders as it completes (not persisted)."""
+        app = self
+
+        class GuardedRunner(AgentRunner):
+            async def run(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
+                nonlocal command
+                prompt = await app._guard_prompt(messages[-1]["content"])
+                if prompt is None:
+                    raise _PromptBlocked
+                if command is not None:
+                    app._input_history.append_string(command)
+                    command = None
+                messages[-1] = {"role": "user", "content": prompt}
+                return await super().run(messages, **kwargs)
 
         def factory() -> AgentRunner:
             # Fresh runner per phase; no session binding → chain is a side
             # computation rendered to the feed, not written to the session.
-            return AgentRunner(
+            return GuardedRunner(
                 self._runner.provider,
                 self._runtime.registry,
                 self._runtime.ctx,
@@ -1667,6 +2180,8 @@ class TuiApp:
                 cwd=self._cwd,
                 on_phase=on_phase,
             )
+        except _PromptBlocked:
+            return
         except asyncio.CancelledError:
             self._feed.info("turn cancelled")
             return
@@ -1700,6 +2215,10 @@ class TuiApp:
         elif isinstance(event, ToolResult):
             self._status.context_used += self._estimate(event.content)
             self._feed.tool_result(event.name, event.content, event.is_error)
+            run_id = str(event.metadata.get("run_id") or "") if event.metadata else ""
+            if run_id:
+                # A finished task tool run: pair its answer with the roster entry.
+                self._roster.finish(run_id, answer=event.content, is_error=event.is_error)
             self._activity("thinking")
         elif isinstance(event, Error):
             self._feed.error(event.message)
@@ -1715,6 +2234,10 @@ class TuiApp:
             self._feed.llm_call(event.model, event.turn)
             self._activity("thinking")
         elif isinstance(event, LlmResponse):
+            self._status.input_tokens += event.input_tokens
+            self._status.output_tokens += event.output_tokens
+            self._status.cost_usd += event.cost_usd
+            self._status.usage_incomplete |= getattr(event, "usage_incomplete", False)
             if event.elapsed_s > 0 and event.output_tokens > 0:
                 self._status.timed_output_tokens += event.output_tokens
                 self._status.model_elapsed_s += event.elapsed_s
@@ -1730,6 +2253,7 @@ class TuiApp:
                 event.cost_usd,
                 elapsed_s=event.elapsed_s,
             )
+            self._invalidate()
         elif isinstance(event, Done):
             self._feed.stream_end()
             self._spawn(self._notifier.task_finish())
@@ -1745,35 +2269,88 @@ class TuiApp:
             # Rendered after the stats line in _run_turn, not mid-stream.
             self._pending_review = event
 
-    def _on_child_event(self, agent: str, event: Any) -> None:
-        """Subagent runner event → feed rendering, prefixed with the agent.
+    def _on_child_event(self, progress: SubagentProgress) -> None:
+        """Subagent progress → the live roster; one summary line when it ends.
 
-        Token/Reasoning are skipped: they would interleave with the parent's
-        own stream.
+        Per-call child detail stays in the roster/detail panel instead of
+        flooding the scrollback; a finished run leaves one attributed summary
+        line. Token/Reasoning are ignored: they would interleave with the
+        parent's own stream.
         """
-        if isinstance(event, ToolCall):
-            self._feed.tool_call(f"{agent}/{event.name}", " ".join(event.arguments.split()))
-            self._activity(f"@{agent} running {event.name}")
-        elif isinstance(event, ToolResult):
-            self._feed.tool_result(f"{agent}/{event.name}", event.content, event.is_error)
-            self._activity(f"@{agent} working")
-        elif isinstance(event, Error):
-            self._feed.error(f"{agent}: {event.message}")
-        elif isinstance(event, Retrying):
-            self._feed.retrying(event.attempt, event.delay)
-        elif isinstance(event, LlmCall):
-            self._feed.llm_call(f"{agent} · {event.model}", event.turn)
-        elif isinstance(event, LlmResponse):
-            self._feed.llm_response(
-                f"{agent} · {event.model}",
-                event.turn,
-                event.input_tokens,
-                event.output_tokens,
-                event.cost_usd,
-                elapsed_s=event.elapsed_s,
-            )
-        elif isinstance(event, Done):
-            self._feed.info(f"{agent} finished ({event.stop_reason}, {event.turns} turn(s))")
+        run = self._roster.observe(progress)
+        if not run.worker and isinstance(progress.event, (Error, Done)):
+            self._feed.agent_summary(run)
+        self._invalidate()
+
+    # -- agent roster / detail panel -------------------------------------------
+
+    @property
+    def roster(self) -> AgentRoster:
+        return self._roster
+
+    @property
+    def worker_manager(self) -> Any | None:
+        return self._worker_manager
+
+    async def submit_worker(self, worker_id: str) -> dict[str, Any]:
+        """Submit a human worker and apply its root wake-up policy."""
+        if self._worker_manager is None:
+            raise RuntimeError("workers are unavailable")
+        note = await self._worker_manager.submit(worker_id)
+        if note["new"] and note["deliver"]:
+            await self._on_worker_notification(note)
+        return note
+
+    @property
+    def detail_run_id(self) -> str | None:
+        return self._detail_run_id
+
+    def open_agent_run(self, run_id: str) -> bool:
+        """Show one run's live detail panel; ``False`` for an unknown run."""
+        run = self._roster.get(run_id)
+        if run is None:
+            return False
+        if run.worker:
+            return self.focus_worker(run_id)
+        self.focus_worker(None)
+        self._detail_run_id = run_id
+        if self._roster_window is not None:
+            self._roster_window.vertical_scroll = 0
+        self._invalidate()
+        return True
+
+    def close_agent_run(self) -> None:
+        self.focus_worker(None)
+
+    def _roster_visible(self) -> bool:
+        return self._detail_run_id is not None or self._roster.has_running()
+
+    def _term_width(self) -> int:
+        if self._app is not None:
+            with contextlib.suppress(Exception):
+                return self._app.output.get_size().columns
+        return 80
+
+    def _roster_text(self) -> ANSI:
+        """Roster/detail rows as prompt_toolkit text (ANSI via Rich, like the
+        toolbar). Rich ``Text`` objects are unhashable and cannot be the
+        fragments a ``FormattedTextControl`` caches."""
+        width = self._term_width()
+        if self._detail_run_id is not None:
+            run = self._roster.get(self._detail_run_id)
+            transcript = None
+            if run is not None and run.session_id is not None:
+                with contextlib.suppress(Exception):
+                    child = self._store.open(run.session_id)
+                    transcript = [
+                        record.message for record in self._store.load_messages(child)
+                    ] or None
+            lines = detail_lines(run, self._theme, width, transcript)
+        else:
+            lines = roster_lines(self._roster, self._theme, width)
+        with self._console.capture() as capture:
+            self._console.print(*lines, sep="\n")
+        return ANSI(capture.get())
 
     # -- agents / totals ----------------------------------------------------------
 
@@ -1792,8 +2369,8 @@ class TuiApp:
 
     def print_totals(self) -> None:
         """Cost-reporting requirement: full-session totals on exit."""
-        stats = session_stats(self._store, self._session)
+        input_tokens, output_tokens, cost, incomplete = self.current_session_usage()
         self._feed.info(
-            f"Session {self._session.name}: tokens {stats.input_tokens} in / "
-            f"{stats.output_tokens} out · cost ${stats.cost_usd:.4f}"
+            f"Session {self._session.name}: tokens {input_tokens} in / "
+            f"{output_tokens} out · cost ${cost:.4f}" + (" incomplete" if incomplete else "")
         )

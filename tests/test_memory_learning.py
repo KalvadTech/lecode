@@ -714,7 +714,7 @@ async def test_runtime_memory_bound_includes_scratchpad_and_only_whole_facts(run
     ctx.extras["memory"].write_long_term("human-é " * 2000)
     ctx.extras["memory"].write_scratchpad("scratch-é " * 2000)
     prompt = refresh_system_prompt(runtime)
-    memory = prompt.split("## Memory", 1)[1]
+    memory = prompt.split("## Memory", 1)[1].split("Available subagents for task", 1)[0]
     assert len(("## Memory" + memory).encode()) <= 1600
     assert "human-é" in memory and "scratch-é" in memory
     assert PREFERENCE in memory

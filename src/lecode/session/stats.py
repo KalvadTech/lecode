@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from lecode.providers.catalog import Catalog, ModelNotFoundError
+from lecode.providers.catalog import AmbiguousModelError, Catalog, ModelNotFoundError
 from lecode.session.model import EventRecord, MessageRecord, TombstoneRecord
 from lecode.session.storage import Session, SessionStore
 
@@ -27,6 +27,8 @@ class Stats:
     last_active: str | None
     tombstone_count: int
     unknown_usage_calls: int = 0
+    #: True when any counted model call has missing usage or unknown cost.
+    usage_incomplete: bool = False
 
 
 def _usage_tokens(usage: dict) -> tuple[int, int]:
@@ -46,43 +48,62 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
     output_tokens = 0
     cost_usd = 0.0
     unknown_usage_calls = 0
+    usage_incomplete = False
 
     for record in messages:
         role_counts[record.role] = role_counts.get(record.role, 0) + 1
         usage = record.usage or {}
+        usage_incomplete |= bool(usage.get("incomplete")) or (
+            record.role == "assistant" and not usage
+        )
         in_tok, out_tok = _usage_tokens(usage)
         input_tokens += in_tok
         output_tokens += out_tok
         if usage.get("cost_usd") is not None:
             cost_usd += float(usage["cost_usd"])
-        elif (in_tok or out_tok) and session.meta.model:
+        elif usage and (record.role == "assistant" or in_tok or out_tok):
+            if not session.meta.model:
+                usage_incomplete = True
+                continue
             if catalog is None:
                 catalog = Catalog.default()
             try:
                 pricing = catalog.get(session.meta.model).pricing
-            except ModelNotFoundError:
+            except (ModelNotFoundError, AmbiguousModelError):
+                usage_incomplete = True
                 continue
             cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1_000_000
 
-    # Pierre reviews carry their own usage on the event record.
+    # Auxiliary model calls and worker dispatches carry their usage on events.
     for record in records:
-        if isinstance(record, EventRecord) and record.kind in {"pierre", "compact", "memory_usage"}:
+        if not isinstance(record, EventRecord):
+            continue
+        if record.kind in {"pierre", "compact", "memory_usage"}:
+            usage = record.data.get("usage") or {}
             if record.data.get("usage") is None:
                 unknown_usage_calls += 1
-            usage = record.data.get("usage") or {}
-            in_tok, out_tok = _usage_tokens(usage)
-            input_tokens += in_tok
-            output_tokens += out_tok
-            if usage.get("cost_usd") is not None:
-                cost_usd += float(usage["cost_usd"])
-            elif (in_tok or out_tok) and record.data.get("model"):
-                if catalog is None:
-                    catalog = Catalog.default()
-                try:
-                    pricing = catalog.get(record.data["model"]).pricing
-                except ModelNotFoundError:
-                    continue
-                cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
+                usage_incomplete = True
+        elif record.kind == "worker_usage":
+            usage = record.data.get("usage") or record.data
+        else:
+            continue
+        usage_incomplete |= bool(record.data.get("incomplete") or usage.get("incomplete"))
+        in_tok, out_tok = _usage_tokens(usage)
+        input_tokens += in_tok
+        output_tokens += out_tok
+        if usage.get("cost_usd") is not None:
+            cost_usd += float(usage["cost_usd"])
+        elif (in_tok or out_tok) and record.data.get("model"):
+            if catalog is None:
+                catalog = Catalog.default()
+            try:
+                pricing = catalog.get(record.data["model"]).pricing
+            except (ModelNotFoundError, AmbiguousModelError):
+                usage_incomplete = True
+                continue
+            cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
+        else:
+            usage_incomplete = True
 
     timestamps = [
         r.ts for r in records if isinstance(r, MessageRecord | EventRecord | TombstoneRecord)
@@ -107,4 +128,5 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
         last_active=max(timestamps) if timestamps else None,
         tombstone_count=sum(isinstance(r, TombstoneRecord) for r in records),
         unknown_usage_calls=unknown_usage_calls,
+        usage_incomplete=usage_incomplete,
     )
