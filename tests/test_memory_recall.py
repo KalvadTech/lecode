@@ -287,7 +287,9 @@ async def test_child_recalls_parent_source_without_persisting_child_history(tmp_
     )
     assert json.loads(response["content"])["status"] == "valid"
     assert "parent source" in response["content"]
-    assert sessions.read_records(session) == before
+    records = sessions.read_records(session)
+    assert records[:-1] == before
+    assert records[-1].kind == "agent_run"
     assert runtime.ctx.extras == extras
 
 

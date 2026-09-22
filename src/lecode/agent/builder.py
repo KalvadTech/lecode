@@ -64,7 +64,7 @@ def refresh_system_prompt(runtime: Runtime) -> str:
     agent = runtime.agents.get(runtime.agent_name) if runtime.agent_name else None
     if agent is not None and agent.body:
         extra_parts.append(agent.body)
-    if "task" in runtime.registry.names():
+    if runtime.ctx.config.llm.system_prompt.custom is None and "task" in runtime.registry.names():
         extra_parts.append(
             "Available subagents for task(agent=..., prompt=...):\n"
             + "\n".join(f"- {a.name}: {a.description}" for a in runtime.agents.subagents())

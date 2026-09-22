@@ -821,26 +821,38 @@ class SessionStore:
     # -- compaction ----------------------------------------------------------
 
     def source_version(
-        self, session: Session, *, sync: bool = False, include_derivations: bool = True
+        self,
+        session: Session,
+        *,
+        sync: bool = False,
+        include_derivations: bool = True,
+        include_worker_events: bool = True,
     ) -> tuple | None:
-        """Identity + all source/event bytes, without a lock held across model calls."""
+        """Identity + source bytes; worker control events may be excluded at model boundaries."""
         if not session.path.is_file():
             return None
         with session.path.open("rb") as source:
             if sync:
                 os.fsync(source.fileno())
             stat = os.fstat(source.fileno())
-            if include_derivations:
+            if include_derivations and include_worker_events:
                 digest = hashlib.file_digest(source, "sha256").hexdigest()
             else:
                 hasher = hashlib.sha256()
                 for line in source:
                     record = parse_record(line.decode("utf-8"))
-                    if isinstance(record, EventRecord) and record.kind in {
-                        "compact",
-                        "memory_usage",
-                    }:
-                        continue
+                    if isinstance(record, EventRecord):
+                        if not include_derivations and record.kind in {"compact", "memory_usage"}:
+                            continue
+                        if not include_worker_events and record.kind in {
+                            "worker",
+                            "worker_inbox",
+                            "worker_notification",
+                            "worker_notification_ack",
+                            "worker_usage",
+                            "worker_usage_checkpoint",
+                        }:
+                            continue
                     hasher.update(line)
                 digest = hasher.hexdigest()
         return (

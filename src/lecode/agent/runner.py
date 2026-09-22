@@ -390,7 +390,7 @@ class AgentRunner:
                 self._request_generation = self._seen_generation
                 prompt_chars = _prompt_chars(history)
                 source_version = (
-                    self.store.source_version(self.session)
+                    self.store.source_version(self.session, include_worker_events=False)
                     if self.store is not None and self.session is not None
                     else None
                 )
@@ -410,7 +410,8 @@ class AgentRunner:
                 if (
                     self.store is not None
                     and self.session is not None
-                    and self.store.source_version(self.session) != source_version
+                    and self.store.source_version(self.session, include_worker_events=False)
+                    != source_version
                 ):
                     raise ContextPaused(
                         "Session sources changed during the request; response discarded."
@@ -659,7 +660,8 @@ class AgentRunner:
                 and self.session is not None
                 and (
                     source_version is None
-                    or self.store.source_version(self.session) != source_version
+                    or self.store.source_version(self.session, include_worker_events=False)
+                    != source_version
                 )
             ):
                 raise ContextPaused(

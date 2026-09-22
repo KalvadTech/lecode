@@ -665,3 +665,13 @@ def test_lock_holder_reports_pid_while_held(store):
     assert store.lock_holder(s.id) == os.getpid()
     lock.release()
     assert store.lock_holder(s.id) is None
+
+
+def test_worker_inbox_does_not_invalidate_model_sources(store, session):
+    version = store.source_version(session, include_worker_events=False)
+    store.append_event(session, "worker_inbox", {"id": "queued", "text": "next turn"})
+    assert store.source_version(session, include_worker_events=False) == version
+    assert store.source_version(session) != version
+
+    store.append_message(session, {"role": "user", "content": "changed source"})
+    assert store.source_version(session, include_worker_events=False) != version
