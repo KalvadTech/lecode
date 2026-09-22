@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.3.0](https://github.com/KalvadTech/lecode/compare/v0.2.0...v0.3.0) (2026-09-22)
+
+
+### Features
+
+* argument pickers for slash commands (/model, /resume, …) ([2419ec5](https://github.com/KalvadTech/lecode/commit/2419ec5e18c08f0e15c36c1fb17fcaec098de698))
+* import MCP servers from opencode in the setup wizard ([a8687c9](https://github.com/KalvadTech/lecode/commit/a8687c9453121a77b6d1bf8c0b5a6f88cedf4aaa))
+* import MCP servers from opencode in the setup wizard ([d3222df](https://github.com/KalvadTech/lecode/commit/d3222dfc1bc7ae34abe2bfb088b317928c727c1b))
+* integrate with herdr ([5daa144](https://github.com/KalvadTech/lecode/commit/5daa1441f542c375c19672505805d78e0c049c0c))
+* integrate with herdr ([5c1a958](https://github.com/KalvadTech/lecode/commit/5c1a95833e705ecd5b102ad13562129f7eac2559))
+* pick ask_user answers with the arrow-key picker ([f111459](https://github.com/KalvadTech/lecode/commit/f111459e73e9979eb8b3d9941520f181f9b1dc83))
+* pick ask_user answers with the arrow-key picker ([0fb73ad](https://github.com/KalvadTech/lecode/commit/0fb73ad25d8af0eddc55547ba2cff7730706f158))
+* render markdown after stream end ([55ecdfd](https://github.com/KalvadTech/lecode/commit/55ecdfd88ca4840ce2511fa115b3f536e0262e61))
+* render markdown after stream end ([068cc98](https://github.com/KalvadTech/lecode/commit/068cc98c9e5e2c98248e7041474f293c0aaf320f))
+* show average token speed in statusline ([f9b40a6](https://github.com/KalvadTech/lecode/commit/f9b40a634721dbafbf9e8f978c474089cbdb404e))
+* show average token speed in statusline ([aade96e](https://github.com/KalvadTech/lecode/commit/aade96ee9bbf32d74f4c4301e6cab7e6575c7fee))
+
+
+### Bug Fixes
+
+* setup not working with custom provider ([f328f4a](https://github.com/KalvadTech/lecode/commit/f328f4ab85acc63175c4e0a62979f09b9ba34634))
+* setup not working with custom provider ([c851e7c](https://github.com/KalvadTech/lecode/commit/c851e7c59b8ae8ba646714f67b9bc31abf294721))
+
+
+### Documentation
+
+* add AGENTS.md repository guidance ([5749e96](https://github.com/KalvadTech/lecode/commit/5749e96e5e82383af8a8b8963ce6ce2121dc802f))
+* add AGENTS.md repository guidance ([57060c2](https://github.com/KalvadTech/lecode/commit/57060c21f09595a547ed4f3c60c528d2f37c99df))
+* state Python 3.13 minimum in AGENTS.md ([d2129dd](https://github.com/KalvadTech/lecode/commit/d2129dd7d911eeaf89be808d49b663ef8e2aec25))
+
 ## [0.2.0](https://github.com/KalvadTech/lecode/compare/v0.1.0...v0.2.0) (2026-09-08)
 
 
