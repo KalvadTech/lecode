@@ -6,6 +6,7 @@ import io
 
 import pytest
 from rich.console import Console
+from rich.text import Text
 
 from lecode.agent.builder import build_runtime
 from lecode.config.loader import LoadedConfig, config_dir, load_config
@@ -309,11 +310,11 @@ def test_render_prints_ascii_banner_and_byline(env):
     console = Console(file=out, force_terminal=False, no_color=True, width=100)
     render_loading_screen(console, THEME, session_name="demo", steps=steps, cwd=env)
     text = out.getvalue()
-    # figlet "standard" banner for "lecode", byline below it
-    assert "| | ___  ___ ___   __| | ___" in text
-    assert "|_|\\___|\\___\\___/ \\__,_|\\___|" in text
-    assert "by wowi42" in text
-    assert text.index("by wowi42") < text.index("session")  # banner above the panel
+    # pyfiglet "ansi_shadow" banner for "lecode", byline below it
+    assert "██╗" in text
+    assert "╚══════╝╚══════╝" in text
+    assert "by Kalvad" in text
+    assert text.index("by Kalvad") < text.index("session")  # banner above the panel
 
 
 def test_show_loading_screen_never_raises(env, monkeypatch):
@@ -352,10 +353,10 @@ def test_interactive_startup_prints_loading_screen(env, monkeypatch, capsys):
     assert code == 0
     out = capsys.readouterr().out
     # ASCII banner up front, then progressive step lines
-    assert "| | ___  ___ ___   __| | ___" in out
-    assert "by wowi42" in out
+    assert "██╗" in out
+    assert "by Kalvad" in out
     assert "config" in out and "provider" in out and "session" in out
-    assert out.index("| | ___") < out.index("provider")  # banner before the steps
+    assert out.index("██╗") < out.index("provider")  # banner before the steps
 
 
 async def _fake_name_prompt(store):
@@ -431,8 +432,36 @@ def test_progressive_banner_prints_immediately():
     console, out = _record_console()
     LoadingProgress(console).banner()
     text = out.getvalue()
-    assert "| | ___  ___ ___   __| | ___" in text
-    assert "by wowi42" in text
+    assert "██╗" in text
+    assert "by Kalvad" in text
+
+
+def test_banner_shows_version_splash_and_gradient():
+    from lecode import __version__
+    from lecode.tui.loading import print_banner
+
+    out = io.StringIO()
+    console = Console(
+        file=out, force_terminal=True, color_system="truecolor", no_color=False, width=100
+    )
+    print_banner(console, THEME, splash="test splash")
+    raw = out.getvalue()
+    text = Text.from_ansi(raw).plain
+    assert f"v{__version__}" in text
+    assert "by Kalvad" in text
+    assert "test splash" in text
+    # the banner is colored per column — leftmost glyph is the deep-purple endpoint
+    assert "38;2;124;58;237" in raw  # #7c3aed as an ANSI truecolor escape
+
+
+def test_banner_random_splash_is_one_of_the_known_ones():
+    from lecode.tui.loading import _SPLASHES, print_banner
+
+    out = io.StringIO()
+    console = Console(file=out, force_terminal=False, no_color=True, width=100)
+    print_banner(console, THEME)
+    text = out.getvalue()
+    assert any(splash in text for splash in _SPLASHES)
 
 
 def test_progressive_steps_append_in_order():
@@ -449,7 +478,7 @@ def test_progressive_steps_append_in_order():
     assert "… models" in text  # pending line shown while the fetch runs
     assert text.index("… models") < text.index("427 fetched")
     # banner comes before any step
-    assert text.index("| | ___") < text.index("✓ config")
+    assert text.index("██╗") < text.index("✓ config")
 
 
 def test_progressive_step_multiline_detail_indented():
