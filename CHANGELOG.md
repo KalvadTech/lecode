@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.3.0](https://github.com/KalvadTech/lecode/compare/v0.2.0...v0.3.0) (2026-09-25)
+
+
+### Features
+
+* add durable memory and natural preference learning ([320e0ff](https://github.com/KalvadTech/lecode/commit/320e0fff7b47195fd851ea3acbd30b3aa01092c7))
+* add persistent worker subagents ([248bb2a](https://github.com/KalvadTech/lecode/commit/248bb2a8347bdd96d9756bf7a20f1f16ac232992))
+* add persistent worker supervision ([137f81d](https://github.com/KalvadTech/lecode/commit/137f81d6a9054feae7ac94e7399459ede5b881bd))
+* add source-linked hybrid memory and safe forgetting ([c204c02](https://github.com/KalvadTech/lecode/commit/c204c02e8d5fe9f3e4f90eb8cd8dee53ff4babe9))
+* argument pickers for slash commands (/model, /resume, …) ([2419ec5](https://github.com/KalvadTech/lecode/commit/2419ec5e18c08f0e15c36c1fb17fcaec098de698))
+* complete persistent worker supervision ([d48eacc](https://github.com/KalvadTech/lecode/commit/d48eacc64879fcc75487102d218c79fcac526500))
+* import MCP servers from opencode in the setup wizard ([a8687c9](https://github.com/KalvadTech/lecode/commit/a8687c9453121a77b6d1bf8c0b5a6f88cedf4aaa))
+* import MCP servers from opencode in the setup wizard ([d3222df](https://github.com/KalvadTech/lecode/commit/d3222dfc1bc7ae34abe2bfb088b317928c727c1b))
+* integrate with herdr ([5daa144](https://github.com/KalvadTech/lecode/commit/5daa1441f542c375c19672505805d78e0c049c0c))
+* integrate with herdr ([5c1a958](https://github.com/KalvadTech/lecode/commit/5c1a95833e705ecd5b102ad13562129f7eac2559))
+* live agent roster, /runs detail panel, concise tool lines ([49036f0](https://github.com/KalvadTech/lecode/commit/49036f05bc081e818b0190141b462850363acfc5))
+* pick ask_user answers with the arrow-key picker ([f111459](https://github.com/KalvadTech/lecode/commit/f111459e73e9979eb8b3d9941520f181f9b1dc83))
+* pick ask_user answers with the arrow-key picker ([0fb73ad](https://github.com/KalvadTech/lecode/commit/0fb73ad25d8af0eddc55547ba2cff7730706f158))
+* render markdown after stream end ([55ecdfd](https://github.com/KalvadTech/lecode/commit/55ecdfd88ca4840ce2511fa115b3f536e0262e61))
+* render markdown after stream end ([068cc98](https://github.com/KalvadTech/lecode/commit/068cc98c9e5e2c98248e7041474f293c0aaf320f))
+* show average token speed in statusline ([f9b40a6](https://github.com/KalvadTech/lecode/commit/f9b40a634721dbafbf9e8f978c474089cbdb404e))
+* show average token speed in statusline ([aade96e](https://github.com/KalvadTech/lecode/commit/aade96ee9bbf32d74f4c4301e6cab7e6575c7fee))
+* tag subagent runs with identity and persist bounded activity ([e36a36f](https://github.com/KalvadTech/lecode/commit/e36a36f4846b9820b0cafa1ee0bdbb50c5f31ab8))
+
+
+### Bug Fixes
+
+* close worker review gaps ([9de3559](https://github.com/KalvadTech/lecode/commit/9de35591a8735a7801557651ddc84c39b71b2a1e))
+* learn natural preferences and expose extraction diagnostics ([29a9d12](https://github.com/KalvadTech/lecode/commit/29a9d12335375850b1d258555825f578089c155a))
+* make compaction omission-free and refresh the live system prompt ([5c6912e](https://github.com/KalvadTech/lecode/commit/5c6912e48042c396d8f53377b88cd3389acdfdff))
+* make worker submission idempotent ([6b5ca03](https://github.com/KalvadTech/lecode/commit/6b5ca03b5cec90ef2d089bd274f2785794a06d95))
+* preserve model calls across worker updates ([4739ae6](https://github.com/KalvadTech/lecode/commit/4739ae6ca940ce0c0e69bf7601c1d4e759aab287))
+* render the roster window as ANSI, not Rich Text ([aba7128](https://github.com/KalvadTech/lecode/commit/aba712817088da7df427bfe0c175fee29c746e5e))
+* retry concurrent WAL initialization for facts ([9810693](https://github.com/KalvadTech/lecode/commit/9810693468696107a59cbb3288ce52728706f87f))
+* setup not working with custom provider ([f328f4a](https://github.com/KalvadTech/lecode/commit/f328f4ab85acc63175c4e0a62979f09b9ba34634))
+* setup not working with custom provider ([c851e7c](https://github.com/KalvadTech/lecode/commit/c851e7c59b8ae8ba646714f67b9bc31abf294721))
+
+
+### Documentation
+
+* add AGENTS.md repository guidance ([5749e96](https://github.com/KalvadTech/lecode/commit/5749e96e5e82383af8a8b8963ce6ce2121dc802f))
+* add AGENTS.md repository guidance ([57060c2](https://github.com/KalvadTech/lecode/commit/57060c21f09595a547ed4f3c60c528d2f37c99df))
+* add memory comparison and upgrade plan ([04a6ef1](https://github.com/KalvadTech/lecode/commit/04a6ef127ca1a99a6324edf664ebb9bcb333e5e3))
+* focus memory documentation on lecode ([5a09ab8](https://github.com/KalvadTech/lecode/commit/5a09ab8ef5c0f8b1c188c01036fd6acd6c268a78))
+* state Python 3.13 minimum in AGENTS.md ([d2129dd](https://github.com/KalvadTech/lecode/commit/d2129dd7d911eeaf89be808d49b663ef8e2aec25))
+
 ## [0.2.0](https://github.com/KalvadTech/lecode/compare/v0.1.0...v0.2.0) (2026-09-08)
 
 
