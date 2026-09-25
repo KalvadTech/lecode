@@ -1278,6 +1278,55 @@ async def test_pipe_shift_enter_and_ctrl_j_insert_newline(tmp_path, monkeypatch)
     assert contents[1] == "a\nb"
 
 
+def test_set_key_modes_skips_non_tty_stdout(monkeypatch):
+    """No mode sequences when stdout is piped (they'd corrupt the stream)."""
+    from lecode.tui.app import _ENABLE_KEY_MODES, _set_key_modes
+
+    fake = StringIO()  # isatty() is False
+    monkeypatch.setattr("sys.stdout", fake)
+    monkeypatch.delenv("TERM", raising=False)
+    _set_key_modes(_ENABLE_KEY_MODES)
+    assert fake.getvalue() == ""
+
+
+def test_set_key_modes_skips_dumb_terminal(tmp_path, monkeypatch):
+    """A tty with TERM=dumb (e.g. an Emacs shell) gets no escape sequences."""
+    from lecode.tui.app import _ENABLE_KEY_MODES, _set_key_modes
+
+    class TtyStringIO(StringIO):
+        def isatty(self):
+            return True
+
+    fake = TtyStringIO()
+    monkeypatch.setattr("sys.stdout", fake)
+    monkeypatch.setenv("TERM", "dumb")
+    _set_key_modes(_ENABLE_KEY_MODES)
+    assert fake.getvalue() == ""
+
+
+async def test_run_enables_and_restores_key_modification_modes(tmp_path, monkeypatch):
+    """On a real terminal the TUI pushes the kitty/modifyOtherKeys modes that
+    make Shift+Enter arrive as a distinct sequence, and restores on exit."""
+    from lecode.tui.app import _DISABLE_KEY_MODES, _ENABLE_KEY_MODES
+
+    class TtyStringIO(StringIO):
+        def isatty(self):
+            return True
+
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    fake = TtyStringIO()
+    monkeypatch.setattr("sys.stdout", fake)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    with create_pipe_input() as inp:
+        task = asyncio.ensure_future(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: _ENABLE_KEY_MODES in fake.getvalue())
+        inp.send_text("/quit\r")
+        assert await task == 0
+    out = fake.getvalue()
+    assert _DISABLE_KEY_MODES in out
+    assert out.index(_ENABLE_KEY_MODES) < out.index(_DISABLE_KEY_MODES)
+
+
 async def test_pipe_draft_persisted_on_eof_exit(tmp_path, monkeypatch):
     """Unsubmitted buffer text survives a restart as a draft."""
     app, _, _ = make_app(tmp_path, monkeypatch, [])
