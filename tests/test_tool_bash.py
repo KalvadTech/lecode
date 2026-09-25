@@ -23,6 +23,22 @@ async def test_echo(tool_ctx):
     assert not proc.timed_out
 
 
+async def test_uses_detected_user_shell(tool_ctx, monkeypatch):
+    """Commands run through $SHELL -c — here /bin/echo, which prints its argv."""
+    monkeypatch.setenv("SHELL", "/bin/echo")
+    result = await bash.make_tool().run({"command": "hello-shell"}, tool_ctx)
+    assert result.content.startswith("-c hello-shell")
+
+
+def test_description_names_the_detected_shell(tmp_path, monkeypatch):
+    """The model sees the real shell so it can adapt its syntax."""
+    shell = tmp_path / "mysh"
+    shell.write_text("#!/bin/sh\n")
+    shell.chmod(shell.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("SHELL", str(shell))
+    assert f"{shell} -c" in bash.make_tool().description
+
+
 async def test_nonzero_exit_reported(tool_ctx):
     result = await bash.make_tool().run({"command": "exit 7"}, tool_ctx)
     assert result.is_error

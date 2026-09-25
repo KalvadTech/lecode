@@ -3,7 +3,8 @@
 Commands are first passed through ``rtk rewrite``, which swaps supported
 commands for their token-optimized rtk proxies (``git status`` → ``rtk git
 status``); the original command runs unchanged when rtk has no equivalent
-(fail-open). Runs via ``/bin/sh -c`` with stderr merged into stdout. Output
+(fail-open). Runs via the user's shell (``$SHELL``, falling back to
+``/bin/sh``) with ``-c``, stderr merged into stdout. Output
 over the cap is truncated head/tail and the full text is saved to
 ``<config_dir>/overflow/<uuid>.log`` with a pointer line.
 """
@@ -21,6 +22,7 @@ from typing import Any
 from lecode.agent.tools.base import Tool, ToolContext, ToolResult
 from lecode.extras.proc import ProcResult
 from lecode.extras.rtk import rewrite_command
+from lecode.extras.shell import user_shell
 
 DEFAULT_TIMEOUT_S = 120.0
 MAX_TIMEOUT_S = 600.0
@@ -28,7 +30,7 @@ MAX_OUTPUT_BYTES = 60_000
 
 
 def _kill_tree(proc: asyncio.subprocess.Process) -> None:
-    """Kill the process *group* — ``sh -c`` children must not survive."""
+    """Kill the process *group* — shell children must not survive."""
     import os
     import signal
 
@@ -46,18 +48,21 @@ async def _run_shell(
     idle_timeout: float,
     max_bytes: int,
     *,
+    shell: str | None = None,
     on_chunk: Callable[[bytes], None] | None = None,
     proc_slot: dict[str, Any] | None = None,
 ) -> tuple[bytes, int, bool, bool]:
     """Run a shell command; returns (output, exit_code, timed_out, idle_killed).
 
-    ``on_chunk`` (background tasks) receives each chunk as it arrives; the
-    retained buffer is then capped at ``max_bytes`` (the tail), since the
-    caller streams the full output elsewhere. ``proc_slot`` receives the
-    spawned process under ``"proc"`` so the caller can signal it.
+    ``shell`` overrides the executable; the default is the user's shell
+    (:func:`lecode.extras.shell.user_shell`). ``on_chunk`` (background tasks)
+    receives each chunk as it arrives; the retained buffer is then capped at
+    ``max_bytes`` (the tail), since the caller streams the full output
+    elsewhere. ``proc_slot`` receives the spawned process under ``"proc"`` so
+    the caller can signal it.
     """
     proc = await asyncio.create_subprocess_exec(
-        "/bin/sh",
+        shell or user_shell(),
         "-c",
         command,
         cwd=cwd,
@@ -120,11 +125,12 @@ def _save_overflow(text: str) -> Path:
 
 
 class BashTool(Tool):
-    def __init__(self) -> None:
+    def __init__(self, *, shell: str | None = None) -> None:
+        self._shell = shell or user_shell()
         super().__init__(
             name="bash",
             description=(
-                "Run a shell command (/bin/sh -c). Supported commands are "
+                f"Run a shell command ({self._shell} -c). Supported commands are "
                 "rewritten to token-optimized rtk proxies when available; "
                 "output is truncated head/tail (full output saved to a file)."
             ),
@@ -186,7 +192,7 @@ class BashTool(Tool):
             return ToolResult(f"background task {record.id} started: {command}")
         try:
             output, exit_code, timed_out, idle_killed = await _run_shell(
-                command, ctx.cwd, timeout, idle, MAX_OUTPUT_BYTES
+                command, ctx.cwd, timeout, idle, MAX_OUTPUT_BYTES, shell=self._shell
             )
         except OSError as e:
             return ToolResult(f"error: {e}", is_error=True)
