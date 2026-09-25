@@ -173,7 +173,14 @@ class BashTool(Tool):
                     "error: background tasks are unavailable in this context", is_error=True
                 )
             try:
-                record = start_shell_task(manager, command, ctx.cwd, timeout, idle)
+                record = start_shell_task(
+                    manager,
+                    command,
+                    ctx.cwd,
+                    timeout,
+                    idle,
+                    memory_generation=ctx.memory_generation,
+                )
             except BackgroundError as e:
                 return ToolResult(f"error: {e}", is_error=True)
             return ToolResult(f"background task {record.id} started: {command}")

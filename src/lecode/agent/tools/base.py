@@ -65,6 +65,14 @@ class ToolContext:
     extras: dict[str, Any] = field(default_factory=dict)  # memory/MCP/subagent seams
     #: Live model catalog (modality checks, pricing); ``None`` → empty, fail-open.
     catalog: Any | None = None  # lecode.providers.catalog.Catalog
+    #: Durable project identity, independent of the active checkout/cwd.
+    project_root: Path | None = None
+    #: Transient checkout/worktree label for source context.
+    scope: str | None = None
+    #: Read-only source recall for children without session persistence.
+    recall_context: Any | None = None
+    #: Epoch of the provider request which produced this tool invocation.
+    memory_generation: int | None = None
 
 
 def grant_always(ctx: ToolContext, tool: str, pattern: str) -> None:

@@ -1,7 +1,7 @@
 """Subagent dispatch: run a child agent loop and hand back its final text.
 
-A subagent gets a lean tool registry (everything the parent has except
-``task`` — no recursion), a permission
+A subagent gets a lean tool registry (no recursion, user interaction, or
+durable memory writers), a permission
 checker narrowed by the agent's overlay, fresh todos, and its own
 conversation. The parent's provider is reused (``ctx.extras["provider"]``,
 installed by the runner); progress is reported through the
@@ -28,6 +28,8 @@ from lecode.agent.prompts import build_system_prompt
 from lecode.agent.runner import AgentRunner, ToolCall, ToolResult
 from lecode.agent.tools.base import ToolContext, ToolRegistry
 from lecode.hooks import SUBAGENT_END, SUBAGENT_START, build_envelope, dispatch_event
+from lecode.memory.recall import RecallContext
+from lecode.memory.store import resolve_project_root
 from lecode.providers.openai_compat import ProviderError
 
 if TYPE_CHECKING:
@@ -41,8 +43,10 @@ SUBAGENT_TIMEOUT_S = 300.0
 #: Cap on the final text handed back to the parent (chars).
 SUBAGENT_RESPONSE_CAP = 32 * 1024
 
-#: Tools never handed to a subagent (no recursion, no user interaction).
-CHILD_EXCLUDED_TOOLS = frozenset({"task", "ask_user"})
+#: Children read durable memory; only the parent can modify it.
+CHILD_EXCLUDED_TOOLS = frozenset(
+    {"task", "ask_user", "memory_write", "memory_edit", "memory_correct", "memory_forget"}
+)
 
 #: ``ctx.extras`` keys the subagent machinery reads.
 PROVIDER_EXTRA = "provider"
@@ -93,7 +97,7 @@ class SubagentOutcome:
 
 
 def child_registry(parent: ToolRegistry) -> ToolRegistry:
-    """The parent's tools minus recursion (hook wrappers ride along)."""
+    """The parent's tools minus child exclusions (hook wrappers ride along)."""
     tools = [parent.get(name) for name in parent.names() if name not in CHILD_EXCLUDED_TOOLS]
     return ToolRegistry([tool for tool in tools if tool is not None])
 
@@ -211,6 +215,16 @@ async def run_subagent(
         permission_checker=checker,
         session=None,
         session_store=None,
+        recall_context=ctx.recall_context
+        or (
+            RecallContext(
+                ctx.session_store,
+                ctx.extras.get("facts"),
+                ctx.project_root or resolve_project_root(ctx.cwd),
+            )
+            if ctx.session_store is not None
+            else None
+        ),
         todos=[],
         extras=extras,
         question_callback=None,  # children decide themselves; only the parent asks
@@ -259,7 +273,9 @@ async def run_subagent(
     cancelled = False
     try:
         async with asyncio.timeout(SUBAGENT_TIMEOUT_S):
-            result = await child.run(messages, on_event=forward)
+            result = await child.run(
+                messages, on_event=forward, expected_generation=ctx.memory_generation
+            )
     except asyncio.CancelledError:
         cancelled = True
         raise

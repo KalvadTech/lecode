@@ -42,6 +42,7 @@ from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Frame, TextArea
 from rich.console import Console
 
+from lecode.agent.builder import refresh_system_prompt
 from lecode.agent.runner import (
     AgentRunner,
     CompactionFinished,
@@ -273,6 +274,7 @@ class TuiApp:
             steer_queue=self._steer_queue,
             input_queue=self._input_queue,
             catalog=catalog,
+            refresh_prompt=lambda: refresh_system_prompt(self._runtime),
         )
         # Subagent progress (the task tool and direct @agent turns) renders
         # inline through the feed; installed here so tests driving _submit
@@ -498,6 +500,7 @@ class TuiApp:
         if self._runtime.hooks is not None:
             self._runtime.hooks.session = session
         self._agent_name = session.meta.agent or "build"
+        self._runtime.agent_name = self._agent_name
         checker = self._base_checker
         agent = self._runtime.agents.get(self._agent_name)
         if agent is not None and agent.overlay is not None:
@@ -530,7 +533,12 @@ class TuiApp:
         return True
 
     def _reload_history(self) -> None:
-        """Rebuild the in-memory history from the session file."""
+        """Rebuild the in-memory history from the session file.
+
+        The system prompt is recomputed first, so memory writes and context
+        edits made since the last build are visible from the next turn on.
+        """
+        refresh_system_prompt(self._runtime)
         self._history = [{"role": "system", "content": self._runtime.system_prompt}]
         self._history += self._store.load_for_model(self._session)
         # Restore the statusline's context/cost/token lines from history.
@@ -715,6 +723,11 @@ class TuiApp:
         self._cwd = path
         ctx = self._runtime.ctx
         ctx.cwd = path
+        ctx.scope = (
+            self._worktree.branch
+            if self._worktree is not None and path.resolve() == self._worktree.path.resolve()
+            else str(path.resolve())
+        )
         base = PermissionChecker(
             self._config,
             session_perms=ctx.session_perms,
@@ -1374,6 +1387,7 @@ class TuiApp:
             mcp = self._runtime.ctx.extras.get(MCP_EXTRA)
             if mcp is not None:
                 await mcp.shutdown()
+            self._runtime.close()
             if self._input_area is not None and self._input_area.text.strip():
                 self._input_history.save_draft(self._input_area.text)
             self._app = None
@@ -1381,7 +1395,10 @@ class TuiApp:
                 self._session_lock.release()
                 self._session_lock = None
             herdr.release()
-        self.print_totals()
+        try:
+            self.print_totals()
+        finally:
+            self._runtime.close()  # totals can reopen the session store's lazy fact reader
         return EXIT_OK
 
     async def _attach_mcp(self) -> None:
@@ -2146,6 +2163,7 @@ class TuiApp:
                 self._runtime.registry,
                 self._runtime.ctx,
                 catalog=self.catalog,
+                refresh_prompt=lambda: refresh_system_prompt(self._runtime),
             )
 
         def on_phase(phase: str, output: str) -> None:
@@ -2339,6 +2357,7 @@ class TuiApp:
     def cycle_agent(self) -> str:
         """Tab on empty input: switch to the next primary agent."""
         self._agent_name = self._runtime.agents.cycle(self._agent_name)
+        self._runtime.agent_name = self._agent_name
         agent = self._runtime.agents.get(self._agent_name)
         checker = self._base_checker
         if agent is not None and agent.overlay is not None:

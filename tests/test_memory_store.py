@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
+from tests.test_worktree import git_sync, make_repo_sync
 
 from lecode.config.models import Config
 from lecode.memory.store import (
@@ -41,6 +42,136 @@ def test_memory_root_honors_config_dir(tmp_path, monkeypatch):
 
 
 # -- long-term memory ------------------------------------------------------------
+
+
+def test_project_root_shared_by_checkout_nested_cwd_and_linked_worktree(tmp_path):
+    from lecode.memory.store import resolve_project_root
+
+    repo = make_repo_sync(tmp_path / "main checkout")
+    nested = repo / "src" / "nested"
+    nested.mkdir(parents=True)
+    linked = tmp_path / "linked checkout"
+    git_sync(repo, "worktree", "add", "-b", "feature", str(linked))
+    (linked / "nested").mkdir()
+    for cwd in (repo, nested, linked, linked / "nested"):
+        assert resolve_project_root(cwd) == repo
+        assert resolve_project_root(resolve_project_root(cwd)) == repo
+    assert resolve_project_root(repo / ".git") == repo
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    assert resolve_project_root(outside / ".." / "outside") == outside
+
+
+def test_submodule_and_relative_git_metadata_keep_project_identity(tmp_path):
+    import os
+
+    from lecode.memory.store import resolve_project_root
+
+    parent = make_repo_sync(tmp_path / "parent")
+    source = make_repo_sync(tmp_path / "source")
+    git_sync(parent, "-c", "protocol.file.allow=always", "submodule", "add", str(source), "sub")
+    sub = parent / "sub"
+    (sub / "nested").mkdir()
+    linked = tmp_path / "sub linked"
+    git_sync(sub, "worktree", "add", "-b", "feature", str(linked))
+    (linked / "nested").mkdir()
+    identity = resolve_project_root(sub)
+    assert identity != resolve_project_root(parent)
+    for cwd in (sub, sub / "nested", linked, linked / "nested"):
+        assert resolve_project_root(cwd) == identity
+        assert resolve_project_root(resolve_project_root(cwd)) == identity
+
+    main_linked = tmp_path / "main linked"
+    git_sync(parent, "worktree", "add", "-b", "feature", str(main_linked))
+    marker = main_linked / ".git"
+    gitdir = marker.read_text().strip().removeprefix("gitdir: ")
+    marker.write_text(f"gitdir: {os.path.relpath(gitdir, main_linked)}\n")
+    assert resolve_project_root(main_linked) == parent
+
+
+def test_separate_gitdir_shares_identity_without_running_git(tmp_path, monkeypatch):
+    import os
+    import subprocess
+
+    from lecode.memory.store import resolve_project_root
+
+    repo = make_repo_sync(tmp_path / "checkout")
+    git_sync(repo, "init", "--separate-git-dir", str(tmp_path / "git storage"))
+    linked = tmp_path / "linked"
+    git_sync(repo, "worktree", "add", "-b", "feature", str(linked))
+    for checkout in (repo, linked):
+        (checkout / "nested").mkdir()
+        marker = checkout / ".git"
+        gitdir = marker.read_text().strip().removeprefix("gitdir: ")
+        marker.write_text(f"gitdir: {os.path.relpath(gitdir, checkout)}\n")
+
+    def forbid_process(*args, **kwargs):
+        raise AssertionError("project identity must use metadata, not a Git process")
+
+    monkeypatch.setattr(subprocess, "run", forbid_process)
+    identity = resolve_project_root(repo)
+    for cwd in (repo, repo / "nested", linked, linked / "nested"):
+        assert resolve_project_root(cwd) == identity
+        assert resolve_project_root(resolve_project_root(cwd)) == identity
+
+
+def test_legacy_migration_copies_markdown_only_once_without_merging(tmp_path):
+    from lecode.memory.facts import FactStore
+    from lecode.memory.store import migrate_legacy_memory
+
+    repo = make_repo_sync(tmp_path / "repo")
+    nested = repo / "nested"
+    nested.mkdir()
+    cfg = tmp_path / "cfg"
+    legacy = MemoryStore(memory_root(nested, cfg))
+    legacy.write_long_term("legacy")
+    legacy.write_note("note", "keep")
+    legacy.append_daily("daily", "2026-09-15")
+    legacy.write_scratchpad("scratch")
+    facts = FactStore(legacy.root / "facts.sqlite3")
+    facts.add("do not copy sqlite", source_id="s", source_seq=0)
+    facts.close()
+    canonical = MemoryStore(memory_root(repo, cfg))
+
+    migrate_legacy_memory(nested, repo, config_dir=cfg)
+
+    assert canonical.read_long_term() == "legacy\n"
+    assert canonical.read_note("note") == "keep\n"
+    assert "daily" in canonical.read_daily("2026-09-15")
+    assert canonical.read_scratchpad() == "scratch\n"
+    assert not (canonical.root / "facts.sqlite3").exists()
+    assert legacy.read_long_term() == "legacy\n"
+    canonical.write_long_term("canonical wins")
+    canonical.delete_note("note")
+    migrate_legacy_memory(nested, repo, config_dir=cfg)
+    assert canonical.read_long_term() == "canonical wins\n"
+    assert canonical.read_note("note") is None
+
+
+def test_migration_preserves_empty_destination_and_cleans_staging_on_error(tmp_path, monkeypatch):
+    import shutil
+
+    from lecode.memory.store import migrate_legacy_memory
+
+    cfg = tmp_path / "cfg"
+    cwd, project = tmp_path / "nested", tmp_path / "project"
+    legacy = MemoryStore(memory_root(cwd, cfg))
+    legacy.write_long_term("legacy")
+    destination = memory_root(project, cfg)
+    destination.mkdir()
+    migrate_legacy_memory(cwd, project, config_dir=cfg)
+    assert list(destination.iterdir()) == []
+    destination.rmdir()
+
+    def fail_copy(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(shutil, "copy2", fail_copy)
+    with pytest.raises(OSError, match="disk full"):
+        migrate_legacy_memory(cwd, project, config_dir=cfg)
+    assert not destination.exists()
+    assert list(destination.parent.iterdir()) == [legacy.root]
+    assert legacy.read_long_term() == "legacy\n"
 
 
 def test_long_term_round_trip(store):

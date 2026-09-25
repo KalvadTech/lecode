@@ -15,7 +15,8 @@ from lecode.config.models import Config
 from lecode.context import agents_md, resources
 
 
-def _base_prompt(config: Config, cwd: Path) -> str:
+def base_prompt(config: Config, cwd: Path) -> str:
+    """Editable base only; dynamic context and memory must never be frozen into custom text."""
     prompt_cfg = config.llm.system_prompt
     if prompt_cfg.custom is not None:
         return prompt_cfg.custom
@@ -34,7 +35,7 @@ def build_system_prompt(
     extra: str | None = None,
 ) -> str:
     """Assemble the system prompt: base + AGENTS.md walk + memory + extras."""
-    sections = [_base_prompt(config, cwd).strip()]
+    sections = [base_prompt(config, cwd).strip()]
 
     context = agents_md.render(agents_md.collect(cwd))
     if context:

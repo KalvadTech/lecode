@@ -3,11 +3,11 @@
 Layout under ``<config_dir>/memory/<project-slug>/``::
 
     MEMORY.md            long-term memory (auto-injected, capped for injection)
-    daily/YYYY-MM-DD.md  daily logs (compaction summaries land here too)
+    daily/YYYY-MM-DD.md  daily logs
     scratchpad.md        project checklist
     notes/<name>.md      named notes
 
-The project slug derives from the cwd (tail components + a short hash suffix
+The project slug derives from the resolved project root (tail components + a short hash suffix
 to avoid collisions). Every write is atomic (tmp file → fsync → rename) and
 overwrites first copy the previous content to ``<file>.bak``.
 """
@@ -18,10 +18,13 @@ import hashlib
 import os
 import re
 import shutil
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+
+from lecode.context.agents_md import find_git_root
 
 #: Default injection cap for MEMORY.md (mirrors [memory] max_bytes).
 DEFAULT_MAX_BYTES = 32768
@@ -38,6 +41,43 @@ LONG_TERM_FILE = "MEMORY.md"
 SCRATCHPAD_FILE = "scratchpad.md"
 
 
+def resolve_project_root(cwd: Path | str) -> Path:
+    """Return a durable project identity using only native Git path metadata.
+
+    An ordinary .git directory identifies its checkout root, preserving legacy
+    slugs. For separate gitdirs and submodules, the common Git directory itself
+    is the identity shared by main and linked worktrees, not a checkout path.
+    Already-canonical Git directories are recognized before walking ancestry,
+    making normalization idempotent without Git configuration or processes.
+    """
+    cwd = Path(cwd).resolve()
+    if (cwd / "HEAD").is_file() and (cwd / "objects").is_dir() and (cwd / "refs").is_dir():
+        return cwd.parent if cwd.name == ".git" else cwd
+    root = find_git_root(cwd)
+    if root is None:
+        return cwd
+    gitdir = root / ".git"
+    try:
+        if gitdir.is_dir():
+            return root
+        marker = gitdir.read_text(encoding="utf-8").strip()
+        if not marker.startswith("gitdir: "):
+            return root
+        gitdir = (root / marker.removeprefix("gitdir: ")).resolve()
+        common_file = gitdir / "commondir"
+        common = (
+            (gitdir / common_file.read_text(encoding="utf-8").strip()).resolve()
+            if common_file.is_file()
+            else gitdir
+        )
+        if common.name == ".git" and common.is_dir():
+            return common.parent
+        return common
+    except (OSError, UnicodeError, ValueError):
+        pass
+    return root
+
+
 def project_slug(cwd: Path | str) -> str:
     """A stable, collision-safe slug for a project directory."""
     resolved = str(Path(cwd).resolve())
@@ -48,7 +88,11 @@ def project_slug(cwd: Path | str) -> str:
 
 
 def memory_root(cwd: Path | str, config_dir: Path | None = None) -> Path:
-    """The store root for a project (``LECODE_CONFIG_DIR`` aware)."""
+    """Store path for the supplied root (``LECODE_CONFIG_DIR`` aware).
+
+    Keeps the legacy path mapping; runtime callers pass ``resolve_project_root``
+    while migration can still address the old cwd-scoped directory.
+    """
     if config_dir is None:
         from lecode.config.loader import config_dir as _config_dir
 
@@ -61,6 +105,41 @@ def _cap_bytes(text: str, max_bytes: int) -> str:
     if len(data) <= max_bytes:
         return text
     return data[:max_bytes].decode("utf-8", errors="ignore") + TRUNCATION_MARKER
+
+
+def migrate_legacy_memory(
+    cwd: Path | str, project_root: Path | str, *, config_dir: Path | None = None
+) -> None:
+    """Copy legacy Markdown as a whole store only when the destination is absent.
+
+    An existing destination, even empty, prevents reimporting removed notes.
+    SQLite files and backups are never migration sources.
+    """
+    source = memory_root(cwd, config_dir)
+    destination = memory_root(project_root, config_dir)
+    if source == destination or destination.exists() or not source.is_dir():
+        return
+    files = [
+        path
+        for path in MemoryStore(source)._search_files()
+        if not path.is_symlink() and path.resolve().is_relative_to(source.resolve())
+    ]
+    if not files:
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".memory-migration-", dir=destination.parent) as tmp:
+        staged = Path(tmp) / "store"
+        staged.mkdir()
+        for path in files:
+            target = staged / path.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+        if not destination.exists():
+            try:
+                staged.rename(destination)
+            except OSError:
+                if not destination.is_dir():
+                    raise
 
 
 @dataclass(frozen=True)
@@ -266,22 +345,36 @@ class MemoryStore:
         return hits
 
 
-def memory_injection(config, cwd: Path | str) -> str | None:
-    """The rendered ``## Memory`` section for the system prompt, or ``None``.
-
-    Cheap: no store reads when memory is disabled, no section when both
-    MEMORY.md and the scratchpad are empty/absent.
-    """
+def memory_injection(config, cwd: Path | str, *, recall=None) -> str | None:
+    """Bound the entire memory section, including scratchpad, labels and whole facts."""
     if not config.memory.enabled:
         return None
-    store = MemoryStore(memory_root(cwd), max_bytes=config.memory.max_bytes)
-    long_term = store.read_long_term().strip()
-    scratchpad = store.read_scratchpad().strip()
-    if not long_term and not scratchpad:
+    header = "## Memory\n\n"
+    remaining = max(0, config.memory.max_bytes - len(header.encode()))
+    if not remaining:
         return None
     sections = []
+    if recall is not None:
+        facts = recall.injection(min(remaining, config.memory.facts_max_bytes))
+        if facts:
+            sections.append(facts.rstrip())
+            remaining -= len(sections[-1].encode()) + 2
+    store = MemoryStore(memory_root(cwd), max_bytes=config.memory.max_bytes)
+    long_term = store.read_long_term(capped=False).strip()
+    scratchpad = store.read_scratchpad().strip()
+    notes = []
     if long_term:
-        sections.append(f"### Long-term memory\n\n{long_term}")
+        notes.append(f"### Long-term memory\n\n{long_term}")
     if scratchpad:
-        sections.append(f"### Scratchpad\n\n{scratchpad}")
-    return "## Memory\n\n" + "\n\n".join(sections)
+        notes.append(f"### Scratchpad\n\n{scratchpad}")
+    for index, note in enumerate(notes):
+        budget = max(0, remaining // (len(notes) - index) - 2)
+        data = note.encode()
+        if len(data) > budget:
+            if budget <= len(TRUNCATION_MARKER.encode()) + 30:
+                continue
+            note = data[: budget - len(TRUNCATION_MARKER.encode())].decode("utf-8", errors="ignore")
+            note += TRUNCATION_MARKER
+        sections.append(note)
+        remaining -= len(note.encode()) + 2
+    return header + "\n\n".join(sections) if sections else None

@@ -16,6 +16,158 @@ from lecode.session import (
 from lecode.session.model import EventRecord, MessageRecord, MetaRecord, TombstoneRecord
 
 
+def test_forget_marker_retries_after_commit_and_reopen_without_duplicates(tmp_path):
+    from lecode.memory.facts import FactStore
+    from lecode.memory.store import memory_root
+
+    sessions = SessionStore(tmp_path / "cfg")
+    source = sessions.create("source", tmp_path)
+    sessions.append_message(source, {"role": "user", "content": "evidence"})
+    facts = FactStore(memory_root(tmp_path, sessions.config_dir) / "facts.sqlite3")
+    ref = sessions.source_snapshot(source.id, 1, 1, project_root=tmp_path).ref
+    fact = facts.remember("claim", ref, sessions=sessions, project_root=tmp_path)
+    correction = sessions.create("correction", tmp_path)
+    sessions.append_message(correction, {"role": "user", "content": "corrected evidence"})
+    corrected_ref = sessions.source_snapshot(correction.id, 1, 1, project_root=tmp_path).ref
+    facts.correct(
+        fact.id,
+        "corrected claim",
+        expected_revision=1,
+        ref=corrected_ref,
+        sessions=sessions,
+        project_root=tmp_path,
+    )
+    before = source.path.read_bytes()
+    facts.forget(fact.id)  # Process dies before it can append any session marker.
+    assert facts.pending_forgets(source.id) == [fact.id]
+    sessions.close()
+    sessions = SessionStore(tmp_path / "cfg")
+    for _ in range(2):
+        reopened = sessions.open(source.id)
+        lock = sessions.acquire_lock(reopened)
+        assert lock is not None
+        records = sessions.read_records(reopened)
+        markers = [r for r in records if isinstance(r, EventRecord) and r.kind == "forget"]
+        assert len(markers) == 1
+        assert markers[0].data == {"fact_id": fact.id}
+        assert reopened.next_seq == markers[0].seq + 1
+        lock.release()
+    assert facts.pending_forgets(source.id) == []
+    assert facts.pending_forgets(correction.id) == [fact.id]
+    sessions.flush_forgets(correction.id)
+    assert facts.pending_forget_sessions(fact.id) == []
+    assert facts.forget(fact.id) is False
+    assert source.path.read_bytes().startswith(before)
+    assert sessions.load_for_model(source) == []
+    sessions.close()
+    facts.close()
+
+
+def test_forget_marker_fsync_failure_keeps_retry_and_attached_sequence(tmp_path, monkeypatch):
+    from lecode.memory.facts import FactStore
+    from lecode.memory.store import memory_root
+
+    sessions = SessionStore(tmp_path / "cfg")
+    source = sessions.create("source", tmp_path)
+    lock = sessions.acquire_lock(source)
+    sessions.append_message(source, {"role": "user", "content": "evidence"})
+    facts = FactStore(memory_root(tmp_path, sessions.config_dir) / "facts.sqlite3")
+    ref = sessions.source_snapshot(source.id, 1, 1, project_root=tmp_path).ref
+    fact = facts.remember("claim", ref, sessions=sessions, project_root=tmp_path)
+    facts.forget(fact.id)
+
+    def failed_fsync(fd):
+        raise OSError("interrupted marker flush")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", failed_fsync)
+        sessions.flush_forgets(source.id)
+    assert facts.pending_forgets(source.id) == [fact.id]
+    assert sessions.load_for_model(source) == []
+    marker = sessions.read_records(source)[-1]
+    assert marker.kind == "forget"
+    assert source.next_seq == marker.seq + 1
+    sessions.append_message(source, {"role": "user", "content": "independent note"})
+    lock.release()
+    sessions.close()
+    sessions = SessionStore(tmp_path / "cfg")
+    reopened = sessions.open(source.id)
+    lock = sessions.acquire_lock(reopened)
+    records = sessions.read_records(reopened)
+    assert sum(isinstance(r, EventRecord) and r.kind == "forget" for r in records) == 1
+    assert facts.pending_forgets(source.id) == []
+    assert sessions.load_for_model(reopened) == [{"role": "user", "content": "independent note"}]
+    lock.release()
+    sessions.close()
+    facts.close()
+
+
+def test_forget_marker_defers_to_cross_process_attach(tmp_path):
+    import subprocess
+    import sys
+
+    from lecode.memory.facts import FactStore
+    from lecode.memory.store import memory_root
+
+    sessions = SessionStore(tmp_path / "cfg")
+    source = sessions.create("source", tmp_path)
+    sessions.append_message(source, {"role": "user", "content": "evidence"})
+    facts = FactStore(memory_root(tmp_path, sessions.config_dir) / "facts.sqlite3")
+    ref = sessions.source_snapshot(source.id, 1, 1, project_root=tmp_path).ref
+    fact = facts.remember("claim", ref, sessions=sessions, project_root=tmp_path)
+    script = (
+        "import sys; from lecode.session.storage import SessionStore; "
+        "s=SessionStore(sys.argv[1]); lock=s.acquire_lock(s.open(sys.argv[2])); "
+        "print('attached', flush=True); sys.stdin.readline(); lock.release(); s.close()"
+    )
+    with subprocess.Popen(
+        [sys.executable, "-c", script, str(sessions.config_dir), source.id],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as child:
+        try:
+            assert child.stdout.readline().strip() == "attached"
+            inode = source.path.with_suffix(".lock").stat().st_ino
+            facts.forget(fact.id)
+            sessions.flush_forgets(source.id)
+            assert facts.pending_forgets(source.id) == [fact.id]
+            assert not any(
+                isinstance(r, EventRecord) and r.kind == "forget"
+                for r in sessions.read_records(source)
+            )
+            assert sessions.load_for_model(source) == []
+            child.communicate("\n", timeout=5)
+        finally:
+            if child.poll() is None:
+                child.kill()
+    sessions.flush_forgets(source.id)
+    assert facts.pending_forgets(source.id) == []
+    assert source.path.with_suffix(".lock").stat().st_ino == inode
+    sessions.close()
+    facts.close()
+
+
+def test_partial_marker_append_does_not_swallow_retry_or_next_user_message(tmp_path):
+    from lecode.memory.facts import FactStore
+
+    sessions = SessionStore(tmp_path / "cfg")
+    source = sessions.create("source", tmp_path)
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    sessions.bind_facts(tmp_path, facts)
+    fact = facts.add("claim", source_id=source.id, source_seq=1)
+    facts.forget(fact.id)
+    with source.path.open("ab") as stream:
+        stream.write(b'{"type":"event","kind":"forget"')  # Interrupted JSONL write.
+    sessions.flush_forgets(source)
+    sessions.append_message(source, {"role": "user", "content": "fresh note"})
+    records = sessions.read_records(source)
+    assert sum(isinstance(r, EventRecord) and r.kind == "forget" for r in records) == 1
+    assert records[-1].message["content"] == "fresh note"
+    assert facts.pending_forgets(source.id) == []
+    sessions.close()
+
+
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
@@ -213,11 +365,58 @@ def test_load_for_model_without_compaction(store, session):
     assert [m["content"] for m in replayed] == ["first", "answer one", "second", "answer two"]
 
 
-def test_compact_then_tombstone_both_apply(store, session):
+def test_unvalidated_legacy_summary_cannot_hide_raw_sources(store, session):
+    store.append_event(
+        session,
+        "compact",
+        {"summary": "unverified", "keep_from_seq": 3, "source_start_seq": 1, "source_end_seq": 2},
+    )
+    assert [m["content"] for m in store.load_for_model(session)] == [
+        "first",
+        "answer one",
+        "second",
+        "answer two",
+    ]
+
+
+def test_compact_then_tombstone_drops_undone_summary(store, session):
     store.compact(session, "S", keep_from_seq=3)
-    store.undo(session)  # hides seq 3+ -> nothing visible from the kept tail
+    store.undo(session)  # hides seq 3+ -> the compact event is undone too
     replayed = store.load_for_model(session)
-    assert [m["content"] for m in replayed] == ["S"]
+    assert [m["content"] for m in replayed] == ["first", "answer one"]
+
+
+def test_summary_intersecting_tombstone_drops_then_redo_restores(store, session):
+    store.append_message(session, {"role": "user", "content": "third"})  # seq 5
+    store.append_message(session, {"role": "assistant", "content": "answer three"})  # seq 6
+    store.compact(session, "S", keep_from_seq=5, source_start_seq=1, source_end_seq=4)  # seq 7
+    store.rewind_to(session, 2)  # hides seq 3+ including part of the covered range
+
+    assert [m["content"] for m in store.load_for_model(session)] == ["first", "answer one"]
+    assert store.redo(session) is True
+    # restored by cancelling the tombstone, no second compaction event
+    assert [m["content"] for m in store.load_for_model(session)] == [
+        "S",
+        "third",
+        "answer three",
+    ]
+    compacts = [
+        r for r in store.read_records(session) if isinstance(r, EventRecord) and r.kind == "compact"
+    ]
+    assert len(compacts) == 1
+
+
+def test_summary_survives_tombstone_outside_covered_range(store, session):
+    store.compact(session, "S", keep_from_seq=3, source_start_seq=1, source_end_seq=2)
+    store.append_message(session, {"role": "user", "content": "third"})  # seq 6
+    store.append_message(session, {"role": "assistant", "content": "answer three"})  # seq 7
+    store.undo(session)  # hides the last turn (seqs 6, 7), not the covered range
+
+    assert [m["content"] for m in store.load_for_model(session)] == [
+        "S",
+        "second",
+        "answer two",
+    ]
 
 
 def test_permission_grant_round_trip(store, session):
@@ -388,14 +587,74 @@ def test_lock_release_allows_reattach(store):
     again.release()
 
 
-def test_delete_removes_lock_sidecar(store):
+def test_delete_preserves_lock_inode_and_refuses_active_writer(store):
     s = store.create("locked", cwd="/tmp/p")
     lock = store.acquire_lock(s)
     assert lock is not None
+    before = s.path.read_bytes()
+    inode = s.path.with_suffix(".lock").stat().st_ino
+    with pytest.raises(SessionInUseError):
+        store.delete(s.id)
+    assert s.path.read_bytes() == before
     lock.release()
     assert s.path.with_suffix(".lock").is_file()
     store.delete(s.id)
-    assert not s.path.with_suffix(".lock").exists()
+    assert s.path.with_suffix(".lock").stat().st_ino == inode
+    with pytest.raises(SessionNotFoundError):
+        store.acquire_lock(s)
+
+
+def test_forget_filters_shared_sessions_and_invalidates_summary_without_marker(tmp_path):
+    from lecode.memory.facts import FactStore
+    from lecode.memory.store import memory_root
+
+    cfg = tmp_path / "cfg"
+    sessions = SessionStore(cfg)
+    project = tmp_path / "project"
+    other = tmp_path / "other"
+    source = sessions.create("source", project)
+    independent = sessions.create("other", other)
+    for session in (source, independent):
+        sessions.append_message(session, {"role": "user", "content": "evidence"})
+        sessions.append_message(session, {"role": "assistant", "content": "derived"})
+        sessions.append_message(session, {"role": "user", "content": "independent note"})
+    sessions.compact(source, "summary of evidence", keep_from_seq=3)
+    facts = FactStore(memory_root(project, cfg) / "facts.sqlite3")
+    ref = sessions.source_snapshot(source.id, 1, 1, project_root=project).ref
+    fact = facts.remember("claim", ref, sessions=sessions, project_root=project)
+    before = source.path.read_bytes()
+    assert sessions.working_summary(source) is not None
+    # Commit without a JSONL marker, as if interrupted immediately after the commit.
+    facts.forget(fact.id)
+    sessions = SessionStore(cfg)
+    assert sessions.working_summary(source) is None
+    assert [m["content"] for m in sessions.load_for_model(source)] == ["independent note"]
+    assert [m.message["content"] for m in sessions.visible_messages(source)] == ["independent note"]
+    assert sessions.validate_source(ref, project_root=project).status == "hidden"
+    assert sessions.source_snapshot(source.id, 2, 2, project_root=project).status == "hidden"
+    assert len(sessions.load_for_model(independent)) == 3
+    assert source.path.read_bytes() == before
+    assert len(sessions.load_messages(source)) == 3
+    facts.close()
+
+
+def test_handoff_seed_is_filtered_and_cannot_become_fresh_evidence_after_forget(tmp_path):
+    from lecode.memory.facts import FactStore
+    from lecode.session.handoff import handoff
+
+    sessions = SessionStore(tmp_path / "cfg")
+    source = sessions.create("source", tmp_path)
+    sessions.append_message(source, {"role": "user", "content": "forget this evidence"})
+    ref = sessions.source_snapshot(source.id, 1, 1, project_root=tmp_path).ref
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    fact = facts.remember("claim", ref, sessions=sessions, project_root=tmp_path)
+    seeded = handoff(source, sessions, "before")
+    facts.forget(fact.id)
+    assert sessions.load_for_model(seeded) == []
+    assert sessions.source_snapshot(seeded.id, 1, 1, project_root=tmp_path).status == "hidden"
+    after = handoff(source, sessions, "after")
+    assert "forget this evidence" not in str(sessions.load_for_model(after))
+    facts.close()
 
 
 def test_lock_holder_reports_pid_while_held(store):
@@ -406,3 +665,13 @@ def test_lock_holder_reports_pid_while_held(store):
     assert store.lock_holder(s.id) == os.getpid()
     lock.release()
     assert store.lock_holder(s.id) is None
+
+
+def test_worker_inbox_does_not_invalidate_model_sources(store, session):
+    version = store.source_version(session, include_worker_events=False)
+    store.append_event(session, "worker_inbox", {"id": "queued", "text": "next turn"})
+    assert store.source_version(session, include_worker_events=False) == version
+    assert store.source_version(session) != version
+
+    store.append_message(session, {"role": "user", "content": "changed source"})
+    assert store.source_version(session, include_worker_events=False) != version

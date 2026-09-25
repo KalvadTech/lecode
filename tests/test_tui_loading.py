@@ -79,6 +79,27 @@ def test_report_covers_all_subsystems(env):
     ]
 
 
+def test_memory_report_uses_runtime_project_root(env):
+    _, session, store, runtime, loaded, spec = _make(env)
+    runtime.ctx.extras["memory"].write_long_term("durable project notes")
+    checkout = env / "checkout"
+    checkout.mkdir()
+    runtime.ctx.cwd = checkout
+    steps = build_load_report(
+        config=runtime.ctx.config,
+        loaded=loaded,
+        runtime=runtime,
+        session=session,
+        store=store,
+        cwd=checkout,
+        resumed=False,
+        provider_spec=spec,
+        key_source="none",
+    )
+    memory = next(step for step in steps if step.label == "memory")
+    assert "injected" in memory.detail
+
+
 def test_session_step_new_and_resumed(env):
     steps, session, _store, runtime, loaded, spec = _make(env, name="fresh")
     assert steps[0].detail == "fresh — new session"

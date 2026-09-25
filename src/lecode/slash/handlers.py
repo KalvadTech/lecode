@@ -27,6 +27,9 @@ from lecode.extras.subagents import SubagentError
 from lecode.extras.worktree import WorktreeError, WorktreeManager
 from lecode.hooks import hooks_status
 from lecode.memory import MemoryStore, memory_command, memory_root
+from lecode.memory.commands import memory_change_command
+from lecode.memory.recall import RecallContext
+from lecode.memory.store import resolve_project_root
 from lecode.multimodal import describe_content, format_size, load_attachment
 from lecode.providers import resolve_provider
 from lecode.providers.catalog import (
@@ -37,7 +40,7 @@ from lecode.session.compaction import COMPACT_KEEP_TAIL, compact_session
 from lecode.session.handoff import handoff as handoff_session
 from lecode.session.naming import unique_name, validate_name
 from lecode.session.stats import session_stats
-from lecode.session.storage import AmbiguousSessionError, SessionNotFoundError
+from lecode.session.storage import AmbiguousSessionError, SessionInUseError, SessionNotFoundError
 from lecode.slash.catalog import BUILTIN_COMMANDS
 from lecode.slash.registry import (
     AmbiguousCommandError,
@@ -200,7 +203,11 @@ def _delete_session(app: TuiApp, args: list[str]) -> None:
     if (pid := app.store.lock_holder(meta.id)) is not None:
         app.feed.error(f"session '{meta.name}' is open in another lecode process (pid {pid})")
         return
-    app.store.delete(meta.id)
+    try:
+        app.store.delete(meta.id)
+    except (SessionInUseError, SessionNotFoundError) as e:
+        app.feed.error(str(e))
+        return
     app.feed.info(f"deleted session: {meta.name}")
 
 
@@ -344,7 +351,10 @@ async def cmd_handoff(app: TuiApp, args: list[str]) -> None:
 async def cmd_compact(app: TuiApp, args: list[str]) -> None:
     """``/compact``: summarize all but the last few messages via the provider,
     then record a compaction event."""
-    messages = app.store.load_messages(app.session)
+    if app.turn_busy():
+        app.feed.error("a turn is running; wait before /compact")
+        return
+    messages = app.store.visible_messages(app.session)
     if len(messages) <= COMPACT_KEEP_TAIL:
         app.feed.info("not enough history to compact")
         return
@@ -354,11 +364,14 @@ async def cmd_compact(app: TuiApp, args: list[str]) -> None:
         app.runner.provider,
         app.store,
         app.session,
-        app.config.llm.model,
+        app.runner.model,
         hooks=app.runtime.hooks,
+        config=app.config,
+        catalog=app.catalog,
+        ctx=app.runtime.ctx,
     )
     if summary is None:
-        app.feed.error("compaction failed: provider error or empty summary")
+        app.feed.error("compaction failed: no safe coverage, invalid summary, or sources changed")
         return
     app.reload_history()
     app.feed.info(f"compacted {older} messages into a {len(summary)}-char summary")
@@ -557,10 +570,29 @@ async def cmd_memory(app: TuiApp, args: list[str]) -> None:
     if not app.config.memory.enabled:
         app.feed.info("memory is disabled ([memory] enabled = false)")
         return
+    if args and args[0] in {"correct", "forget"}:
+        if _busy(app):
+            return
+        app.feed.info(await memory_change_command(args, app.runtime.ctx, app.runtime.registry))
+        app.reload_history()
+        return
     store = app.runtime.ctx.extras.get("memory")
     if store is None:
-        store = MemoryStore(memory_root(app.runtime.ctx.cwd), max_bytes=app.config.memory.max_bytes)
-    app.feed.info(memory_command(args, store))
+        ctx = app.runtime.ctx
+        store = MemoryStore(
+            memory_root(ctx.project_root or resolve_project_root(ctx.cwd)),
+            max_bytes=app.config.memory.max_bytes,
+        )
+    ctx = app.runtime.ctx
+    recall = ctx.recall_context
+    if recall is None and ctx.session_store is not None:
+        recall = RecallContext(
+            ctx.session_store,
+            ctx.extras.get("facts"),
+            ctx.project_root or resolve_project_root(ctx.cwd),
+            session_id=ctx.session.id if ctx.session is not None else None,
+        )
+    app.feed.info(memory_command(args, store, recall=recall))
 
 
 async def cmd_hooks(app: TuiApp, args: list[str]) -> None:
@@ -672,7 +704,8 @@ async def cmd_doctor(app: TuiApp, args: list[str]) -> None:
 
     # persistent memory
     if config.memory.enabled:
-        root = memory_root(app.runtime.ctx.cwd)
+        ctx = app.runtime.ctx
+        root = memory_root(ctx.project_root or resolve_project_root(ctx.cwd))
         long_term = root / "MEMORY.md"
         detail = f"{root}"
         if long_term.is_file():
@@ -1236,7 +1269,8 @@ TUTOR_TOPICS: dict[str, str] = {
     ),
     "memory": (
         "Persistent markdown memory: MEMORY.md (auto-injected), daily logs, "
-        "scratchpad, named notes. /memory inspects it; the agent uses the "
+        "scratchpad, named notes, and source-linked fact/session recall. "
+        "/memory help lists read commands; the agent uses the "
         "memory_* tools. Disable with [memory] enabled = false."
     ),
     "hooks": (
@@ -1326,14 +1360,16 @@ async def cmd_prompt(app: TuiApp, args: list[str]) -> None:
 
 
 async def cmd_editsys(app: TuiApp, args: list[str]) -> None:
-    """``/editsys``: edit the effective system prompt in $EDITOR; the save
+    """``/editsys``: edit the base system prompt in $EDITOR; the save
     becomes this session's ``llm.system_prompt.custom`` override."""
-    edited = await open_in_editor(app.runtime.system_prompt)
+    from lecode.agent.prompts import base_prompt
+
+    edited = await open_in_editor(base_prompt(app.config, app.runtime.ctx.cwd).rstrip("\n"))
     if edited is None:
         app.feed.info("unchanged (editor closed without edits, or $EDITOR unset)")
         return
     app.config.llm.system_prompt.custom = edited
-    app.runtime.system_prompt = edited
+    app.reload_history()  # recomputes the live prompt and replaces history[0]
     app.feed.info("system prompt overridden for this session")
 
 
@@ -1474,6 +1510,9 @@ def _complete_memory(app: TuiApp, args: list[str]) -> list[CompletionRow]:
         ("show", "show", "read MEMORY.md"),
         ("edit", "edit", "edit MEMORY.md"),
         ("search", "search", "search memory <pattern>"),
+        ("facts", "facts", "inspect durable facts [offset]"),
+        ("recall", "recall", "recall <fact-id> [offset]"),
+        ("read", "read", "read <session-id> <start-seq> <end-seq> [offset]"),
         ("log", "log", "daily log [date]"),
         ("notes", "notes", "named notes"),
     ]
@@ -1733,7 +1772,7 @@ ARG_HINTS = {
     "reasoning": "[none|low|medium|high]",
     "permissions": "[mode]",
     "mode": "[mode]",
-    "memory": "[show|edit|search|log|notes]",
+    "memory": "[show|edit|search|log|notes|facts|recall|read]",
     "btw": "<text>",
     "help": "[command]",
     "add": "<path>…",

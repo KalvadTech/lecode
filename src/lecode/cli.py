@@ -20,7 +20,7 @@ import typer
 from typer.core import TyperGroup, TyperOption
 
 from lecode import __version__
-from lecode.agent.builder import build_runtime
+from lecode.agent.builder import build_runtime, refresh_system_prompt
 from lecode.agent.runner import AgentRunner, RunResult
 from lecode.auth import AuthError, resolve_api_key
 from lecode.config.loader import config_dir, find_config_file, load_config
@@ -50,6 +50,7 @@ from lecode.hooks import (
     dispatch_event,
     dispatcher_from_config,
 )
+from lecode.memory.store import resolve_project_root
 from lecode.providers import ProviderError, build_client, resolve_provider
 from lecode.providers.catalog import Catalog
 from lecode.providers.live import LoadedCatalog, load_catalog
@@ -212,6 +213,7 @@ async def _run_with_mcp(
         if background is not None:
             await background.shutdown()
         await manager.shutdown()
+        runtime.close()
 
 
 async def _aclose(provider: Any) -> None:
@@ -319,6 +321,7 @@ def run_headless(
 
     cwd = Path.cwd()
     wt_info: WorktreeInfo | None = None
+    project_root = resolve_project_root(cwd)
     if worktree is not None:
         try:
             _, wt_info = asyncio.run(_create_worktree(cwd, worktree))
@@ -338,6 +341,8 @@ def run_headless(
         mode="readonly" if read_only else None,
         allowed_tools=_tool_filter(allowed_tools),
         catalog=models.catalog,
+        project_root=project_root,
+        scope=wt_info.branch if wt_info is not None else None,
     )
     runner = AgentRunner(
         client,
@@ -346,6 +351,7 @@ def run_headless(
         session=session,
         store=store,
         catalog=models.catalog,
+        refresh_prompt=lambda: refresh_system_prompt(runtime),
     )
     signals = StatusEmitter(config.signals, session=session.name)
 
@@ -465,6 +471,7 @@ def run_loop_mode(
         session=session,
         store=store,
         catalog=models.catalog,
+        refresh_prompt=lambda: refresh_system_prompt(runtime),
     )
     signals = StatusEmitter(config.signals, session=session.name)
 
@@ -496,6 +503,8 @@ def run_loop_mode(
             if workers is not None:
                 await workers.shutdown()
             await _aclose(client)
+
+            runtime.close()
 
     herdr.report("idle", session_id=session.id)
     signals.emit(START)
@@ -585,6 +594,7 @@ def run_chain_mode(
             session=session,
             store=store,
             catalog=chain_catalog,
+            refresh_prompt=lambda: refresh_system_prompt(runtime),
         )
 
     def on_phase(phase: str, output: str) -> None:
@@ -606,6 +616,8 @@ def run_chain_mode(
             if workers is not None:
                 await workers.shutdown()
             await _aclose(client)
+
+            runtime.close()
 
     herdr.report("idle", session_id=session.id)
     signals.emit(START)
@@ -718,6 +730,7 @@ def run_interactive(
     wt_manager: WorktreeManager | None = None
     wt_info: WorktreeInfo | None = None
     original_cwd = cwd
+    project_root = resolve_project_root(cwd)
     if worktree is not None:
         try:
             wt_manager, wt_info = asyncio.run(_create_worktree(cwd, worktree))
@@ -785,6 +798,8 @@ def run_interactive(
         mode="readonly" if read_only else None,
         allowed_tools=_tool_filter(allowed_tools),
         agent_name=session.meta.agent,
+        project_root=project_root,
+        scope=wt_info.branch if wt_info is not None else None,
     )
     for warning in runtime.warnings:
         typer.echo(f"warning: {warning}", err=True)

@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 from lecode.agent.builder import build_runtime
 from lecode.cli import app as cli_app
 from lecode.config.models import Config
+from lecode.memory import MemoryStore, memory_root
 from lecode.providers.catalog import Catalog
 from lecode.providers.types import Done, TokenDelta
 from lecode.session.storage import SessionStore
@@ -1507,6 +1508,36 @@ async def test_switch_session_refused_when_locked(tmp_path, monkeypatch):
     assert "already open in another lecode process" in out.getvalue()
     lock.release()
     assert app.switch_session(other) is True  # free again after release
+
+
+# -- prompt refresh ------------------------------------------------------------
+
+
+async def test_next_turn_sees_memory_written_after_the_previous_turn(tmp_path, monkeypatch):
+    """Memory writes land in the system prompt at the start of the next run,
+    replacing history[0] rather than appending another system message."""
+    script = [{"text": "first"}, {"text": "second"}]
+    app, provider, _ = make_app(tmp_path, monkeypatch, script)
+    await app._submit("hello")
+    await app._turn_task
+
+    MemoryStore(memory_root(tmp_path)).write_long_term("fresh-note")
+    await app._submit("again")
+    await app._turn_task
+
+    messages = provider.requests[-1]["messages"]
+    assert messages[0]["role"] == "system"
+    assert "fresh-note" in messages[0]["content"]
+    assert [m["role"] for m in messages].count("system") == 1
+
+
+async def test_reload_history_refreshes_system_prompt(tmp_path, monkeypatch):
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    MemoryStore(memory_root(tmp_path)).write_long_term("reload-note")
+
+    app.reload_history()
+
+    assert "reload-note" in app._history[0]["content"]
 
 
 def test_cli_resume_locked_session_fails(cli_env, monkeypatch):

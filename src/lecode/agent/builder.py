@@ -20,6 +20,9 @@ from lecode.context.skills import SkillRegistry, load_skills
 from lecode.extras.background import BACKGROUND_EXTRA, BackgroundTaskManager
 from lecode.hooks import HookDispatcher, apply_hooks, dispatcher_from_config
 from lecode.memory import MemoryStore, memory_injection, memory_root, memory_tools
+from lecode.memory.facts import FactStore
+from lecode.memory.recall import RecallContext
+from lecode.memory.store import migrate_legacy_memory, resolve_project_root
 from lecode.permission import PermissionChecker, SessionPermissions
 
 if TYPE_CHECKING:
@@ -38,6 +41,57 @@ class Runtime:
     skills: SkillRegistry = field(default_factory=SkillRegistry)
     hooks: HookDispatcher | None = None
     warnings: list[str] = field(default_factory=list)
+    #: Selected agent, kept so a refresh can re-render its prompt body.
+    agent_name: str | None = None
+
+    def close(self) -> None:
+        """Close memory connections after callers have stopped in-flight work."""
+        if self.ctx.session_store is not None:
+            self.ctx.session_store.close()
+        facts = self.ctx.extras.get("facts")
+        if facts is not None:
+            facts.close()
+
+
+def refresh_system_prompt(runtime: Runtime) -> str:
+    """Recompute the system prompt from live runtime context.
+
+    Re-reads the AGENTS.md walk and the memory store (so writes from a previous
+    turn become visible), re-renders the agent body and skills listing, then
+    assigns the result to ``runtime.system_prompt`` and returns it.
+    """
+    extra_parts: list[str] = []
+    agent = runtime.agents.get(runtime.agent_name) if runtime.agent_name else None
+    if agent is not None and agent.body:
+        extra_parts.append(agent.body)
+    if runtime.ctx.config.llm.system_prompt.custom is None and "task" in runtime.registry.names():
+        extra_parts.append(
+            "Available subagents for task(agent=..., prompt=...):\n"
+            + "\n".join(f"- {a.name}: {a.description}" for a in runtime.agents.subagents())
+        )
+    listing = runtime.skills.render_listing()
+    if listing:
+        extra_parts.append(listing)
+    runtime.system_prompt = build_system_prompt(
+        runtime.ctx.config,
+        runtime.ctx.cwd,
+        memory_text=memory_injection(
+            runtime.ctx.config,
+            runtime.ctx.project_root or resolve_project_root(runtime.ctx.cwd),
+            recall=runtime.ctx.recall_context
+            or (
+                RecallContext(
+                    runtime.ctx.session_store,
+                    runtime.ctx.extras.get("facts"),
+                    runtime.ctx.project_root or resolve_project_root(runtime.ctx.cwd),
+                )
+                if runtime.ctx.session_store is not None
+                else None
+            ),
+        ),
+        extra="\n\n".join(extra_parts) or None,
+    )
+    return runtime.system_prompt
 
 
 def build_runtime(
@@ -53,6 +107,8 @@ def build_runtime(
     agent_registry: AgentRegistry | None = None,
     skill_registry: SkillRegistry | None = None,
     catalog: Catalog | None = None,
+    project_root: Path | None = None,
+    scope: str | None = None,
     worker_manager: object | None = None,
 ) -> Runtime:
     """Build the permission checker, tool context, registry, and system prompt.
@@ -64,6 +120,8 @@ def build_runtime(
     skills listing). Unknown agent names are ignored (fail-open).
     ``catalog`` is the live model catalog (modality checks in tools); ``None``
     leaves tools with an empty, fail-open catalog.
+    ``project_root`` overrides the resolved durable root; ``scope`` labels the
+    transient checkout (defaults to its resolved cwd).
     """
     grants = store.load_grants(session) if session is not None and store is not None else None
     session_perms = SessionPermissions(grants)
@@ -78,8 +136,13 @@ def build_runtime(
     if agent is not None and agent.overlay is not None:
         checker = checker.for_agent(agent.overlay)
 
+    effective_root = (
+        Path(project_root).resolve() if project_root is not None else resolve_project_root(cwd)
+    )
     ctx = ToolContext(
         cwd=Path(cwd),
+        project_root=effective_root,
+        scope=scope if scope is not None else str(Path(cwd).resolve()),
         config=config,
         permission_checker=checker,
         session=session,
@@ -104,8 +167,12 @@ def build_runtime(
         )
         tools.append(workers_tool.make_tool())
     if config.memory.enabled:
-        memory_store = MemoryStore(memory_root(cwd), max_bytes=config.memory.max_bytes)
+        migrate_legacy_memory(cwd, effective_root)
+        memory_store = MemoryStore(memory_root(effective_root), max_bytes=config.memory.max_bytes)
         ctx.extras["memory"] = memory_store
+        ctx.extras["facts"] = FactStore(memory_store.root / "facts.sqlite3")
+        if store is not None:
+            store.bind_facts(effective_root, ctx.extras["facts"])
         tools += memory_tools()
     if config.lsp.enabled:
         from lecode.lsp.manager import LspManager
@@ -130,32 +197,19 @@ def build_runtime(
     ctx.extras["registry"] = registry
     ctx.extras["hooks"] = hooks
     # Background-task manager (bash/task run_in_background, tasks_* tools).
-    ctx.extras[BACKGROUND_EXTRA] = BackgroundTaskManager()
-
-    extra_parts: list[str] = []
-    if agent is not None and agent.body:
-        extra_parts.append(agent.body)
-    if "task" in registry.names():
-        extra_parts.append(
-            "Available subagents for task(agent=..., prompt=...):\n"
-            + "\n".join(f"- {a.name}: {a.description}" for a in agents.subagents())
-        )
-    listing = skills.render_listing()
-    if listing:
-        extra_parts.append(listing)
-    system_prompt = build_system_prompt(
-        config,
-        cwd,
-        memory_text=memory_injection(config, cwd),
-        extra="\n\n".join(extra_parts) or None,
+    ctx.extras[BACKGROUND_EXTRA] = BackgroundTaskManager(
+        generation_reader=ctx.extras["facts"].generation if "facts" in ctx.extras else lambda: 0
     )
 
-    return Runtime(
+    runtime = Runtime(
         registry=registry,
         ctx=ctx,
-        system_prompt=system_prompt,
+        system_prompt="",
         agents=agents,
         skills=skills,
         hooks=hooks,
         warnings=warnings,
+        agent_name=agent_name,
     )
+    refresh_system_prompt(runtime)
+    return runtime

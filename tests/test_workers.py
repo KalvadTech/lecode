@@ -877,7 +877,7 @@ async def test_non_success_worker_stop_preserves_result_and_allows_resume(setup,
     elif reason == "empty":
         script = [{"usage": {"input_tokens": 7, "cost_usd": 0.25}}] * 4
     else:
-        ctx.config.agent.context_window = 1000
+        ctx.config.agent.context_window = 3300
         ctx.config.compaction.buffer_tokens = 200
         ctx.config.compaction.on_overflow = "pause"
         script = [tool, tool, {"text": "summary"}, tool]
@@ -894,6 +894,8 @@ async def test_non_success_worker_stop_preserves_result_and_allows_resume(setup,
         note = store.load_events(session, "worker_notification")[-1]
         assert note["state"] == "failed" and reason in note["content"]
         ctx.config.agent.max_turns = 10
+        if reason == "context_overflow":
+            ctx.config.agent.context_window = 100000
         ctx.config.compaction.enabled = False
         await manager.resume(worker.id, "continue explicitly")
         assert (await manager.wait(worker.id)).stop_reason == "done"

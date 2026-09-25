@@ -376,11 +376,13 @@ async def _fake_editor(tmp_path, monkeypatch, body: str) -> None:
 
 
 async def test_editsys_saves_session_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
     await _fake_editor(tmp_path, monkeypatch, "printf 'CUSTOM SYSTEM PROMPT' > \"$1\"")
     app, _, out = make_app(tmp_path, monkeypatch, [])
     await app.handle_command("/editsys")
     assert app.config.llm.system_prompt.custom == "CUSTOM SYSTEM PROMPT"
     assert app.runtime.system_prompt == "CUSTOM SYSTEM PROMPT"
+    assert app._history[0]["content"] == "CUSTOM SYSTEM PROMPT"
     assert "overridden for this session" in out.getvalue()
 
 
@@ -392,6 +394,26 @@ async def test_editsys_unchanged_is_noop(tmp_path, monkeypatch):
     assert app.runtime.system_prompt == original
     assert app.config.llm.system_prompt.custom is None
     assert "unchanged" in out.getvalue()
+
+
+async def test_editsys_preserves_edits_without_freezing_managed_facts(tmp_path, monkeypatch):
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    app.config.llm.system_prompt.custom = "My base prompt"
+    record = app.store.append_message(app.session, {"role": "user", "content": "old fact"})
+    ref = app.store.source_snapshot(
+        app.session.id, record.seq, record.seq, project_root=tmp_path
+    ).ref
+    facts = app.runtime.ctx.extras["facts"]
+    fact = facts.remember("old fact", ref, sessions=app.store, project_root=tmp_path)
+    app.reload_history()
+    assert "old fact" in app.runtime.system_prompt
+    await _fake_editor(tmp_path, monkeypatch, "printf '\\nMy edit' >> \"$1\"")
+    await app.handle_command("/editsys")
+    facts.forget(fact.id)
+    app.reload_history()
+    assert "My edit" in app.runtime.system_prompt
+    assert "old fact" not in app.runtime.system_prompt
+    app.runtime.close()
 
 
 # -- /doctor ---------------------------------------------------------------------------
@@ -464,3 +486,14 @@ async def test_doctor_unreachable_provider(tmp_path, monkeypatch):
     await app.handle_command("/doctor")
     rendered = out.getvalue()
     assert "✗ connectivity: catalog fetch failed" in rendered
+
+
+async def test_doctor_memory_path_keeps_durable_project_root(tmp_path, monkeypatch):
+    _patch_doctor_provider(monkeypatch)
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    root = app.runtime.ctx.extras["memory"].root
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    app.set_cwd(checkout)
+    await app.handle_command("/doctor")
+    assert f"memory: {root}" in out.getvalue()
