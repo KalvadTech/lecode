@@ -193,6 +193,25 @@ def _register_shift_enter() -> None:
     ANSI_SEQUENCES["\x1b[27;2;13~"] = Keys.ControlJ
 
 
+#: Mode sequences that make Shift+Enter distinguishable from plain Enter:
+#: ``ESC [ > 1 u`` pushes the Kitty keyboard protocol's disambiguate flag
+#: (Kitty, Ghostty, WezTerm, foot, Contour) and ``ESC [ > 4 ; 1 m`` sets
+#: xterm's modifyOtherKeys level 1. Terminals without support ignore both;
+#: the sequences they unlock are mapped to c-j by _register_shift_enter.
+_ENABLE_KEY_MODES = "\x1b[>1u\x1b[>4;1m"
+_DISABLE_KEY_MODES = "\x1b[<u\x1b[>4;0m"
+
+
+def _set_key_modes(sequence: str) -> None:
+    """Write a terminal mode sequence to the real terminal, when there is one."""
+    if sys.platform == "win32" or os.environ.get("TERM") == "dumb":
+        return
+    if not sys.stdout.isatty():
+        return
+    sys.stdout.write(sequence)
+    sys.stdout.flush()
+
+
 class TuiApp:
     """Interactive chat: prompt_toolkit input + statusline over a Rich feed."""
 
@@ -1351,6 +1370,7 @@ class TuiApp:
         self._file_lister.prefetch()
         self._spinner_task = asyncio.ensure_future(self._spinner_loop())
         try:
+            _set_key_modes(_ENABLE_KEY_MODES)
             with patch_stdout(raw=True):
                 try:
                     await self._app.run_async()
@@ -1362,6 +1382,7 @@ class TuiApp:
                     self._quit = True
                     print(f"lecode: exiting on {type(e).__name__}", file=sys.stderr)
         finally:
+            _set_key_modes(_DISABLE_KEY_MODES)
             await self._fire_hook(SESSION_END)
             self._spinner_task.cancel()
             self._approval.cancel()
