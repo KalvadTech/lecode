@@ -205,6 +205,25 @@ def test_open_round_trip(store, session):
     assert reopened.next_seq == session.next_seq == 5
 
 
+@pytest.mark.parametrize("name", ["renamed", "", None])
+def test_open_preserves_latest_rename_max_sequence_and_corrupt_count(store, session, name):
+    store.append_event(session, "rename", {"name": "earlier rename"})
+    store.append_event(session, "rename", {"name": name})
+    with session.path.open("a") as stream:
+        stream.write("broken record\n")
+        for seq in (42, 2):
+            stream.write(
+                MessageRecord(
+                    seq=seq, ts="timestamp", role="user", message={"role": "user", "content": "x"}
+                ).model_dump_json()
+                + "\n"
+            )
+    reopened = store.open(session.id)
+    assert reopened.meta.name == (name or "demo")
+    assert reopened.next_seq == 43
+    assert store.corrupt_lines == 1
+
+
 def test_open_missing_raises(store):
     with pytest.raises(SessionNotFoundError):
         store.open("nope")
