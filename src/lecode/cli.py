@@ -14,7 +14,7 @@ import asyncio
 import sys
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from typer.core import TyperGroup, TyperOption
@@ -63,10 +63,10 @@ from lecode.session.storage import (
     SessionNotFoundError,
     SessionStore,
 )
-from lecode.setup_wizard import offer_first_run_setup, run_wizard
 from lecode.telemetry import init_telemetry, shutdown_telemetry
-from lecode.tui.app import TuiApp
-from lecode.tui.name_prompt import prompt_session_name
+
+if TYPE_CHECKING:
+    from lecode.tui.app import TuiApp
 
 #: Exit codes (headless mode uses the same taxonomy).
 EXIT_OK = 0
@@ -688,6 +688,8 @@ def run_interactive(
     """
     from rich.console import Console
 
+    from lecode.setup_wizard import offer_first_run_setup
+    from lecode.tui.app import TuiApp
     from lecode.tui.loading import (
         LoadingProgress,
         build_load_report,
@@ -695,6 +697,7 @@ def run_interactive(
         provider_step,
         session_step,
     )
+    from lecode.tui.name_prompt import prompt_session_name
 
     # Banner first — before any slow work (setup wizard, network fetches).
     console = Console(no_color=no_color)
@@ -915,6 +918,8 @@ def run_setup() -> int:
     if not sys.stdin.isatty():
         typer.echo("error: --setup requires an interactive terminal", err=True)
         return EXIT_STARTUP
+    from lecode.setup_wizard import run_wizard
+
     try:
         path = asyncio.run(run_wizard())
     except (KeyboardInterrupt, EOFError):
