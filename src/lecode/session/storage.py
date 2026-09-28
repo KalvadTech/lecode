@@ -1055,6 +1055,6 @@ class SessionStore:
         """All persisted (tool, pattern) permission grants."""
         return [
             (str(r.data.get("tool", "")), str(r.data.get("pattern", "")))
-            for r in self.read_records(session)
+            for r in self._iter_records_at(session.path)
             if isinstance(r, EventRecord) and r.kind == "permission_grant"
         ]

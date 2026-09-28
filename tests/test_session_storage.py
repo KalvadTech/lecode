@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tracemalloc
 
 import pytest
 
@@ -227,6 +228,24 @@ def test_open_preserves_latest_rename_max_sequence_and_corrupt_count(store, sess
 def test_open_missing_raises(store):
     with pytest.raises(SessionNotFoundError):
         store.open("nope")
+
+
+def test_load_grants_streams_unrelated_messages(store, session):
+    store.grant_permission(session, "read", "*.py")
+    for _ in range(128):
+        store.append_message(session, {"role": "assistant", "content": "x" * 65536})
+    store.grant_permission(session, "bash", "git *")
+    with session.path.open("a") as stream:
+        stream.write("broken record\n")
+    tracemalloc.start()
+    try:
+        grants = store.load_grants(session)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert grants == [("read", "*.py"), ("bash", "git *")]
+    assert store.corrupt_lines == 1
+    assert peak < 2 * 1024 * 1024
 
 
 def test_append_assigns_increasing_seq(store, session):

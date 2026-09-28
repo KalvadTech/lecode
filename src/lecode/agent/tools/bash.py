@@ -11,12 +11,14 @@ over the cap is truncated head/tail and the full text is saved to
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
+import tempfile
 import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from lecode.agent.tools.base import Tool, ToolContext, ToolResult
 from lecode.extras.proc import ProcResult
@@ -96,8 +98,8 @@ async def _run_shell(
                 if len(buffer) > max_bytes:
                     del buffer[: len(buffer) - max_bytes]
             idle_deadline = time.monotonic() + idle_timeout
-    except asyncio.CancelledError:
-        # Turn aborted (Ctrl-C): never leave the child running.
+    except BaseException:
+        # Cancellation or output persistence failure must not leave a child running.
         _kill_tree(proc)
         with contextlib.suppress(TimeoutError, asyncio.CancelledError):
             await asyncio.wait_for(proc.wait(), timeout=5.0)
@@ -109,14 +111,21 @@ async def _run_shell(
     return bytes(buffer), exit_code, timed_out, idle_killed
 
 
-def _save_overflow(text: str) -> Path:
+def _save_overflow(output: BinaryIO) -> tuple[Path, str, str]:
     from lecode.config.loader import config_dir
 
     overflow_dir = config_dir() / "overflow"
     overflow_dir.mkdir(parents=True, exist_ok=True)
     path = overflow_dir / f"{uuid.uuid4().hex}.log"
-    path.write_text(text, encoding="utf-8")
-    return path
+    head = tail = ""
+    half = MAX_OUTPUT_BYTES // 2
+    chunks = iter(lambda: output.read(65536), b"")
+    with path.open("w", encoding="utf-8") as destination:
+        for text in codecs.iterdecode(chunks, "utf-8", errors="replace"):
+            destination.write(text)
+            head += text[: half - len(head)]
+            tail = (tail + text)[-half:]
+    return path, head, tail
 
 
 class BashTool(Tool):
@@ -185,21 +194,23 @@ class BashTool(Tool):
                 return ToolResult(f"error: {e}", is_error=True)
             return ToolResult(f"background task {record.id} started: {command}")
         try:
-            output, exit_code, timed_out, idle_killed = await _run_shell(
-                command, ctx.cwd, timeout, idle, MAX_OUTPUT_BYTES
-            )
+            with tempfile.SpooledTemporaryFile(max_size=MAX_OUTPUT_BYTES) as output:
+                _, exit_code, timed_out, idle_killed = await _run_shell(
+                    command, ctx.cwd, timeout, idle, MAX_OUTPUT_BYTES, on_chunk=output.write
+                )
+                truncated = output.tell() > MAX_OUTPUT_BYTES
+                output.seek(0)
+                if truncated:
+                    full_path, head, tail = _save_overflow(output)
+                    text = (
+                        head
+                        + f"\n… [output truncated; full output saved to {full_path}] …\n"
+                        + tail
+                    )
+                else:
+                    text = output.read().decode("utf-8", errors="replace")
         except OSError as e:
             return ToolResult(f"error: {e}", is_error=True)
-
-        text = output.decode("utf-8", errors="replace")
-        if len(output) > MAX_OUTPUT_BYTES:
-            full_path = _save_overflow(text)
-            half = MAX_OUTPUT_BYTES // 2
-            text = (
-                text[:half]
-                + f"\n… [output truncated; full output saved to {full_path}] …\n"
-                + text[-half:]
-            )
 
         notes: list[str] = []
         if timed_out:
@@ -218,7 +229,7 @@ class BashTool(Tool):
                     stdout=text,
                     stderr="",  # The shell merges stderr into stdout.
                     timed_out=timed_out or idle_killed,
-                    truncated=len(output) > MAX_OUTPUT_BYTES,
+                    truncated=truncated,
                 )
             },
         )

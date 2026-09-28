@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sys
+import tracemalloc
 
-from lecode.extras.proc import run_proc
+import pytest
+
+from lecode.extras.proc import TRUNCATION_MARKER, run_proc
 
 
 async def test_echo_round_trip():
@@ -45,6 +48,68 @@ async def test_output_cap_head_tail():
     assert "truncated" in result.stdout
     assert result.stdout.startswith("x" * 50)
     assert result.stdout.rstrip().endswith("x")
+
+
+@pytest.mark.parametrize("cap", [1, 2, 3, 32, 1000, 10000])
+async def test_streamed_cap_preserves_byte_boundaries(cap):
+    from lecode.extras.proc import _read_capped
+
+    data = b"\xff" + "é🙂".encode() * 1000 + b"\xf0"
+    stream = asyncio.StreamReader()
+    stream.feed_data(data)
+    stream.feed_eof()
+    text, truncated = await _read_capped(stream, cap)
+    assert truncated == (len(data) > cap)
+    if truncated:
+        head, tail = data[: cap // 2], data[-(cap // 2) :]
+        assert text == (
+            head.decode("utf-8", errors="replace")
+            + TRUNCATION_MARKER.format(skipped=len(data) - len(head) - len(tail))
+            + tail.decode("utf-8", errors="replace")
+        )
+    else:
+        assert text == data.decode("utf-8", errors="replace")
+
+
+async def test_large_stdout_and_stderr_are_drained_while_feeding_stdin():
+    result = await run_proc(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys\n"
+                "for _ in range(64):\n"
+                " sys.stdout.buffer.write(b'o'*65536)\n"
+                " sys.stderr.buffer.write(b'e'*65536)\n"
+                "print(len(sys.stdin.buffer.read()))\n"
+            ),
+        ],
+        input="i" * (2 * 1024 * 1024),
+        max_output_bytes=2048,
+        timeout=10,
+    )
+    assert result.exit_code == 0 and result.truncated and not result.timed_out
+    assert result.stdout.startswith("o" * 1024)
+    assert result.stdout.endswith("2097152\n")
+    assert result.stderr.startswith("e" * 1024) and result.stderr.endswith("e" * 1024)
+
+
+async def test_output_retention_is_bounded():
+    tracemalloc.start()
+    try:
+        result = await run_proc(
+            [
+                sys.executable,
+                "-c",
+                ("import sys\nfor _ in range(128): sys.stdout.buffer.write(b'x'*65536)"),
+            ],
+            max_output_bytes=2048,
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result.exit_code == 0 and result.truncated
+    assert peak < 2 * 1024 * 1024
 
 
 async def test_cwd():
