@@ -32,7 +32,7 @@ def project(tmp_path):
 
 def test_defaults_validate_from_empty():
     config = Config.model_validate({})
-    assert config.schema_version == 1
+    assert config.schema_version == 2
     assert config.llm.provider == "openrouter"
     assert config.llm.thinking == "medium"
     assert config.llm.auth_policy == "auto"
@@ -45,8 +45,6 @@ def test_defaults_validate_from_empty():
     assert config.worktree.validation == []
     assert config.permissions.mode == "yolo"
     assert config.notifications.volume == 0.5
-    assert config.mcp.enable_exa is True
-    assert config.mcp.enable_context7 is False
     assert config.memory.max_bytes == 32768
     assert config.telemetry.enabled is False
     assert config.telemetry.sentry_dsn is None
@@ -164,9 +162,24 @@ def test_missing_schema_version_migrated_and_rewritten(global_dir, tmp_path):
     path = global_dir / "config.toml"
     path.write_text('[llm]\nmodel = "x"\n')
     result = load_config(cwd=tmp_path)
-    assert result.config.schema_version == 1
-    assert "schema_version = 1" in path.read_text()
+    assert result.config.schema_version == 2
+    assert "schema_version = 2" in path.read_text()
     assert 'model = "x"' in path.read_text()
+
+
+def test_v1_migration_drops_removed_mcp_flags(global_dir, tmp_path):
+    path = global_dir / "config.toml"
+    path.write_text(
+        "schema_version = 1\n[mcp]\nenable_exa = true\nenable_context7 = true\n"
+        '[mcp.servers.mine]\ntransport = "stdio"\ncommand = "x"\n'
+    )
+    result = load_config(cwd=tmp_path)
+    assert result.config.schema_version == 2
+    assert list(result.config.mcp.servers) == ["mine"]
+    assert not any("unknown config key" in w for w in result.warnings)
+    rewritten = path.read_text()
+    assert "enable_exa" not in rewritten and "enable_context7" not in rewritten
+    assert "schema_version = 2" in rewritten
 
 
 def test_migration_applied_from_registry(global_dir, tmp_path, monkeypatch):

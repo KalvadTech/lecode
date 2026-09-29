@@ -6,6 +6,7 @@ import io
 
 import pytest
 from rich.console import Console
+from rich.text import Text
 
 from lecode.agent.builder import build_runtime
 from lecode.config.loader import LoadedConfig, config_dir, load_config
@@ -26,7 +27,6 @@ from lecode.tui.themes import THEME
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
-    monkeypatch.delenv("EXA_API_KEY", raising=False)
     (tmp_path / ".git").mkdir()
     return tmp_path
 
@@ -224,60 +224,41 @@ def test_memory_step_states(env):
     assert _step(steps, "memory").detail == "disabled"
 
 
-def test_mcp_step_states(env, monkeypatch):
+def test_mcp_step_states(env):
     steps, *_ = _make(env)
-    # exa on by default but no key
-    assert _step(steps, "mcp").detail == "exa (no EXA_API_KEY)"
-    monkeypatch.setenv("EXA_API_KEY", "k")
-    config = Config(
-        mcp={"enable_context7": True, "servers": {"mine": {"transport": "stdio", "command": "x"}}}
-    )
+    assert _step(steps, "mcp").detail == "no servers"
+    config = Config(mcp={"servers": {"mine": {"transport": "stdio", "command": "x"}}})
     steps, *_ = _make(env, config)
-    mcp = _step(steps, "mcp")
-    assert "exa" in mcp.detail and "context7" in mcp.detail and "mine" in mcp.detail
+    assert _step(steps, "mcp").detail == "mine"
 
 
-def test_mcp_step_live_statuses(env, monkeypatch):
+def test_mcp_step_live_statuses(env):
     from lecode.extras.mcp_client import ServerStatus
     from lecode.tui.loading import WARN
 
-    monkeypatch.setenv("EXA_API_KEY", "k")
     servers = [
-        ServerStatus("context7", "connected", tools=2),
-        ServerStatus("exa", "connected", tools=3),
+        ServerStatus("docs", "connected", tools=2),
+        ServerStatus("web", "connected", tools=3),
         ServerStatus("mine", "failed", error="TimeoutError: connect"),
         ServerStatus("off", "disabled"),
     ]
     steps, *_ = _make(env, mcp_servers=servers)
     mcp = _step(steps, "mcp")
     assert mcp.status == WARN  # one server failed
-    assert "exa: connected · 3 tools" in mcp.detail
-    assert "context7: connected · 2 tools" in mcp.detail
+    assert "web: connected · 3 tools" in mcp.detail
+    assert "docs: connected · 2 tools" in mcp.detail
     assert "mine: failed — TimeoutError: connect" in mcp.detail
     assert "off: disabled" in mcp.detail
 
 
-def test_mcp_step_live_statuses_all_connected(env, monkeypatch):
+def test_mcp_step_live_statuses_all_connected(env):
     from lecode.extras.mcp_client import ServerStatus
     from lecode.tui.loading import OK
 
-    monkeypatch.setenv("EXA_API_KEY", "k")
-    steps, *_ = _make(env, mcp_servers=[ServerStatus("exa", "connected", tools=3)])
+    steps, *_ = _make(env, mcp_servers=[ServerStatus("mine", "connected", tools=3)])
     mcp = _step(steps, "mcp")
     assert mcp.status == OK
-    assert mcp.detail == "exa: connected · 3 tools"
-
-
-def test_mcp_step_live_statuses_exa_key_missing(env, monkeypatch):
-    from lecode.extras.mcp_client import ServerStatus
-    from lecode.tui.loading import WARN
-
-    monkeypatch.delenv("EXA_API_KEY", raising=False)
-    steps, *_ = _make(env, mcp_servers=[ServerStatus("mine", "connected", tools=1)])
-    mcp = _step(steps, "mcp")
-    assert mcp.status == WARN
-    assert "mine: connected · 1 tools" in mcp.detail
-    assert "exa: no EXA_API_KEY" in mcp.detail
+    assert mcp.detail == "mine: connected · 3 tools"
 
 
 def test_permissions_step(env):
@@ -309,11 +290,11 @@ def test_render_prints_ascii_banner_and_byline(env):
     console = Console(file=out, force_terminal=False, no_color=True, width=100)
     render_loading_screen(console, THEME, session_name="demo", steps=steps, cwd=env)
     text = out.getvalue()
-    # figlet "standard" banner for "lecode", byline below it
-    assert "| | ___  ___ ___   __| | ___" in text
-    assert "|_|\\___|\\___\\___/ \\__,_|\\___|" in text
-    assert "by wowi42" in text
-    assert text.index("by wowi42") < text.index("session")  # banner above the panel
+    # pyfiglet "ansi_shadow" banner for "lecode", byline below it
+    assert "██╗" in text
+    assert "╚══════╝╚══════╝" in text
+    assert "by Kalvad" in text
+    assert text.index("by Kalvad") < text.index("session")  # banner above the panel
 
 
 def test_show_loading_screen_never_raises(env, monkeypatch):
@@ -344,18 +325,18 @@ def test_interactive_startup_prints_loading_screen(env, monkeypatch, capsys):
     """run_interactive prints the banner and step lines before the chat."""
     import lecode.cli as cli
 
-    monkeypatch.setattr(cli, "prompt_session_name", _fake_name_prompt)
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _fake_name_prompt)
     monkeypatch.setattr(cli, "build_provider", lambda config, api_key=None: object())
-    monkeypatch.setattr(cli, "TuiApp", _FakeTui)
+    monkeypatch.setattr("lecode.tui.app.TuiApp", _FakeTui)
     monkeypatch.setattr(cli, "_run_tui", _fake_run_tui)
     code = cli.run_interactive()
     assert code == 0
     out = capsys.readouterr().out
     # ASCII banner up front, then progressive step lines
-    assert "| | ___  ___ ___   __| | ___" in out
-    assert "by wowi42" in out
+    assert "██╗" in out
+    assert "by Kalvad" in out
     assert "config" in out and "provider" in out and "session" in out
-    assert out.index("| | ___") < out.index("provider")  # banner before the steps
+    assert out.index("██╗") < out.index("provider")  # banner before the steps
 
 
 async def _fake_name_prompt(store):
@@ -379,7 +360,7 @@ def test_catalog_fetch_runs_in_background(env, monkeypatch):
     from lecode.providers.live import LoadedCatalog
 
     events: list[str] = []
-    monkeypatch.setattr(cli, "prompt_session_name", _fake_name_prompt)
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _fake_name_prompt)
     monkeypatch.setattr(cli, "build_provider", lambda config, api_key=None: object())
 
     class FakeTui:
@@ -400,7 +381,7 @@ def test_catalog_fetch_runs_in_background(env, monkeypatch):
         events.append("fetch-done")
         return LoadedCatalog(Catalog.default(), "live", 427)
 
-    monkeypatch.setattr(cli, "TuiApp", FakeTui)
+    monkeypatch.setattr("lecode.tui.app.TuiApp", FakeTui)
     monkeypatch.setattr(cli, "_run_tui", fake_run_tui)
     monkeypatch.setattr(cli, "fetch_catalog", slow_fetch)
     assert cli.run_interactive() == 0
@@ -431,8 +412,36 @@ def test_progressive_banner_prints_immediately():
     console, out = _record_console()
     LoadingProgress(console).banner()
     text = out.getvalue()
-    assert "| | ___  ___ ___   __| | ___" in text
-    assert "by wowi42" in text
+    assert "██╗" in text
+    assert "by Kalvad" in text
+
+
+def test_banner_shows_version_splash_and_gradient():
+    from lecode import __version__
+    from lecode.tui.loading import print_banner
+
+    out = io.StringIO()
+    console = Console(
+        file=out, force_terminal=True, color_system="truecolor", no_color=False, width=100
+    )
+    print_banner(console, THEME, splash="test splash")
+    raw = out.getvalue()
+    text = Text.from_ansi(raw).plain
+    assert f"v{__version__}" in text
+    assert "by Kalvad" in text
+    assert "test splash" in text
+    # the banner is colored per column — leftmost glyph is the deep-purple endpoint
+    assert "38;2;124;58;237" in raw  # #7c3aed as an ANSI truecolor escape
+
+
+def test_banner_random_splash_is_one_of_the_known_ones():
+    from lecode.tui.loading import _SPLASHES, print_banner
+
+    out = io.StringIO()
+    console = Console(file=out, force_terminal=False, no_color=True, width=100)
+    print_banner(console, THEME)
+    text = out.getvalue()
+    assert any(splash in text for splash in _SPLASHES)
 
 
 def test_progressive_steps_append_in_order():
@@ -449,7 +458,7 @@ def test_progressive_steps_append_in_order():
     assert "… models" in text  # pending line shown while the fetch runs
     assert text.index("… models") < text.index("427 fetched")
     # banner comes before any step
-    assert text.index("| | ___") < text.index("✓ config")
+    assert text.index("██╗") < text.index("✓ config")
 
 
 def test_progressive_step_multiline_detail_indented():

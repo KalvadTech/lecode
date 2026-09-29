@@ -293,7 +293,7 @@ def test_setup_runs_wizard_and_exits(cfg_dir, monkeypatch):
         called.append(True)
         return config_dir() / "config.toml"
 
-    monkeypatch.setattr("lecode.cli.run_wizard", fake_wizard)
+    monkeypatch.setattr("lecode.setup_wizard.run_wizard", fake_wizard)
     assert run_setup() == 0
     assert called == [True]
 
@@ -306,7 +306,7 @@ def test_setup_cancelled_exits_1(cfg_dir, monkeypatch):
     async def cancelled():
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("lecode.cli.run_wizard", cancelled)
+    monkeypatch.setattr("lecode.setup_wizard.run_wizard", cancelled)
     assert run_setup() == 1
 
 
@@ -352,8 +352,8 @@ def _patch_past_offer(monkeypatch, offered):
     async def no_name(store, **kwargs):
         return None  # Ctrl-D at the name prompt → exit 0
 
-    monkeypatch.setattr("lecode.cli.offer_first_run_setup", fake_offer)
-    monkeypatch.setattr("lecode.cli.prompt_session_name", no_name)
+    monkeypatch.setattr("lecode.setup_wizard.offer_first_run_setup", fake_offer)
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", no_name)
 
 
 def test_interactive_first_run_offers_setup(tmp_path, monkeypatch):
@@ -536,10 +536,10 @@ def test_import_from_opencode_mcp_only(tmp_path):
     """MCP servers import even when the provider/model doesn't map."""
     _write(
         tmp_path / ".config" / "opencode" / "opencode.json",
-        {"mcp": {"docs": {"type": "remote", "url": "https://mcp.context7.com/mcp"}}},
+        {"mcp": {"docs": {"type": "remote", "url": "https://mcp.example.com/mcp"}}},
     )
     assert import_from_opencode(tmp_path) == {
-        "mcp_servers": {"docs": {"transport": "http", "url": "https://mcp.context7.com/mcp"}}
+        "mcp_servers": {"docs": {"transport": "http", "url": "https://mcp.example.com/mcp"}}
     }
 
 
@@ -580,7 +580,7 @@ async def test_wizard_opencode_mcp_only_import_still_asks_provider(cfg_dir, tmp_
     home = tmp_path / "home"
     _write(
         home / ".config" / "opencode" / "opencode.json",
-        {"mcp": {"docs": {"type": "remote", "url": "https://mcp.context7.com/mcp"}}},
+        {"mcp": {"docs": {"type": "remote", "url": "https://mcp.example.com/mcp"}}},
     )
     # import pick, provider, key, model, notif
     session = FakeSession(["1", "1", "sk-manual", "1", ""])
@@ -588,7 +588,7 @@ async def test_wizard_opencode_mcp_only_import_still_asks_provider(cfg_dir, tmp_
     assert "1 mcp server" in capsys.readouterr().out
     assert answers["provider"] == "openrouter"
     assert answers["mcp_servers"] == {
-        "docs": {"transport": "http", "url": "https://mcp.context7.com/mcp"}
+        "docs": {"transport": "http", "url": "https://mcp.example.com/mcp"}
     }
 
 

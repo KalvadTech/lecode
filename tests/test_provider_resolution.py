@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import pytest
+import respx
 
 from lecode.auth import ResolvedKey, resolve_api_key
 from lecode.config.models import Config
 from lecode.providers import build_client, resolve_provider
 from lecode.providers.openrouter import OPENROUTER_BASE_URL
+from lecode.providers.types import collect
 
 
 def _config(**kwargs) -> Config:
@@ -92,3 +94,64 @@ def test_build_client_keyless():
         ResolvedKey(key=None, source="none"),
     )
     assert "authorization" not in client._client.headers
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "custom", "adhoc"])
+@pytest.mark.parametrize("with_key", [False, True])
+@respx.mock
+async def test_run_headers_reach_chat_and_catalog(provider, with_key):
+    config = _config(
+        llm={"provider": "custom" if provider == "custom" else "openrouter"},
+        custom_providers={
+            "custom": {
+                "base_url": "https://provider.test/v1",
+                "headers": {"X-Title": "configured"},
+            }
+        },
+    )
+    config.llm._cli_headers = {
+        "x-title": "runtime",
+        "content-type": "application/custom+json",
+        "authorization": "Custom runtime",
+        "x-route": "https://example.test:8443",
+        "x-empty": "",
+    }
+    cli_base_url = "https://provider.test/v1" if provider == "adhoc" else None
+    spec = resolve_provider(config, cli_base_url=cli_base_url)
+    catalog = respx.get(f"{spec.base_url}/models").respond(200, json={"data": []})
+    chat = respx.post(f"{spec.base_url}/chat/completions").respond(
+        200,
+        content=b"data: [DONE]\n\n",
+    )
+    key = ResolvedKey(key="test-key" if with_key else None, source="cli" if with_key else "none")
+    async with build_client(spec, key) as client:
+        await client.list_models()
+        await collect(client.stream_chat([{"role": "user", "content": "hi"}], model="m"))
+    for route in (catalog, chat):
+        headers = route.calls.last.request.headers
+        assert headers.get_list("x-title") == ["runtime"]
+        assert headers.get_list("content-type") == ["application/custom+json"]
+        expected_auth = "Bearer test-key" if with_key else "Custom runtime"
+        assert headers.get_list("authorization") == [expected_auth]
+        assert headers["x-route"] == "https://example.test:8443"
+        assert headers["x-empty"] == ""
+        if provider == "openrouter":
+            assert "HTTP-Referer" in headers
+
+
+@pytest.mark.parametrize("policy", ["none", "required"])
+def test_run_authorization_preserves_auth_policy(policy, monkeypatch):
+    from lecode.auth import AuthError
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    config = _config(llm={"auth_policy": policy})
+    config.llm._cli_headers = {"authorization": "Custom runtime"}
+    spec = resolve_provider(config)
+    if policy == "required":
+        with pytest.raises(AuthError, match="required"):
+            resolve_api_key(spec.name, config)
+    else:
+        key = resolve_api_key(spec.name, config, cli_key="test-key")
+        assert key.key is None
+        assert spec.headers["authorization"] == "Custom runtime"

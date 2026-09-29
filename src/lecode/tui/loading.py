@@ -11,7 +11,7 @@ never shows it. The panel renderer is kept for snapshot-style rendering.
 from __future__ import annotations
 
 import logging
-import os
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -42,14 +42,67 @@ _MARKS = {OK: "✓", WARN: "!", SKIP: "–", PENDING: "…"}  # noqa: RUF001
 #: Label column width for progressive lines (the longest label).
 LABEL_WIDTH = len("permissions")
 
-#: ASCII-art banner (figlet "standard") printed above the loading panel.
-_BANNER = r""" _                    _
-| | ___  ___ ___   __| | ___
-| |/ _ \/ __/ _ \ / _` |/ _ \
-| |  __/ (_| (_) | (_| |  __/
-|_|\___|\___\___/ \__,_|\___|"""
+#: ASCII-art banner (pyfiglet "ansi_shadow") printed above the loading panel.
+_BANNER = """\
+██╗     ███████╗ ██████╗ ██████╗ ██████╗ ███████╗
+██║     ██╔════╝██╔════╝██╔═══██╗██╔══██╗██╔════╝
+██║     █████╗  ██║     ██║   ██║██║  ██║█████╗
+██║     ██╔══╝  ██║     ██║   ██║██║  ██║██╔══╝
+███████╗███████╗╚██████╗╚██████╔╝██████╔╝███████╗
+╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝"""
 
-_BYLINE = "by wowi42"
+_BYLINE = "by Kalvad"
+
+#: Splash taglines — one rides along with the byline, picked at random.
+_SPLASHES = (
+    "now with 100% more purple",
+    "your keys, your models, your rules",
+    "handcrafted in the terminal",
+    "type fast, undo faster",
+    "Ctrl-C is always there for you",
+    "purple is a feature",
+    "runs on commits and caffeine",
+    "minds your scrollback",
+    "ships on a purple carpet",
+)
+
+
+def _gradient_stops(theme: Theme) -> tuple[str, ...]:
+    """Deep purple → brand violet → fuchsia, following the theme."""
+    return ("#7c3aed", theme.accent, theme.permission)
+
+
+def _lerp_color(a: str, b: str, t: float) -> str:
+    """Linear interpolation between two ``#rrggbb`` colors."""
+    ar, ag, ab = (int(a[i : i + 2], 16) for i in (1, 3, 5))
+    br, bg, bb = (int(b[i : i + 2], 16) for i in (1, 3, 5))
+    r = round(ar + (br - ar) * t)
+    g = round(ag + (bg - ag) * t)
+    blue = round(ab + (bb - ab) * t)
+    return f"#{r:02x}{g:02x}{blue:02x}"
+
+
+def _gradient_color(t: float, stops: tuple[str, ...]) -> str:
+    """Piecewise-linear color at position ``t`` (0..1) across ``stops``."""
+    span = (len(stops) - 1) * min(max(t, 0.0), 1.0)
+    i = min(int(span), len(stops) - 2)
+    return _lerp_color(stops[i], stops[i + 1], span - i)
+
+
+def _gradient_text(text: str, stops: tuple[str, ...]) -> Text:
+    """``text`` as Rich text with a horizontal gradient across ``stops``."""
+    lines = text.splitlines()
+    width = max(len(line) for line in lines)
+    out = Text()
+    for row, line in enumerate(lines):
+        if row:
+            out.append("\n")
+        for col, char in enumerate(line):
+            if char == " ":
+                out.append(char)
+            else:
+                out.append(char, style=_gradient_color(col / (width - 1), stops))
+    return out
 
 
 @dataclass(frozen=True)
@@ -131,34 +184,15 @@ def mcp_step(config: Config, mcp_servers: list[ServerStatus] | None = None) -> L
                 lines.append(s.auth_hint)
             else:
                 lines.append(f"{s.name}: disabled")
-        exa_missing = (
-            config.mcp.enable_exa
-            and not os.environ.get("EXA_API_KEY")
-            and not any(s.name == "exa" for s in mcp_servers)
-        )
-        if exa_missing:
-            lines.append("exa: no EXA_API_KEY")
         if not lines:
             return LoadStep("mcp", "no servers", SKIP)
-        degraded = exa_missing or any(s.state in ("failed", "auth_required") for s in mcp_servers)
+        degraded = any(s.state in ("failed", "auth_required") for s in mcp_servers)
         return LoadStep("mcp", "\n".join(lines), WARN if degraded else OK)
 
     # no live statuses (tests, headless): report the configuration only
-    mcp_bits: list[str] = []
-    mcp_status = OK
-    if config.mcp.enable_exa:
-        if os.environ.get("EXA_API_KEY"):
-            mcp_bits.append("exa")
-        else:
-            mcp_bits.append("exa (no EXA_API_KEY)")
-            mcp_status = WARN
-    if config.mcp.enable_context7:
-        mcp_bits.append("context7")
-    configured = [n for n, s in config.mcp.servers.items() if s.enabled]
+    configured = sorted(n for n, s in config.mcp.servers.items() if s.enabled)
     if configured:
-        mcp_bits.append(_join_names(sorted(configured), cap=3))
-    if mcp_bits:
-        return LoadStep("mcp", " · ".join(mcp_bits), mcp_status)
+        return LoadStep("mcp", _join_names(configured, cap=3), OK)
     return LoadStep("mcp", "no servers", SKIP)
 
 
@@ -280,10 +314,25 @@ def build_load_report(
     return steps
 
 
-def print_banner(console: Console, theme: Theme) -> None:
+def _byline_text(theme: Theme, splash: str | None) -> Text:
+    """Version, ``by Kalvad`` link, and the splash tagline on one line."""
+    from lecode import __version__
+
+    if splash is None:
+        splash = random.choice(_SPLASHES)
+    line = Text()
+    line.append(f"v{__version__}", style=theme.muted)
+    line.append(" · ", style=theme.muted)
+    line.append("by ", style=theme.muted)
+    line.append("Kalvad", style=f"bold {theme.accent} link https://kalvad.com")
+    line.append(f" — {splash}", style=f"italic {theme.permission}")
+    return line
+
+
+def print_banner(console: Console, theme: Theme, *, splash: str | None = None) -> None:
     """The ASCII-art banner + byline — printed immediately at startup."""
-    console.print(Text(_BANNER, style=theme.accent), justify="center")
-    console.print(Text(_BYLINE, style=theme.muted), justify="center")
+    console.print(_gradient_text(_BANNER, _gradient_stops(theme)), justify="center")
+    console.print(_byline_text(theme, splash), justify="center")
     console.print()
 
 

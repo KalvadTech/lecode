@@ -6,16 +6,19 @@ legacy HTTP transport). Their tools show up as first-class lecode tools named
 `mcp:<server>:<tool>` and go through the permission system like everything
 else.
 
-## Auto-configured servers
+There are no built-in servers; everything comes from `[mcp.servers]`. To add
+a hosted server like Exa or context7, configure it yourself:
 
-| server | when | transport |
-|---|---|---|
-| **Exa** (web search) | on by default; needs `EXA_API_KEY` in the environment | http `https://mcp.exa.ai/mcp` |
-| **context7** (docs lookup) | off by default; set `enable_context7 = true` | http `https://mcp.context7.com/mcp` |
+```toml
+[mcp.servers.exa]
+transport = "http"
+url = "https://mcp.exa.ai/mcp?exaApiKey=<key>"
+headers = { Authorization = "Bearer <key>" }
 
-Exa authentication: the key is sent as the `?exaApiKey=` query parameter and
-as an `Authorization: Bearer` header. Without `EXA_API_KEY`, Exa is skipped
-silently.
+[mcp.servers.context7]
+transport = "http"
+url = "https://mcp.context7.com/mcp"
+```
 
 ## Configured servers
 
@@ -38,9 +41,6 @@ transport = "sse"
 url = "https://mcp.remote.example/sse"
 auth = "oauth"           # interactive OAuth 2.1 authorization-code flow
 ```
-
-A `[mcp.servers]` entry named `exa` or `context7` replaces the auto-configured
-definition.
 
 ## OAuth 2.1
 
@@ -81,9 +81,9 @@ callback. `auth = "oauth"` conflicts with a static `Authorization` header
 
 ## Permissions
 
-Tools from the read-only-ish servers **exa**, **context7**, and **grep-app**
-are read-equivalent: allowed in both `yolo` and `readonly` modes. Every
-other MCP tool follows the mode fallback (allowed in `yolo`, denied in
+Tools from servers **named** `exa`, `context7`, or `grep-app` (read-only-ish
+services) are read-equivalent: allowed in both `yolo` and `readonly` modes.
+Every other MCP tool follows the mode fallback (allowed in `yolo`, denied in
 `readonly`) and can be matched by rules:
 
 ```toml

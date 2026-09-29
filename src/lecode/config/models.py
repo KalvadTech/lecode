@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 #: Current on-disk schema version. Bump when adding a migration.
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 ThinkingLevel = Literal["none", "low", "medium", "high"]
 AuthPolicy = Literal["auto", "required", "none"]
@@ -42,6 +42,8 @@ class LlmConfig(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     thinking: ThinkingLevel = "medium"
+    # Run-only headers from --header; excluded from the config schema and serialization.
+    _cli_headers: dict[str, str] = PrivateAttr(default_factory=dict)
     connect_timeout_s: float = 10.0
     read_timeout_s: float = 300.0
     auth_policy: AuthPolicy = "auto"
@@ -189,8 +191,6 @@ class McpConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    enable_exa: bool = True
-    enable_context7: bool = False
     servers: dict[str, McpServerConfig] = Field(default_factory=dict)
 
 

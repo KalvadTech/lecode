@@ -8,7 +8,7 @@ lecode reads TOML config only (`config.toml`):
 - **Project**: `.lecode/config.toml`, found by walking from the cwd up to
   the git root. Deep-merged over the global config: dicts merge recursively,
   scalars and lists replace.
-- **CLI flags** apply on top of both (`--model`, `--provider`, `--base-url`,
+- **CLI flags** apply on top of both (`--model`, `--thinking`, `--header`, `--provider`, `--base-url`,
   `--api-key`, …).
 
 Unknown keys produce startup warnings. `schema_version = 1` is the current
@@ -18,6 +18,22 @@ The API key resolution chain is: `--api-key` > provider env var
 (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or `[custom_providers.*].api_key_env`)
 > `[llm].api_key` in the config file. If you store the key in the file, keep
 it owner-only (`chmod 600`); `lecode --setup` does that for you.
+
+`--thinking none|low|medium|high` overrides reasoning effort for one run in
+interactive (including resume), headless, loop, and chain modes. `none` omits
+the reasoning-effort field, leaving the provider's default behavior in effect.
+
+Repeat `--header 'Name: value'` to supply HTTP headers for that run's chat and
+catalog requests, for example
+`lecode -p 'Review this code' --thinking high --header 'X-Team: infra'`.
+Names are case-insensitive: CLI headers override
+provider headers and the last flag with the same name wins. A resolved API key
+still takes precedence over an explicit Authorization header. `--auth-policy none`
+suppresses generated API-key auth but permits explicit Authorization;
+`required` still requires an API key. Values may contain colons or be empty;
+surrounding spaces and tabs are trimmed. Invalid names, control characters
+(except tabs in values), and non-ASCII values are rejected without echoing the
+header value. Run headers are never written to config or session files.
 
 ## `[llm]`
 
@@ -199,11 +215,6 @@ bars and tmux integration.
 Payload: `{"event", "session", "ts", …}`; failures are dropped silently.
 
 ## `[mcp]`
-
-| field | default | meaning |
-|---|---|---|
-| `enable_exa` | `true` | auto-configure Exa web search when `EXA_API_KEY` is set |
-| `enable_context7` | `false` | auto-configure the context7 docs server |
 
 `[mcp.servers.<name>]` entries:
 

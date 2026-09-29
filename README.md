@@ -4,12 +4,13 @@
 just your terminal, an OpenAI-compatible model, and a sharp set of tools.
 
 ```text
-         _                    _
-        | | ___  ___ ___   __| | ___
-        | |/ _ \/ __/ _ \ / _` |/ _ \
-        | |  __/ (_| (_) | (_| |  __/
-        |_|\___|\___\___/ \__,_|\___|
-                  by wowi42
+██╗     ███████╗ ██████╗ ██████╗ ██████╗ ███████╗
+██║     ██╔════╝██╔════╝██╔═══██╗██╔══██╗██╔════╝
+██║     █████╗  ██║     ██║   ██║██║  ██║█████╗
+██║     ██╔══╝  ██║     ██║   ██║██║  ██║██╔══╝
+███████╗███████╗╚██████╗╚██████╔╝██████╔╝███████╗
+╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
+        v0.2.0 · by Kalvad — now with 100% more purple
 
 ╭────────────────────────── lecode — fix-auth ───────────────────────────╮
 │  ✓ session      fix-auth — new session                                 │
@@ -27,7 +28,7 @@ just your terminal, an OpenAI-compatible model, and a sharp set of tools.
 │  – hooks        none configured                                        │
 │  – pierre       off                                                    │
 │  ✓ lsp          enabled                                                │
-│  ! mcp          exa (no EXA_API_KEY)                                   │
+│  – mcp          no servers                                             │
 ╰─────────────────── ~/github.com/you/your-project ─────────────────────╯
 ```
 
@@ -127,8 +128,36 @@ lecode --chain "redesign the parser"          # brainstorm→plan→code→revie
 The final answer goes to stdout; a `tokens: <in> in / <out> out · cost:
 $X.XXXX` summary goes to stderr, so scripts can pipe the answer cleanly.
 
-Exit codes: `0` done · `1` error · `2` startup (missing deps, bad flags,
-non-tty `--setup`) · `3` max turns / max loop iterations / context overflow.
+Headless, loop, and chain modes use these exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Done |
+| `1` | Generic error, including other HTTP failures |
+| `2` | Startup error: missing dependencies or required credentials, bad flags, non-tty `--setup` |
+| `3` | Max turns, max loop iterations, or context overflow |
+| `4` | Provider authentication failure |
+| `5` | Provider budget or credit exhaustion |
+| `6` | Model/resource not found, including HTTP 404 (which can also mean an incorrect endpoint) |
+| `7` | Provider rate limit, after retries are exhausted |
+| `8` | Upstream, timeout, conflict, or transport failure |
+| `9` | Unknown or malformed in-stream error |
+
+HTTP and in-stream errors share classification. Recognized
+`error.metadata.error_type` values take precedence over symbolic `error.code`
+and `error.type`, followed by HTTP status (or a numeric in-stream code).
+In-stream codes can be integers or three-digit ASCII strings. Recognized
+symbolic codes are `authentication`, `invalid_api_key`, `payment_required`,
+`insufficient_quota`, `credit_balance_exhausted`, `model_not_found`, `not_found`,
+`rate_limit_exceeded`, `provider_overloaded`, `provider_unavailable`, `server`,
+`server_error`, and `timeout`. Classification never guesses from message text.
+
+Budget failures are not retried, including quota errors reported as HTTP 429.
+Other retries use the numeric HTTP/in-stream status when supplied, retaining
+the existing set: 408, 409, 429, 500, 502, 503, 504 and transport failures.
+Symbolic-only in-stream errors use their corresponding status.
+Unknown or malformed in-stream errors are not
+retried. Interactive mode continues to display provider failures and stay open.
 
 ## A tour of the power features
 
@@ -170,8 +199,7 @@ non-tty `--setup`) · `3` max turns / max loop iterations / context overflow.
   `[notifications]`.
 - **MCP** — stdio, streamable-HTTP, and SSE servers, with optional OAuth 2.1
   (`auth = "oauth"`, browser flow, tokens under `<config_dir>/mcp-auth/`;
-  `/mcp auth` to authorize, `/mcp login|logout` to manage). Exa web search is
-  preconfigured (needs `EXA_API_KEY`); context7 is one flag away.
+  `/mcp auth` to authorize, `/mcp login|logout` to manage).
 - **LSP** — diagnostics from real language servers appended to `write`/`edit`
   results; fail-open, never blocks.
 - **Worktrees** — `--worktree <name>` or `/worktree` for isolated branches,
@@ -219,7 +247,7 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 - [docs/hooks.md](docs/hooks.md) — hook events, envelope, verdict protocol
 - [docs/memory.md](docs/memory.md) — the memory store
 - [docs/agents-and-skills.md](docs/agents-and-skills.md) — custom agents and skills
-- [docs/mcp.md](docs/mcp.md) — MCP servers, Exa, context7
+- [docs/mcp.md](docs/mcp.md) — MCP servers
 - [docs/build-plan.md](docs/build-plan.md) — the full product definition
 
 ## Development
