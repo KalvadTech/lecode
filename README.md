@@ -120,6 +120,7 @@ Alt-Enter                 steer the agent mid-turn
 
 ```sh
 lecode -p "write a haiku about this repo"     # one prompt, then exit
+lecode -p "review this repo" --max-cost 1 --timeout 120
 git diff | lecode -p "review this diff"       # a bare -p reads stdin
 lecode --loop plan.md --loop-cmd "make test"  # iterate until the plan is done
 lecode --chain "redesign the parser"          # brainstorm→plan→code→review
@@ -127,6 +128,8 @@ lecode --chain "redesign the parser"          # brainstorm→plan→code→revie
 
 The final answer goes to stdout; a `tokens: <in> in / <out> out · cost:
 $X.XXXX` summary goes to stderr, so scripts can pipe the answer cleanly.
+Incomplete accounting uses `cost: known $X.XXXX`; this is only the known
+portion of spending, not a complete total.
 
 Headless, loop, and chain modes use these exit codes:
 
@@ -135,13 +138,16 @@ Headless, loop, and chain modes use these exit codes:
 | `0` | Done |
 | `1` | Generic error, including other HTTP failures |
 | `2` | Startup error: missing dependencies or required credentials, bad flags, non-tty `--setup` |
-| `3` | Max turns, max loop iterations, or context overflow |
+| `3` | Max turns or max loop iterations |
 | `4` | Provider authentication failure |
 | `5` | Provider budget or credit exhaustion |
 | `6` | Model/resource not found, including HTTP 404 (which can also mean an incorrect endpoint) |
 | `7` | Provider rate limit, after retries are exhausted |
 | `8` | Upstream, timeout, conflict, or transport failure |
 | `9` | Unknown or malformed in-stream error |
+| `10` | Context overflow |
+| `11` | Cost limit or unknown spend (single prompt only) |
+| `12` | Execution timeout (single prompt only) |
 
 HTTP and in-stream errors share classification. Recognized
 `error.metadata.error_type` values take precedence over symbolic `error.code`
@@ -158,6 +164,18 @@ the existing set: 408, 409, 429, 500, 502, 503, 504 and transport failures.
 Symbolic-only in-stream errors use their corresponding status.
 Unknown or malformed in-stream errors are not
 retried. Interactive mode continues to display provider failures and stay open.
+
+For single-prompt headless runs, `--max-cost` accepts a positive USD threshold.
+All model calls share it, including workers, subagents, compaction, learning,
+reviews, and retries. Once accounted spending reaches it, no further model
+requests start. Requests already in flight can exceed it. Unknown or invalid
+model prices reject the request before execution, and missing or invalid usage
+stops further requests. Explicit zero prices are valid for free models.
+
+`--timeout` accepts positive seconds and covers active execution from MCP
+connection through model calls, tools, and review. Synchronous startup and
+resource cleanup are outside this deadline, so process exit can occur later.
+Neither flag applies to interactive, loop, or chain mode.
 
 ## A tour of the power features
 

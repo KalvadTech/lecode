@@ -303,14 +303,13 @@ async def test_run_rebuilds_stale_summary_from_visible_raw_sources(tool_ctx, tmp
 
 
 @pytest.mark.parametrize("oversize", ["system", "tools", "user"])
-async def test_current_catalog_model_limits_preflight_even_with_continue(tool_ctx, oversize):
+async def test_current_catalog_model_limits_preflight(tool_ctx, oversize):
     catalog = sample_catalog()
     small = catalog.get(tool_ctx.config.llm.model).model_copy(
         update={"context_window": 1000, "max_output": 100}
     )
     catalog = catalog.merge([small])
     tool_ctx.config.agent.context_window = 1000000  # not the current model's limit
-    tool_ctx.config.compaction.on_overflow = "continue"
     tool = EchoTool()
     if oversize == "tools":
         tool.description = "large tool schema " * 1000
@@ -1183,7 +1182,6 @@ async def test_pause_on_overflow_stops_run(tool_ctx, tmp_path):
     store, session = _compaction_setup(tool_ctx, tmp_path)
     tool_ctx.config.agent.context_window = 1000
     tool_ctx.config.compaction.buffer_tokens = 200
-    tool_ctx.config.compaction.on_overflow = "pause"
     script = [
         {
             "tool_calls": [{"id": "c1", "name": "echo", "arguments": "{}"}],
@@ -1475,6 +1473,7 @@ async def test_cached_raw_runner_history_respects_working_visibility(tool_ctx, t
         ("openai/gpt-5-", {"cost_usd": 0}, False),
         ("free/model", {"input_tokens": 7, "output_tokens": 2}, False),
         ("free/model", {"input_tokens": 0, "output_tokens": 0}, False),
+        ("unpriced/model", {"input_tokens": 7, "output_tokens": 2}, True),
         ("free/model", None, True),
         ("free/model", {"cost_usd": 0, "incomplete": True}, True),
     ],
@@ -1491,7 +1490,10 @@ async def test_usage_completeness_reaches_events_totals_and_storage(
     free = catalog.all()[0].model_copy(
         update={"id": "free/model", "pricing": Pricing(prompt=0, completion=0)}
     )
-    tool_ctx.catalog = catalog.merge([free])
+    unpriced = free.model_copy(
+        update={"id": "unpriced/model", "pricing": Pricing(prompt=0, completion=0, known=False)}
+    )
+    tool_ctx.catalog = catalog.merge([free, unpriced])
     store = SessionStore(config_dir=tmp_path / "cfg")
     session = store.create("usage-completeness", tmp_path, model=model)
     runner, _ = make_runner(

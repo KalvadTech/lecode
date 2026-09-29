@@ -73,6 +73,7 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
                 usage_incomplete = True
                 continue
             cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1_000_000
+            usage_incomplete |= not pricing.known
 
     # Auxiliary model calls and worker dispatches carry their usage on events.
     for record in records:
@@ -102,6 +103,7 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
                 usage_incomplete = True
                 continue
             cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
+            usage_incomplete |= not pricing.known
         else:
             usage_incomplete = True
 

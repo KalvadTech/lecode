@@ -58,7 +58,6 @@ class CompactionConfig(BaseModel):
 
     enabled: bool = True
     buffer_tokens: int = Field(default=20000, ge=1)
-    on_overflow: Literal["continue", "pause"] = "continue"
     mid_turn_threshold: float | None = Field(default=None, gt=0)
 
 

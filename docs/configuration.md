@@ -54,7 +54,9 @@ startup (context windows, pricing, modalities). When the fetch fails the
 catalog is empty — models lose pricing/modality annotations and costs report
 as unknown until the provider reports usage — and nothing is cached on disk. Plain
 OpenAI-shaped `/models` responses (id only) get a 128k
-default context window and zeroed pricing.
+default context window and unknown pricing. Missing or invalid prices are
+distinct from explicit zero prices. Headless `--max-cost` rejects unknown
+prices before admitting any request for that model.
 
 ### `[llm.system_prompt]`
 
@@ -70,8 +72,10 @@ default context window and zeroed pricing.
 |---|---|---|
 | `enabled` | `true` | auto-compact when approaching the context window |
 | `buffer_tokens` | `20000` | headroom kept below the window |
-| `on_overflow` | `"continue"` | `continue` \| `pause` when even compaction can't fit |
 | `mid_turn_threshold` | unset | absolute token count that triggers compaction on tool-loop rounds after the first (instead of window − buffer) |
+
+If compaction cannot make a request fit safely, the run pauses. The unused
+`on_overflow` option was removed; existing occurrences are ignored.
 
 ## `[agent]`
 
