@@ -304,6 +304,7 @@ class AgentRunner:
             replay = self.store.load_for_model(self.session)
             if replay and replay[0].get("role") == "system" and history[:1] == replay[:1]:
                 history.insert(0, {"role": "system", "content": ""})
+            del replay
         # The live conversation, visible through ctx (subagents, hooks).
         self.ctx.extras["conversation"] = history
         manager = self.ctx.extras.get("workers")
