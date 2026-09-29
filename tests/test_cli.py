@@ -170,7 +170,8 @@ def test_invalid_header_fails_before_startup_without_echoing_value(header, monke
     monkeypatch.setattr("lecode.cli.check_dependencies", unexpected_startup)
     result = runner.invoke(app, ["--header", header])
     assert result.exit_code == EXIT_STARTUP
-    assert "--header" in result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "--header" in plain
     assert "sensitive-value" not in result.output
 
 
@@ -178,7 +179,8 @@ def test_invalid_thinking_fails_before_startup(monkeypatch):
     monkeypatch.setattr("lecode.cli.check_dependencies", lambda: pytest.fail("reached startup"))
     result = runner.invoke(app, ["--thinking", "ultra"])
     assert result.exit_code == EXIT_STARTUP
-    assert "--thinking" in result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "--thinking" in plain
 
 
 def _fake_missing():
