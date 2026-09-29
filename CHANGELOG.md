@@ -1,5 +1,93 @@
 # Changelog
 
+## [1.0.0](https://github.com/KalvadTech/lecode/compare/v0.2.0...v1.0.0) (2026-09-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* the [mcp] enable_exa and enable_context7 flags are removed, and EXA_API_KEY no longer auto-configures a server. Add these servers by hand under [mcp.servers]; a schema v2 migration strips the removed flags from existing configs.
+
+### Features
+
+* add cost and timeout limits to headless runs ([0f6bc2f](https://github.com/KalvadTech/lecode/commit/0f6bc2f2a24476d1179f10aae5bf2cd240bca949))
+* add durable memory and natural preference learning ([320e0ff](https://github.com/KalvadTech/lecode/commit/320e0fff7b47195fd851ea3acbd30b3aa01092c7))
+* add persistent worker subagents ([248bb2a](https://github.com/KalvadTech/lecode/commit/248bb2a8347bdd96d9756bf7a20f1f16ac232992))
+* add persistent worker supervision ([137f81d](https://github.com/KalvadTech/lecode/commit/137f81d6a9054feae7ac94e7399459ede5b881bd))
+* add source-linked hybrid memory and safe forgetting ([c204c02](https://github.com/KalvadTech/lecode/commit/c204c02e8d5fe9f3e4f90eb8cd8dee53ff4babe9))
+* argument pickers for slash commands (/model, /resume, …) ([2419ec5](https://github.com/KalvadTech/lecode/commit/2419ec5e18c08f0e15c36c1fb17fcaec098de698))
+* bound headless runs by cost and execution time ([76c9ac6](https://github.com/KalvadTech/lecode/commit/76c9ac6dec9fc631bed6f8e4558a7a2c947591d8))
+* complete persistent worker supervision ([d48eacc](https://github.com/KalvadTech/lecode/commit/d48eacc64879fcc75487102d218c79fcac526500))
+* distinguish provider failures in scripted runs ([6582bc4](https://github.com/KalvadTech/lecode/commit/6582bc4858daa5d0c699b411fffb2699facac837))
+* distinguish provider failures in scripted runs ([ca1774a](https://github.com/KalvadTech/lecode/commit/ca1774ac1a40450653fbb6dfa3cf1d6794aa3423))
+* distinguish provider failures in scripted runs ([7ca171d](https://github.com/KalvadTech/lecode/commit/7ca171da5c507d4ab6c99a39c8b3f269a93330b8))
+* import MCP servers from opencode in the setup wizard ([a8687c9](https://github.com/KalvadTech/lecode/commit/a8687c9453121a77b6d1bf8c0b5a6f88cedf4aaa))
+* import MCP servers from opencode in the setup wizard ([d3222df](https://github.com/KalvadTech/lecode/commit/d3222dfc1bc7ae34abe2bfb088b317928c727c1b))
+* integrate with herdr ([5daa144](https://github.com/KalvadTech/lecode/commit/5daa1441f542c375c19672505805d78e0c049c0c))
+* integrate with herdr ([5c1a958](https://github.com/KalvadTech/lecode/commit/5c1a95833e705ecd5b102ad13562129f7eac2559))
+* live agent roster, /runs detail panel, concise tool lines ([49036f0](https://github.com/KalvadTech/lecode/commit/49036f05bc081e818b0190141b462850363acfc5))
+* pick ask_user answers with the arrow-key picker ([f111459](https://github.com/KalvadTech/lecode/commit/f111459e73e9979eb8b3d9941520f181f9b1dc83))
+* pick ask_user answers with the arrow-key picker ([0fb73ad](https://github.com/KalvadTech/lecode/commit/0fb73ad25d8af0eddc55547ba2cff7730706f158))
+* rebrand welcome screen by Kalvad with gradient block logo ([9887916](https://github.com/KalvadTech/lecode/commit/9887916a0e4f5095dd0019c2ecc26f93c811365d))
+* rebrand welcome screen by Kalvad with gradient block logo ([0761dc3](https://github.com/KalvadTech/lecode/commit/0761dc3399c0f8682e0c9e39708c43c1aa0f3155))
+* render markdown after stream end ([55ecdfd](https://github.com/KalvadTech/lecode/commit/55ecdfd88ca4840ce2511fa115b3f536e0262e61))
+* render markdown after stream end ([068cc98](https://github.com/KalvadTech/lecode/commit/068cc98c9e5e2c98248e7041474f293c0aaf320f))
+* run shell commands through the detected user shell ([d7890eb](https://github.com/KalvadTech/lecode/commit/d7890eb9a38d23160c5f3d08ba3cffc7458ffc8d))
+* run shell commands through the detected user shell ([d2a0f2b](https://github.com/KalvadTech/lecode/commit/d2a0f2b52f69c6a97a04af082cda6bb7644c2855))
+* show average token speed in statusline ([f9b40a6](https://github.com/KalvadTech/lecode/commit/f9b40a634721dbafbf9e8f978c474089cbdb404e))
+* show average token speed in statusline ([aade96e](https://github.com/KalvadTech/lecode/commit/aade96ee9bbf32d74f4c4301e6cab7e6575c7fee))
+* support per-run reasoning and HTTP headers ([da826b6](https://github.com/KalvadTech/lecode/commit/da826b6e3aab09dbfed11969859276a94149cba9))
+* support per-run reasoning and HTTP headers ([1aca671](https://github.com/KalvadTech/lecode/commit/1aca67169d7465d089ba62eb9aae96db45dc2431))
+* support per-run reasoning and HTTP headers ([c24191e](https://github.com/KalvadTech/lecode/commit/c24191e59ff2fb04022fa944339e8a9f46c65cf2))
+* tag subagent runs with identity and persist bounded activity ([e36a36f](https://github.com/KalvadTech/lecode/commit/e36a36f4846b9820b0cafa1ee0bdbb50c5f31ab8))
+
+
+### Bug Fixes
+
+* **bash:** reap the shell before killing surviving group members ([be7c2ea](https://github.com/KalvadTech/lecode/commit/be7c2ea8a16874e006f7441d24236b2d0be87cba))
+* carry process cleanup and fixture repairs through the PR stack ([ef13160](https://github.com/KalvadTech/lecode/commit/ef131603eb50bf31141ebf428648d5cf4b8d0c9e))
+* carry process cleanup and fixture repairs through the PR stack ([e8217aa](https://github.com/KalvadTech/lecode/commit/e8217aa9d39a861eb6f5d6c575d3ed602f6dd341))
+* carry process cleanup and fixture repairs through the PR stack ([f9f9a48](https://github.com/KalvadTech/lecode/commit/f9f9a483d63d27a805b9a44dd723ba7b2794ffb5))
+* classify malformed response encodings as stream failures ([5e0067d](https://github.com/KalvadTech/lecode/commit/5e0067d2d86512699ee07478c5f238e971ea9056))
+* classify malformed response encodings as stream failures ([15a5971](https://github.com/KalvadTech/lecode/commit/15a5971682ec1e8f717560f3c090029048d93c4c))
+* **cli:** integrate provider classifications with run overrides ([32ce070](https://github.com/KalvadTech/lecode/commit/32ce07013fe887decc09cf9f6b90ede743bffa89))
+* **cli:** keep run-limit exits distinct from provider failures ([514a8da](https://github.com/KalvadTech/lecode/commit/514a8da2be0c9637e164ae80d9fe06530085ba32))
+* **cli:** merge main and carry lazy prompt test repair into provider exits ([7f481f8](https://github.com/KalvadTech/lecode/commit/7f481f8b62be5ced3b2e4679fc72cb4956c1d18e))
+* **cli:** merge main and patch the lazy session prompt in override tests ([692933e](https://github.com/KalvadTech/lecode/commit/692933e532a785ddadb1712e27f5896bef08eb7c))
+* **cli:** merge main and provider updates while retaining run-limit behavior ([55c7c7b](https://github.com/KalvadTech/lecode/commit/55c7c7b737078347827d65ccba0ffaf3c8c0413b))
+* **cli:** preserve lazy startup when stacking run overrides ([a3f22f4](https://github.com/KalvadTech/lecode/commit/a3f22f44ecc231d3570713978a7d3f99508b9e0c))
+* close worker review gaps ([9de3559](https://github.com/KalvadTech/lecode/commit/9de35591a8735a7801557651ddc84c39b71b2a1e))
+* learn natural preferences and expose extraction diagnostics ([29a9d12](https://github.com/KalvadTech/lecode/commit/29a9d12335375850b1d258555825f578089c155a))
+* make compaction omission-free and refresh the live system prompt ([5c6912e](https://github.com/KalvadTech/lecode/commit/5c6912e48042c396d8f53377b88cd3389acdfdff))
+* make worker submission idempotent ([6b5ca03](https://github.com/KalvadTech/lecode/commit/6b5ca03b5cec90ef2d089bd274f2785794a06d95))
+* preserve model calls across worker updates ([4739ae6](https://github.com/KalvadTech/lecode/commit/4739ae6ca940ce0c0e69bf7601c1d4e759aab287))
+* **proc:** bound capture even with a one-byte output cap ([732804f](https://github.com/KalvadTech/lecode/commit/732804fac3ac0c92aaa6d0d007dfc0663a04d95e))
+* render the roster window as ANSI, not Rich Text ([aba7128](https://github.com/KalvadTech/lecode/commit/aba712817088da7df427bfe0c175fee29c746e5e))
+* retry concurrent WAL initialization for facts ([9810693](https://github.com/KalvadTech/lecode/commit/9810693468696107a59cbb3288ce52728706f87f))
+* setup not working with custom provider ([f328f4a](https://github.com/KalvadTech/lecode/commit/f328f4ab85acc63175c4e0a62979f09b9ba34634))
+* setup not working with custom provider ([c851e7c](https://github.com/KalvadTech/lecode/commit/c851e7c59b8ae8ba646714f67b9bc31abf294721))
+
+
+### Performance Improvements
+
+* bound command output memory and release replay buffers ([f91ca04](https://github.com/KalvadTech/lecode/commit/f91ca04d17cfab771bfe59ca778b96c9b1836ab0))
+* reduce headless memory usage ([29e1ca7](https://github.com/KalvadTech/lecode/commit/29e1ca77ad3ac56f55be37d1f6e7984cf529a1cb))
+* reduce headless memory usage ([a3edc37](https://github.com/KalvadTech/lecode/commit/a3edc3749a2548edb6c9224fa8949c888ed79035))
+* stream session scans to reduce headless memory ([f609f66](https://github.com/KalvadTech/lecode/commit/f609f66776a46f054af961c84136f997b47fe915))
+
+
+### Documentation
+
+* add AGENTS.md repository guidance ([5749e96](https://github.com/KalvadTech/lecode/commit/5749e96e5e82383af8a8b8963ce6ce2121dc802f))
+* add AGENTS.md repository guidance ([57060c2](https://github.com/KalvadTech/lecode/commit/57060c21f09595a547ed4f3c60c528d2f37c99df))
+* add memory comparison and upgrade plan ([04a6ef1](https://github.com/KalvadTech/lecode/commit/04a6ef127ca1a99a6324edf664ebb9bcb333e5e3))
+* focus memory documentation on lecode ([5a09ab8](https://github.com/KalvadTech/lecode/commit/5a09ab8ef5c0f8b1c188c01036fd6acd6c268a78))
+* state Python 3.13 minimum in AGENTS.md ([d2129dd](https://github.com/KalvadTech/lecode/commit/d2129dd7d911eeaf89be808d49b663ef8e2aec25))
+
+
+### Code Refactoring
+
+* remove built-in exa and context7 MCP servers ([898c835](https://github.com/KalvadTech/lecode/commit/898c835f71e77d8453d0e19924c02142f083e002))
+
 ## [0.2.0](https://github.com/KalvadTech/lecode/compare/v0.1.0...v0.2.0) (2026-09-08)
 
 
