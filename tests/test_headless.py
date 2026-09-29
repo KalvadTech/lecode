@@ -44,6 +44,23 @@ def test_headless_prints_final_text_and_cost(headless):
     assert float(match.group(1)) == pytest.approx(0.0, abs=1e-9)
 
 
+@pytest.mark.parametrize("level", [None, "none", "low", "medium", "high"])
+def test_headless_thinking_reaches_model_request(headless, monkeypatch, level):
+    tmp_path, use_script = headless
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / "cfg" / "config.toml"
+    config_path.parent.mkdir()
+    original = 'schema_version = 1\n\n[llm]\nthinking = "high"\n'
+    config_path.write_text(original)
+    provider = use_script([{"text": "ok"}])
+    flags = [] if level is None else ["--thinking", level]
+    result = runner.invoke(app, ["-p", "hi", *flags])
+    assert result.exit_code == EXIT_OK, result.output
+    expected = "high" if level is None else None if level == "none" else level
+    assert provider.requests[0]["kwargs"]["reasoning_effort"] == expected
+    assert config_path.read_text() == original
+
+
 def test_headless_reads_prompt_from_stdin(headless):
     _, use_script = headless
     provider = use_script([{"text": "from stdin"}])
