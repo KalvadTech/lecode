@@ -121,6 +121,14 @@ async def test_output_write_failure_kills_child(tmp_path):
             proc_slot=slot,
         )
     assert slot["proc"].returncode is not None
+    remaining = subprocess.run(
+        ["pgrep", "-g", str(slot["proc"].pid)], capture_output=True, text=True
+    ).stdout.split()
+    assert not remaining, subprocess.run(
+        ["ps", "-p", ",".join(remaining), "-o", "pid,ppid,pgid,state,command"],
+        capture_output=True,
+        text=True,
+    ).stdout
 
 
 async def test_rtk_rewrite_applied(tool_ctx, tmp_path, monkeypatch):
@@ -157,4 +165,8 @@ async def test_cancel_kills_child(tool_ctx):
     with contextlib.suppress(asyncio.CancelledError):
         await task
     out = subprocess.run(["pgrep", "-f", "sleep 30"], capture_output=True).stdout
-    assert out == b""
+    assert out == b"", subprocess.run(
+        ["ps", "-p", ",".join(out.decode().split()), "-o", "pid,ppid,pgid,state,command"],
+        capture_output=True,
+        text=True,
+    ).stdout
