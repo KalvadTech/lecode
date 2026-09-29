@@ -481,7 +481,8 @@ def test_headless_timeout_kills_foreground_shell(headless):
             }
         ]
     )
-    result = runner.invoke(app, ["-p", "run a command", "--timeout", "0.2"])
+    # Allow slow runners to start the shell before testing deadline-driven cleanup.
+    result = runner.invoke(app, ["-p", "run a command", "--timeout", "2"])
     assert result.exit_code == EXIT_TIMEOUT, result.stderr
     assert pid_file.exists(), "foreground shell did not start before timeout"
     with pytest.raises(ProcessLookupError):
