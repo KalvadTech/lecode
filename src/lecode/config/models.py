@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 #: Current on-disk schema version. Bump when adding a migration.
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 ThinkingLevel = Literal["none", "low", "medium", "high"]
 AuthPolicy = Literal["auto", "required", "none"]
@@ -190,8 +190,6 @@ class McpConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    enable_exa: bool = True
-    enable_context7: bool = False
     servers: dict[str, McpServerConfig] = Field(default_factory=dict)
 
 
