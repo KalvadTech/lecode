@@ -105,14 +105,29 @@ async def test_output_and_overflow_preserve_decoding(tool_ctx, tmp_path, monkeyp
     assert result.metadata["proc_result"].truncated == (len(payload) > MAX_OUTPUT_BYTES)
 
 
-async def test_output_write_failure_kills_child(tmp_path):
+@pytest.mark.parametrize("late_child", [False, True])
+async def test_output_write_failure_kills_child(tmp_path, monkeypatch, late_child):
+    kill_tree = bash._kill_tree
+    first_kill = True
+
+    def miss_child_during_first_signal(proc):
+        nonlocal first_kill
+        if first_kill:
+            first_kill = False
+            proc.kill()  # Reproduce a child missed while the shell is spawning it.
+        else:
+            kill_tree(proc)
+
+    if late_child:
+        monkeypatch.setattr(bash, "_kill_tree", miss_child_during_first_signal)
+
     def failed_write(chunk):
         raise OSError("output disk full")
 
     slot = {}
     with pytest.raises(OSError, match="output disk full"):
         await bash._run_shell(
-            "echo ready; sleep 30",
+            "sleep 30 & echo ready; wait" if late_child else "echo ready; sleep 30",
             tmp_path,
             30,
             30,
@@ -120,7 +135,18 @@ async def test_output_write_failure_kills_child(tmp_path):
             on_chunk=failed_write,
             proc_slot=slot,
         )
-    assert slot["proc"].returncode is not None
+    try:
+        assert slot["proc"].returncode is not None
+        remaining = subprocess.run(
+            ["pgrep", "-g", str(slot["proc"].pid)], capture_output=True, text=True
+        ).stdout.split()
+        assert not remaining, subprocess.run(
+            ["ps", "-p", ",".join(remaining), "-o", "pid,ppid,pgid,state,command"],
+            capture_output=True,
+            text=True,
+        ).stdout
+    finally:
+        kill_tree(slot["proc"])
 
 
 async def test_rtk_rewrite_applied(tool_ctx, tmp_path, monkeypatch):
@@ -157,4 +183,8 @@ async def test_cancel_kills_child(tool_ctx):
     with contextlib.suppress(asyncio.CancelledError):
         await task
     out = subprocess.run(["pgrep", "-f", "sleep 30"], capture_output=True).stdout
-    assert out == b""
+    assert out == b"", subprocess.run(
+        ["ps", "-p", ",".join(out.decode().split()), "-o", "pid,ppid,pgid,state,command"],
+        capture_output=True,
+        text=True,
+    ).stdout
