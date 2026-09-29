@@ -11,6 +11,7 @@ no ``-p`` is given): session-name prompt → session on disk → chat, with
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -24,7 +25,7 @@ from lecode.agent.builder import build_runtime, refresh_system_prompt
 from lecode.agent.runner import AgentRunner, RunResult
 from lecode.auth import AuthError, resolve_api_key
 from lecode.config.loader import config_dir, find_config_file, load_config
-from lecode.config.models import AuthPolicy, Config
+from lecode.config.models import AuthPolicy, Config, ThinkingLevel
 from lecode.deps import find_missing_binaries, format_missing_error
 from lecode.extras import herdr
 from lecode.extras.background import BACKGROUND_EXTRA
@@ -240,6 +241,8 @@ def _apply_cli_overrides(
     config: Config,
     *,
     model: str | None,
+    thinking: ThinkingLevel | None,
+    headers: dict[str, str] | None,
     provider: str | None,
     base_url: str | None,
     auth_policy: AuthPolicy | None,
@@ -249,6 +252,10 @@ def _apply_cli_overrides(
     """CLI flag overrides apply on top of the merged config."""
     if model:
         config.llm.model = model
+    if thinking is not None:
+        config.llm.thinking = thinking
+    if headers:
+        config.llm._cli_headers = dict(headers)
     if provider:
         config.llm.provider = provider
     if base_url:
@@ -259,6 +266,24 @@ def _apply_cli_overrides(
         config.llm.tls_verify = False
     if max_turns is not None:
         config.agent.max_turns = max_turns
+
+
+def _parse_headers(values: list[str] | None) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for header in values or []:
+        name, separator, value = header.partition(":")
+        name = name.strip(" \t")
+        if (
+            not separator
+            or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
+            or not re.fullmatch(r"[\t\x20-\x7e]*", value)
+        ):
+            raise typer.BadParameter(
+                "Expected 'Name: value' with a valid HTTP name and ASCII value without controls.",
+                param_hint="--header",
+            )
+        headers[name.lower()] = value.strip(" \t")
+    return headers
 
 
 def _tool_filter(allowed_tools: str | None) -> list[str] | None:
@@ -290,6 +315,8 @@ def run_headless(
     prompt: str,
     *,
     model: str | None = None,
+    thinking: ThinkingLevel | None = None,
+    headers: dict[str, str] | None = None,
     provider: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
@@ -305,6 +332,8 @@ def run_headless(
     _apply_cli_overrides(
         config,
         model=model,
+        thinking=thinking,
+        headers=headers,
         provider=provider,
         base_url=base_url,
         auth_policy=auth_policy,
@@ -416,6 +445,8 @@ def run_loop_mode(
     loop_cmd: str | None = None,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     model: str | None = None,
+    thinking: ThinkingLevel | None = None,
+    headers: dict[str, str] | None = None,
     provider: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
@@ -434,6 +465,8 @@ def run_loop_mode(
     _apply_cli_overrides(
         config,
         model=model,
+        thinking=thinking,
+        headers=headers,
         provider=provider,
         base_url=base_url,
         auth_policy=auth_policy,
@@ -541,6 +574,8 @@ def run_chain_mode(
     topic: str,
     *,
     model: str | None = None,
+    thinking: ThinkingLevel | None = None,
+    headers: dict[str, str] | None = None,
     provider: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
@@ -557,6 +592,8 @@ def run_chain_mode(
     _apply_cli_overrides(
         config,
         model=model,
+        thinking=thinking,
+        headers=headers,
         provider=provider,
         base_url=base_url,
         auth_policy=auth_policy,
@@ -664,6 +701,8 @@ async def _run_tui(
 def run_interactive(
     *,
     model: str | None = None,
+    thinking: ThinkingLevel | None = None,
+    headers: dict[str, str] | None = None,
     provider: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
@@ -716,6 +755,8 @@ def run_interactive(
     _apply_cli_overrides(
         config,
         model=model,
+        thinking=thinking,
+        headers=headers,
         provider=provider,
         base_url=base_url,
         auth_policy=auth_policy,
@@ -941,6 +982,13 @@ def callback(
         ),
     ] = None,
     model: Annotated[str | None, typer.Option("--model", help="Model id.")] = None,
+    thinking: Annotated[
+        ThinkingLevel | None,
+        typer.Option("--thinking", help="Reasoning effort: none | low | medium | high."),
+    ] = None,
+    header: Annotated[
+        list[str] | None, typer.Option("--header", help="HTTP header 'Name: value' (repeatable).")
+    ] = None,
     provider: Annotated[str | None, typer.Option("--provider", help="Provider name.")] = None,
     base_url: Annotated[
         str | None, typer.Option("--base-url", help="OpenAI-compatible endpoint URL.")
@@ -1010,6 +1058,7 @@ def callback(
     ] = None,
 ) -> None:
     """lecode — minimalist terminal AI coding agent."""
+    headers = _parse_headers(header)
     if setup:
         raise typer.Exit(run_setup())
     if hooks_test:
@@ -1025,6 +1074,8 @@ def callback(
                 loop_cmd=loop_cmd,
                 max_iterations=max_iterations,
                 model=model,
+                thinking=thinking,
+                headers=headers,
                 provider=provider,
                 base_url=base_url,
                 api_key=api_key,
@@ -1039,6 +1090,8 @@ def callback(
             run_chain_mode(
                 chain,
                 model=model,
+                thinking=thinking,
+                headers=headers,
                 provider=provider,
                 base_url=base_url,
                 api_key=api_key,
@@ -1052,6 +1105,8 @@ def callback(
         raise typer.Exit(
             run_interactive(
                 model=model,
+                thinking=thinking,
+                headers=headers,
                 provider=provider,
                 base_url=base_url,
                 api_key=api_key,
@@ -1078,6 +1133,8 @@ def callback(
         run_headless(
             prompt,
             model=model,
+            thinking=thinking,
+            headers=headers,
             provider=provider,
             base_url=base_url,
             api_key=api_key,
