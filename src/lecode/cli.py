@@ -3,8 +3,8 @@
 Scope: ``--version``, the startup dependency check (fd / rg / rtk), headless
 mode (``-p/--prompt``: auto-approved tools, auto-named session, final
 response on stdout, token/cost summary on stderr, exit codes 0 done /
-1 error / 2 startup / 3 max turns / 4 context overflow / 5 cost / 6 timeout),
-and the interactive TUI (default when
+1 error / 2 startup / 3 max turns / 4-9 provider failures / 10 context overflow /
+11 cost / 12 timeout), and the interactive TUI (default when
 no ``-p`` is given): session-name prompt → session on disk → chat, with
 ``-r/--resume`` and ``-c/--continue`` reopening existing sessions.
 """
@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import sys
 from collections.abc import Callable, Coroutine
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from typer.core import TyperGroup, TyperOption
@@ -27,7 +28,7 @@ from lecode.agent.builder import build_runtime, refresh_system_prompt
 from lecode.agent.runner import AgentRunner, RunResult
 from lecode.auth import AuthError, resolve_api_key
 from lecode.config.loader import config_dir, find_config_file, load_config
-from lecode.config.models import AuthPolicy, Config
+from lecode.config.models import AuthPolicy, Config, ThinkingLevel
 from lecode.deps import find_missing_binaries, format_missing_error
 from lecode.extras import herdr
 from lecode.extras.background import BACKGROUND_EXTRA
@@ -68,19 +69,36 @@ from lecode.session.storage import (
     SessionNotFoundError,
     SessionStore,
 )
-from lecode.setup_wizard import offer_first_run_setup, run_wizard
 from lecode.telemetry import init_telemetry, shutdown_telemetry
-from lecode.tui.app import TuiApp
-from lecode.tui.name_prompt import prompt_session_name
+
+if TYPE_CHECKING:
+    from lecode.tui.app import TuiApp
 
 #: Exit codes (headless mode uses the same taxonomy).
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_STARTUP = 2
 EXIT_MAX_TURNS = 3
-EXIT_CONTEXT_OVERFLOW = 4
-EXIT_COST_LIMIT = 5
-EXIT_TIMEOUT = 6
+EXIT_AUTHENTICATION = 4
+EXIT_BUDGET = 5
+EXIT_MODEL_NOT_FOUND = 6
+EXIT_RATE_LIMIT = 7
+EXIT_UPSTREAM = 8
+EXIT_STREAM = 9
+EXIT_CONTEXT_OVERFLOW = 10
+EXIT_COST_LIMIT = 11
+EXIT_TIMEOUT = 12
+
+
+def _provider_exit_code(error: ProviderError) -> int:
+    return {
+        "authentication": EXIT_AUTHENTICATION,
+        "budget": EXIT_BUDGET,
+        "model_not_found": EXIT_MODEL_NOT_FOUND,
+        "rate_limit": EXIT_RATE_LIMIT,
+        "upstream": EXIT_UPSTREAM,
+        "stream": EXIT_STREAM,
+    }.get(error.category or "", EXIT_ERROR)
 
 
 class HeadlessTimeoutError(TimeoutError):
@@ -263,6 +281,8 @@ def _apply_cli_overrides(
     config: Config,
     *,
     model: str | None,
+    thinking: ThinkingLevel | None,
+    headers: dict[str, str] | None,
     provider: str | None,
     base_url: str | None,
     auth_policy: AuthPolicy | None,
@@ -272,6 +292,10 @@ def _apply_cli_overrides(
     """CLI flag overrides apply on top of the merged config."""
     if model:
         config.llm.model = model
+    if thinking is not None:
+        config.llm.thinking = thinking
+    if headers:
+        config.llm._cli_headers = dict(headers)
     if provider:
         config.llm.provider = provider
     if base_url:
@@ -282,6 +306,24 @@ def _apply_cli_overrides(
         config.llm.tls_verify = False
     if max_turns is not None:
         config.agent.max_turns = max_turns
+
+
+def _parse_headers(values: list[str] | None) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for header in values or []:
+        name, separator, value = header.partition(":")
+        name = name.strip(" \t")
+        if (
+            not separator
+            or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
+            or not re.fullmatch(r"[\t\x20-\x7e]*", value)
+        ):
+            raise typer.BadParameter(
+                "Expected 'Name: value' with a valid HTTP name and ASCII value without controls.",
+                param_hint="--header",
+            )
+        headers[name.lower()] = value.strip(" \t")
+    return headers
 
 
 def _tool_filter(allowed_tools: str | None) -> list[str] | None:
@@ -313,6 +355,8 @@ def run_headless(
     prompt: str,
     *,
     model: str | None = None,
+    thinking: ThinkingLevel | None = None,
+    headers: dict[str, str] | None = None,
     provider: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
@@ -336,6 +380,8 @@ def run_headless(
     _apply_cli_overrides(
         config,
         model=model,
+        thinking=thinking,
+        headers=headers,
         provider=provider,
         base_url=base_url,
         auth_policy=auth_policy,
@@ -424,7 +470,7 @@ def run_headless(
             limit_reason = "cost_limit"
         error = budget.error if limit_reason else e
         typer.echo(f"error: {error}", err=True)
-        return EXIT_COST_LIMIT if limit_reason else EXIT_ERROR
+        return EXIT_COST_LIMIT if limit_reason else _provider_exit_code(e)
     except KeyboardInterrupt:
         _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
@@ -473,6 +519,8 @@ def run_loop_mode(
     loop_cmd: str | None = None,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     model: str | None = None,
+    thinking: ThinkingLevel | None = None,
+    headers: dict[str, str] | None = None,
     provider: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
@@ -491,6 +539,8 @@ def run_loop_mode(
     _apply_cli_overrides(
         config,
         model=model,
+        thinking=thinking,
+        headers=headers,
         provider=provider,
         base_url=base_url,
         auth_policy=auth_policy,
@@ -571,7 +621,7 @@ def run_loop_mode(
         result = asyncio.run(_loop())
     except ProviderError as e:
         typer.echo(f"error: {e}", err=True)
-        return EXIT_ERROR
+        return _provider_exit_code(e)
     except KeyboardInterrupt:
         _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
@@ -598,6 +648,8 @@ def run_chain_mode(
     topic: str,
     *,
     model: str | None = None,
+    thinking: ThinkingLevel | None = None,
+    headers: dict[str, str] | None = None,
     provider: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
@@ -614,6 +666,8 @@ def run_chain_mode(
     _apply_cli_overrides(
         config,
         model=model,
+        thinking=thinking,
+        headers=headers,
         provider=provider,
         base_url=base_url,
         auth_policy=auth_policy,
@@ -684,7 +738,7 @@ def run_chain_mode(
         asyncio.run(_chain())
     except ProviderError as e:
         typer.echo(f"error: {e}", err=True)
-        return EXIT_ERROR
+        return _provider_exit_code(e)
     except KeyboardInterrupt:
         _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
@@ -721,6 +775,8 @@ async def _run_tui(
 def run_interactive(
     *,
     model: str | None = None,
+    thinking: ThinkingLevel | None = None,
+    headers: dict[str, str] | None = None,
     provider: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
@@ -745,6 +801,8 @@ def run_interactive(
     """
     from rich.console import Console
 
+    from lecode.setup_wizard import offer_first_run_setup
+    from lecode.tui.app import TuiApp
     from lecode.tui.loading import (
         LoadingProgress,
         build_load_report,
@@ -752,6 +810,7 @@ def run_interactive(
         provider_step,
         session_step,
     )
+    from lecode.tui.name_prompt import prompt_session_name
 
     # Banner first — before any slow work (setup wizard, network fetches).
     console = Console(no_color=no_color)
@@ -770,6 +829,8 @@ def run_interactive(
     _apply_cli_overrides(
         config,
         model=model,
+        thinking=thinking,
+        headers=headers,
         provider=provider,
         base_url=base_url,
         auth_policy=auth_policy,
@@ -972,6 +1033,8 @@ def run_setup() -> int:
     if not sys.stdin.isatty():
         typer.echo("error: --setup requires an interactive terminal", err=True)
         return EXIT_STARTUP
+    from lecode.setup_wizard import run_wizard
+
     try:
         path = asyncio.run(run_wizard())
     except (KeyboardInterrupt, EOFError):
@@ -997,6 +1060,13 @@ def callback(
         ),
     ] = None,
     model: Annotated[str | None, typer.Option("--model", help="Model id.")] = None,
+    thinking: Annotated[
+        ThinkingLevel | None,
+        typer.Option("--thinking", help="Reasoning effort: none | low | medium | high."),
+    ] = None,
+    header: Annotated[
+        list[str] | None, typer.Option("--header", help="HTTP header 'Name: value' (repeatable).")
+    ] = None,
     provider: Annotated[str | None, typer.Option("--provider", help="Provider name.")] = None,
     base_url: Annotated[
         str | None, typer.Option("--base-url", help="OpenAI-compatible endpoint URL.")
@@ -1078,6 +1148,7 @@ def callback(
     ] = None,
 ) -> None:
     """lecode — minimalist terminal AI coding agent."""
+    headers = _parse_headers(header)
     if (max_cost is not None or timeout is not None) and (
         prompt is None or setup or hooks_test or loop is not None or chain is not None
     ):
@@ -1098,6 +1169,8 @@ def callback(
                 loop_cmd=loop_cmd,
                 max_iterations=max_iterations,
                 model=model,
+                thinking=thinking,
+                headers=headers,
                 provider=provider,
                 base_url=base_url,
                 api_key=api_key,
@@ -1112,6 +1185,8 @@ def callback(
             run_chain_mode(
                 chain,
                 model=model,
+                thinking=thinking,
+                headers=headers,
                 provider=provider,
                 base_url=base_url,
                 api_key=api_key,
@@ -1125,6 +1200,8 @@ def callback(
         raise typer.Exit(
             run_interactive(
                 model=model,
+                thinking=thinking,
+                headers=headers,
                 provider=provider,
                 base_url=base_url,
                 api_key=api_key,
@@ -1151,6 +1228,8 @@ def callback(
         run_headless(
             prompt,
             model=model,
+            thinking=thinking,
+            headers=headers,
             provider=provider,
             base_url=base_url,
             api_key=api_key,

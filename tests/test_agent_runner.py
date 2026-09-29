@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -106,6 +107,46 @@ async def test_run_refreshes_system_prompt_in_place(tool_ctx):
     messages = provider.requests[0]["messages"]
     assert [m["role"] for m in messages] == ["system", "user"]  # replaced, not appended
     assert messages[0]["content"] == "REFRESHED PROMPT"
+
+
+async def test_startup_replay_is_released_before_model_request(tool_ctx, tmp_path, monkeypatch):
+    store = SessionStore(tmp_path / "cfg")
+    session = store.create("resume", tool_ctx.cwd)
+    store.append_message(session, {"role": "user", "content": "prior request"})
+    history = store.load_for_model(session)
+    load = store.load_for_model
+    replay_ref = None
+
+    class Replay(list):
+        pass
+
+    def tracked_replay(session):
+        nonlocal replay_ref
+        replay = Replay(load(session))
+        if replay_ref is None:
+            replay_ref = weakref.ref(replay)
+        return replay
+
+    monkeypatch.setattr(store, "load_for_model", tracked_replay)
+    runner, provider = make_runner(
+        tool_ctx,
+        [{"text": "done"}],
+        session=session,
+        store=store,
+        refresh_prompt=lambda: "base instructions",
+    )
+
+    async def check_released(event):
+        if isinstance(event, LlmCall):
+            assert replay_ref is not None and replay_ref() is None
+
+    result = await runner.run(history, check_released)
+    assert result.final_text == "done"
+    assert provider.requests[0]["messages"][:2] == [
+        {"role": "system", "content": "base instructions"},
+        *history,
+    ]
+    store.close()
 
 
 async def test_memory_write_refreshes_next_request_preserving_turn_overlay(tool_ctx):

@@ -58,6 +58,7 @@ def resolve_provider(
             name="custom",
             base_url=cli_base_url,
             model=config.llm.model,
+            headers=dict(config.llm._cli_headers),
             auth_policy=config.llm.auth_policy,
             tls_verify=config.llm.tls_verify,
         )
@@ -83,6 +84,13 @@ def resolve_provider(
             f"unknown provider '{name}'; expected 'openrouter' "
             "or a [custom_providers] entry (any OpenRouter-compatible endpoint)"
         )
+
+    headers = {
+        name: value
+        for name, value in headers.items()
+        if name.lower() not in config.llm._cli_headers
+    }
+    headers.update(config.llm._cli_headers)
 
     return ProviderSpec(
         name=name,

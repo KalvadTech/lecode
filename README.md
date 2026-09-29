@@ -130,9 +130,39 @@ $X.XXXX` summary goes to stderr, so scripts can pipe the answer cleanly.
 Incomplete accounting uses `cost: known $X.XXXX`; this is only the known
 portion of spending, not a complete total.
 
-Exit codes: `0` done · `1` error · `2` startup (missing deps, bad flags,
-non-tty `--setup`) · `3` max turns / max loop iterations · `4` context overflow ·
-`5` cost limit or unknown spend · `6` execution timeout.
+Headless, loop, and chain modes use these exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Done |
+| `1` | Generic error, including other HTTP failures |
+| `2` | Startup error: missing dependencies or required credentials, bad flags, non-tty `--setup` |
+| `3` | Max turns or max loop iterations |
+| `4` | Provider authentication failure |
+| `5` | Provider budget or credit exhaustion |
+| `6` | Model/resource not found, including HTTP 404 (which can also mean an incorrect endpoint) |
+| `7` | Provider rate limit, after retries are exhausted |
+| `8` | Upstream, timeout, conflict, or transport failure |
+| `9` | Unknown or malformed in-stream error |
+| `10` | Context overflow |
+| `11` | Cost limit or unknown spend (single prompt only) |
+| `12` | Execution timeout (single prompt only) |
+
+HTTP and in-stream errors share classification. Recognized
+`error.metadata.error_type` values take precedence over symbolic `error.code`
+and `error.type`, followed by HTTP status (or a numeric in-stream code).
+In-stream codes can be integers or three-digit ASCII strings. Recognized
+symbolic codes are `authentication`, `invalid_api_key`, `payment_required`,
+`insufficient_quota`, `credit_balance_exhausted`, `model_not_found`, `not_found`,
+`rate_limit_exceeded`, `provider_overloaded`, `provider_unavailable`, `server`,
+`server_error`, and `timeout`. Classification never guesses from message text.
+
+Budget failures are not retried, including quota errors reported as HTTP 429.
+Other retries use the numeric HTTP/in-stream status when supplied, retaining
+the existing set: 408, 409, 429, 500, 502, 503, 504 and transport failures.
+Symbolic-only in-stream errors use their corresponding status.
+Unknown or malformed in-stream errors are not
+retried. Interactive mode continues to display provider failures and stay open.
 
 For single-prompt headless runs, `--max-cost` accepts a positive USD threshold.
 All model calls share it, including workers, subagents, compaction, learning,
