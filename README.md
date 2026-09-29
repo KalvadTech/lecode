@@ -127,8 +127,36 @@ lecode --chain "redesign the parser"          # brainstorm→plan→code→revie
 The final answer goes to stdout; a `tokens: <in> in / <out> out · cost:
 $X.XXXX` summary goes to stderr, so scripts can pipe the answer cleanly.
 
-Exit codes: `0` done · `1` error · `2` startup (missing deps, bad flags,
-non-tty `--setup`) · `3` max turns / max loop iterations / context overflow.
+Headless, loop, and chain modes use these exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Done |
+| `1` | Generic error, including other HTTP failures |
+| `2` | Startup error: missing dependencies or required credentials, bad flags, non-tty `--setup` |
+| `3` | Max turns, max loop iterations, or context overflow |
+| `4` | Provider authentication failure |
+| `5` | Provider budget or credit exhaustion |
+| `6` | Model/resource not found, including HTTP 404 (which can also mean an incorrect endpoint) |
+| `7` | Provider rate limit, after retries are exhausted |
+| `8` | Upstream, timeout, conflict, or transport failure |
+| `9` | Unknown or malformed in-stream error |
+
+HTTP and in-stream errors share classification. Recognized
+`error.metadata.error_type` values take precedence over symbolic `error.code`
+and `error.type`, followed by HTTP status (or a numeric in-stream code).
+In-stream codes can be integers or three-digit ASCII strings. Recognized
+symbolic codes are `authentication`, `invalid_api_key`, `payment_required`,
+`insufficient_quota`, `credit_balance_exhausted`, `model_not_found`, `not_found`,
+`rate_limit_exceeded`, `provider_overloaded`, `provider_unavailable`, `server`,
+`server_error`, and `timeout`. Classification never guesses from message text.
+
+Budget failures are not retried, including quota errors reported as HTTP 429.
+Other retries use the numeric HTTP/in-stream status when supplied, retaining
+the existing set: 408, 409, 429, 500, 502, 503, 504 and transport failures.
+Symbolic-only in-stream errors use their corresponding status.
+Unknown or malformed in-stream errors are not
+retried. Interactive mode continues to display provider failures and stay open.
 
 ## A tour of the power features
 
