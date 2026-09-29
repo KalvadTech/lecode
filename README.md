@@ -27,7 +27,7 @@ just your terminal, an OpenAI-compatible model, and a sharp set of tools.
 │  – hooks        none configured                                        │
 │  – pierre       off                                                    │
 │  ✓ lsp          enabled                                                │
-│  ! mcp          exa (no EXA_API_KEY)                                   │
+│  – mcp          no servers                                             │
 ╰─────────────────── ~/github.com/you/your-project ─────────────────────╯
 ```
 
@@ -170,8 +170,7 @@ non-tty `--setup`) · `3` max turns / max loop iterations / context overflow.
   `[notifications]`.
 - **MCP** — stdio, streamable-HTTP, and SSE servers, with optional OAuth 2.1
   (`auth = "oauth"`, browser flow, tokens under `<config_dir>/mcp-auth/`;
-  `/mcp auth` to authorize, `/mcp login|logout` to manage). Exa web search is
-  preconfigured (needs `EXA_API_KEY`); context7 is one flag away.
+  `/mcp auth` to authorize, `/mcp login|logout` to manage).
 - **LSP** — diagnostics from real language servers appended to `write`/`edit`
   results; fail-open, never blocks.
 - **Worktrees** — `--worktree <name>` or `/worktree` for isolated branches,
@@ -219,7 +218,7 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 - [docs/hooks.md](docs/hooks.md) — hook events, envelope, verdict protocol
 - [docs/memory.md](docs/memory.md) — the memory store
 - [docs/agents-and-skills.md](docs/agents-and-skills.md) — custom agents and skills
-- [docs/mcp.md](docs/mcp.md) — MCP servers, Exa, context7
+- [docs/mcp.md](docs/mcp.md) — MCP servers
 - [docs/build-plan.md](docs/build-plan.md) — the full product definition
 
 ## Development

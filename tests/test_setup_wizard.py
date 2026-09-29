@@ -536,10 +536,10 @@ def test_import_from_opencode_mcp_only(tmp_path):
     """MCP servers import even when the provider/model doesn't map."""
     _write(
         tmp_path / ".config" / "opencode" / "opencode.json",
-        {"mcp": {"docs": {"type": "remote", "url": "https://mcp.context7.com/mcp"}}},
+        {"mcp": {"docs": {"type": "remote", "url": "https://mcp.example.com/mcp"}}},
     )
     assert import_from_opencode(tmp_path) == {
-        "mcp_servers": {"docs": {"transport": "http", "url": "https://mcp.context7.com/mcp"}}
+        "mcp_servers": {"docs": {"transport": "http", "url": "https://mcp.example.com/mcp"}}
     }
 
 
@@ -580,7 +580,7 @@ async def test_wizard_opencode_mcp_only_import_still_asks_provider(cfg_dir, tmp_
     home = tmp_path / "home"
     _write(
         home / ".config" / "opencode" / "opencode.json",
-        {"mcp": {"docs": {"type": "remote", "url": "https://mcp.context7.com/mcp"}}},
+        {"mcp": {"docs": {"type": "remote", "url": "https://mcp.example.com/mcp"}}},
     )
     # import pick, provider, key, model, notif
     session = FakeSession(["1", "1", "sk-manual", "1", ""])
@@ -588,7 +588,7 @@ async def test_wizard_opencode_mcp_only_import_still_asks_provider(cfg_dir, tmp_
     assert "1 mcp server" in capsys.readouterr().out
     assert answers["provider"] == "openrouter"
     assert answers["mcp_servers"] == {
-        "docs": {"transport": "http", "url": "https://mcp.context7.com/mcp"}
+        "docs": {"transport": "http", "url": "https://mcp.example.com/mcp"}
     }
 
 

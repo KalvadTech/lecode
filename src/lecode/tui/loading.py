@@ -11,7 +11,6 @@ never shows it. The panel renderer is kept for snapshot-style rendering.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -131,34 +130,15 @@ def mcp_step(config: Config, mcp_servers: list[ServerStatus] | None = None) -> L
                 lines.append(s.auth_hint)
             else:
                 lines.append(f"{s.name}: disabled")
-        exa_missing = (
-            config.mcp.enable_exa
-            and not os.environ.get("EXA_API_KEY")
-            and not any(s.name == "exa" for s in mcp_servers)
-        )
-        if exa_missing:
-            lines.append("exa: no EXA_API_KEY")
         if not lines:
             return LoadStep("mcp", "no servers", SKIP)
-        degraded = exa_missing or any(s.state in ("failed", "auth_required") for s in mcp_servers)
+        degraded = any(s.state in ("failed", "auth_required") for s in mcp_servers)
         return LoadStep("mcp", "\n".join(lines), WARN if degraded else OK)
 
     # no live statuses (tests, headless): report the configuration only
-    mcp_bits: list[str] = []
-    mcp_status = OK
-    if config.mcp.enable_exa:
-        if os.environ.get("EXA_API_KEY"):
-            mcp_bits.append("exa")
-        else:
-            mcp_bits.append("exa (no EXA_API_KEY)")
-            mcp_status = WARN
-    if config.mcp.enable_context7:
-        mcp_bits.append("context7")
-    configured = [n for n, s in config.mcp.servers.items() if s.enabled]
+    configured = sorted(n for n, s in config.mcp.servers.items() if s.enabled)
     if configured:
-        mcp_bits.append(_join_names(sorted(configured), cap=3))
-    if mcp_bits:
-        return LoadStep("mcp", " · ".join(mcp_bits), mcp_status)
+        return LoadStep("mcp", _join_names(configured, cap=3), OK)
     return LoadStep("mcp", "no servers", SKIP)
 
 
