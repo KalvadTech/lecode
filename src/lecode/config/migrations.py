@@ -12,8 +12,20 @@ from collections.abc import Callable
 
 from lecode.config.models import CURRENT_SCHEMA_VERSION
 
-#: from_version -> migrator producing from_version + 1. Empty at v1.
-MIGRATIONS: dict[int, Callable[[dict], dict]] = {}
+
+def _v1_to_v2(raw: dict) -> dict:
+    """v2: drop the removed ``[mcp] enable_exa`` / ``enable_context7`` flags."""
+    mcp = raw.get("mcp")
+    if isinstance(mcp, dict):
+        raw = {
+            **raw,
+            "mcp": {k: v for k, v in mcp.items() if k not in ("enable_exa", "enable_context7")},
+        }
+    return raw
+
+
+#: from_version -> migrator producing from_version + 1.
+MIGRATIONS: dict[int, Callable[[dict], dict]] = {1: _v1_to_v2}
 
 
 def migrate_config(raw: dict, current: int | None = None) -> tuple[dict, list[str], bool]:

@@ -893,11 +893,7 @@ def run_interactive(
     # into the feed when they land. Headless/loop paths still block on the
     # fetch, as they print no feed.
     progress.pending("models", f"fetching live from {spec.name} in the background…")
-    if (
-        config.mcp.enable_exa
-        or config.mcp.enable_context7
-        or any(s.enabled for s in config.mcp.servers.values())
-    ):
+    if any(s.enabled for s in config.mcp.servers.values()):
         progress.pending("mcp", "connecting in the background…")
     console.print()
 

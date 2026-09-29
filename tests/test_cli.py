@@ -108,7 +108,7 @@ def test_run_flags_override_config_in_every_mode(mode, tmp_path, monkeypatch):
     async def name_prompt(store):
         return "new-session"
 
-    monkeypatch.setattr("lecode.cli.prompt_session_name", name_prompt)
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", name_prompt)
     captured = []
 
     def build_provider(config, api_key=None):

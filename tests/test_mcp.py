@@ -14,14 +14,11 @@ from pathlib import Path
 import pytest
 
 from lecode.agent.builder import build_runtime
-from lecode.agent.tools import ToolRegistry
 from lecode.config.models import Config, McpServerConfig
 from lecode.extras.mcp_client import (
     MCP_EXTRA,
     McpManager,
-    all_server_configs,
     attach_mcp,
-    auto_servers,
 )
 from lecode.permission import Decision, PermissionChecker
 
@@ -35,9 +32,8 @@ def mock_server_config(**kwargs) -> McpServerConfig:
 
 
 def mcp_config(**server_kwargs) -> Config:
-    """A config with the mock as server "test" and no auto servers."""
+    """A config with the mock as server "test"."""
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["test"] = mock_server_config(**server_kwargs)
     return config
 
@@ -226,60 +222,6 @@ def test_permission_readonly_allows_exa_denies_others():
     assert checker.check("mcp:test:echo", {"text": "x"}).decision == Decision.DENY
 
 
-# -- auto-config ---------------------------------------------------------------------
-
-
-def test_exa_on_by_default_with_key(monkeypatch):
-    monkeypatch.setenv("EXA_API_KEY", "test-key-123")
-    servers = auto_servers(Config())
-    exa = servers["exa"]
-    assert exa.transport == "http"
-    assert "exaApiKey=test-key-123" in exa.url
-    assert exa.headers["Authorization"] == "Bearer test-key-123"
-
-
-def test_exa_skipped_silently_without_key(monkeypatch):
-    monkeypatch.delenv("EXA_API_KEY", raising=False)
-    assert auto_servers(Config()) == {}
-
-
-def test_context7_off_by_default(monkeypatch):
-    monkeypatch.delenv("EXA_API_KEY", raising=False)
-    assert "context7" not in auto_servers(Config())
-
-
-def test_context7_on_with_flag(monkeypatch):
-    monkeypatch.delenv("EXA_API_KEY", raising=False)
-    config = Config()
-    config.mcp.enable_context7 = True
-    servers = auto_servers(config)
-    assert servers["context7"].url == "https://mcp.context7.com/mcp"
-
-
-def test_user_config_overrides_auto(monkeypatch):
-    monkeypatch.setenv("EXA_API_KEY", "k")
-    config = Config()
-    config.mcp.servers["exa"] = mock_server_config()
-    merged = all_server_configs(config)
-    assert merged["exa"].transport == "stdio"  # user definition wins
-
-
-async def test_attach_captures_auto_servers_without_network(tmp_path, monkeypatch, tool_ctx):
-    """EXA_API_KEY set → attach attempts an Exa connect (no network in tests)."""
-    monkeypatch.setenv("EXA_API_KEY", "test-key")
-    attempted: list[tuple[str, McpServerConfig]] = []
-
-    async def fake_connect_one(self, server):
-        attempted.append((server.name, server.config))
-
-    monkeypatch.setattr(McpManager, "_connect_one", fake_connect_one)
-    tool_ctx.config = Config()
-    manager = await attach_mcp(ToolRegistry(), tool_ctx)
-    assert [name for name, _ in attempted] == ["exa"]
-    assert "test-key" in attempted[0][1].url
-    await manager.shutdown()
-
-
 # -- streamable-HTTP transport ---------------------------------------------------------
 
 
@@ -319,7 +261,6 @@ async def http_port(http_server):
 
 async def test_http_transport_round_trip(http_port):
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["web"] = McpServerConfig(
         transport="http", url=f"http://127.0.0.1:{http_port}/mcp", timeout_s=5.0
     )
@@ -370,7 +311,6 @@ async def sse_port():
 
 async def test_sse_transport_round_trip(sse_port):
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["legacy"] = McpServerConfig(
         transport="sse", url=f"http://127.0.0.1:{sse_port}/sse", timeout_s=5.0
     )
@@ -429,7 +369,6 @@ async def test_sse_shutdown_sets_process_global_exit_flag(http_server):
 
     port = http_server.servers[0].sockets[0].getsockname()[1]
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["web"] = McpServerConfig(
         transport="http", url=f"http://127.0.0.1:{port}/mcp", timeout_s=5.0
     )
@@ -453,7 +392,6 @@ async def test_http_server_connects_after_earlier_sse_server_shutdown(http_port)
     side logs "ASGI callable returned without completing response".
     """
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["web"] = McpServerConfig(
         transport="http", url=f"http://127.0.0.1:{http_port}/mcp", timeout_s=5.0
     )
@@ -495,7 +433,6 @@ async def test_mcp_status_shows_failed_server(tmp_path, monkeypatch):
 
     app, _, out = make_app(tmp_path, monkeypatch, [])
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["broken"] = McpServerConfig(
         transport="stdio", command="no-such-binary-lecode-test"
     )
