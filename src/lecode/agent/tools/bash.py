@@ -73,7 +73,7 @@ async def _run_shell(
     buffer = bytearray()
     deadline = time.monotonic() + timeout
     idle_deadline = time.monotonic() + idle_timeout
-    timed_out = idle_killed = False
+    timed_out = idle_killed = aborted = False
 
     try:
         while True:
@@ -81,14 +81,12 @@ async def _run_shell(
             if wait <= 0:
                 timed_out = time.monotonic() >= deadline
                 idle_killed = not timed_out
-                _kill_tree(proc)
                 break
             try:
                 chunk = await asyncio.wait_for(proc.stdout.read(65536), timeout=wait)
             except TimeoutError:
                 timed_out = time.monotonic() >= deadline
                 idle_killed = not timed_out
-                _kill_tree(proc)
                 break
             if not chunk:  # EOF: process exited and pipes drained
                 break
@@ -99,11 +97,21 @@ async def _run_shell(
                     del buffer[: len(buffer) - max_bytes]
             idle_deadline = time.monotonic() + idle_timeout
     except BaseException:
-        # Cancellation or output persistence failure must not leave a child running.
-        _kill_tree(proc)
-        with contextlib.suppress(TimeoutError, asyncio.CancelledError):
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        aborted = True
         raise
+    finally:
+        if aborted or timed_out or idle_killed:
+            _kill_tree(proc)
+            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                async with asyncio.timeout(5.0):
+                    # wait() can wait on pipes held by children missed during a fork.
+                    while proc.returncode is None:
+                        await asyncio.sleep(0.01)
+                    # Catch children spawned while the first signal killed the shell.
+                    _kill_tree(proc)
+                    while await proc.stdout.read(65536):
+                        pass
+                    await proc.wait()
 
     with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(proc.wait(), timeout=5.0)
