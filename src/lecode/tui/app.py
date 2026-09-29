@@ -68,6 +68,7 @@ from lecode.extras.chain import run_chain
 from lecode.extras.loop_mode import run_plan_loop
 from lecode.extras.mcp_client import MCP_EXTRA, attach_mcp
 from lecode.extras.proc import run_proc
+from lecode.extras.shell import user_shell
 from lecode.extras.status_signals import START, STOP, StatusEmitter
 from lecode.extras.subagents import (
     SubagentError,
@@ -1691,7 +1692,9 @@ class TuiApp:
         self._activity("running shell")
         self._shell_task = asyncio.current_task()
         try:
-            result = await run_proc(["bash", "-c", cmd], cwd=self._cwd, timeout=SHELL_TIMEOUT_S)
+            result = await run_proc(
+                [user_shell(), "-c", cmd], cwd=self._cwd, timeout=SHELL_TIMEOUT_S
+            )
         except asyncio.CancelledError:
             self._feed.info("shell command cancelled")
             return

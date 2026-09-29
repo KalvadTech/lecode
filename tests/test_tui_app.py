@@ -1010,6 +1010,14 @@ async def test_bang_runs_shell_without_llm(tmp_path, monkeypatch):
     assert provider.requests == []
 
 
+async def test_bang_uses_the_detected_user_shell(tmp_path, monkeypatch):
+    """!cmd runs through $SHELL -c — here /bin/echo, which prints its argv."""
+    monkeypatch.setenv("SHELL", "/bin/echo")
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    await app._submit("!echo-marker")
+    assert "-c echo-marker" in out.getvalue()
+
+
 async def test_double_bang_feeds_output_to_llm(tmp_path, monkeypatch):
     app, provider, out = make_app(tmp_path, monkeypatch, [{"text": "noted"}])
     await app._submit("!!echo from-shell")
