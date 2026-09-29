@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -28,9 +28,46 @@ from lecode.providers.types import (
 #: HTTP statuses that justify an automatic retry.
 RETRYABLE_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
 
+# Known structured codes. Never infer a failure category from message text.
+_SYMBOLIC_STATUSES = {
+    "authentication": 401,
+    "invalid_api_key": 401,
+    "payment_required": 402,
+    "insufficient_quota": 402,
+    "credit_balance_exhausted": 402,
+    "model_not_found": 404,
+    "not_found": 404,
+    "rate_limit_exceeded": 429,
+    "provider_overloaded": 503,
+    "provider_unavailable": 502,
+    "server": 500,
+    "server_error": 500,
+    "timeout": 408,
+}
+
+type ErrorCategory = Literal[
+    "authentication", "budget", "model_not_found", "rate_limit", "upstream", "stream"
+]
+
+
+def _category_from_status(status: int | None) -> ErrorCategory | None:
+    if status is None:
+        return None
+    categories: dict[int, ErrorCategory] = {
+        401: "authentication",
+        402: "budget",
+        404: "model_not_found",
+        429: "rate_limit",
+    }
+    if status in categories:
+        return categories[status]
+    if status in {408, 409} or 500 <= status < 600:
+        return "upstream"
+    return None
+
 
 class ProviderError(Exception):
-    """A provider failure with retry classification."""
+    """A provider failure with a semantic category and retry classification."""
 
     def __init__(
         self,
@@ -39,47 +76,62 @@ class ProviderError(Exception):
         status: int | None = None,
         body: str = "",
         retryable: bool = False,
+        category: ErrorCategory | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.body = body
-        self.retryable = retryable
+        self.category = category or _category_from_status(status)
+        if self.category is None and status is None and retryable:
+            self.category = "upstream"
+        self.retryable = retryable and self.category != "budget"
 
 
-def _error_from_response(status: int, body: str) -> ProviderError:
-    """Map a non-2xx response to a :class:`ProviderError`.
+def _provider_error(
+    error: Any, *, status: int | None, body: str, stream: bool = False
+) -> ProviderError:
+    """Classify HTTP and SSE failures using the same structured fields."""
+    error = error if isinstance(error, dict) else {}
+    metadata = error.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    semantic_status = None
+    for value in (metadata.get("error_type"), error.get("code"), error.get("type")):
+        if isinstance(value, str) and value in _SYMBOLIC_STATUSES:
+            semantic_status = _SYMBOLIC_STATUSES[value]
+            break
 
-    Understands OpenRouter-style ``{"error": {"message", "code"}}`` bodies.
-    """
-    message = body or f"HTTP {status}"
-    try:
-        data = json.loads(body)
-        error = data.get("error") if isinstance(data, dict) else None
-        if isinstance(error, dict) and error.get("message"):
-            message = str(error["message"])
-    except (json.JSONDecodeError, AttributeError):
-        pass
+    code = error.get("code")
+    if isinstance(code, str) and len(code) == 3 and code.isascii() and code.isdecimal():
+        code = int(code)
+    if status is None:
+        status = code if type(code) is int and 400 <= code < 600 else semantic_status
+    effective_status = semantic_status or status
+    category = _category_from_status(effective_status)
+    message = error.get("message") or (
+        "provider stream error" if stream else body or f"HTTP {status}"
+    )
     return ProviderError(
-        message,
+        str(message),
         status=status,
         body=body,
         retryable=status in RETRYABLE_STATUSES,
+        category=category or ("stream" if stream else None),
     )
+
+
+def _error_from_response(status: int, body: str) -> ProviderError:
+    """Map a non-2xx response to a :class:`ProviderError`."""
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        data = None
+    error = data.get("error") if isinstance(data, dict) else None
+    return _provider_error(error, status=status, body=body)
 
 
 def _error_from_stream_chunk(chunk: dict[str, Any]) -> ProviderError:
     """Map an in-stream ``{"error": ...}`` event to a :class:`ProviderError`."""
-    error = chunk.get("error")
-    error = error if isinstance(error, dict) else {}
-    message = str(error.get("message") or "provider stream error")
-    code = error.get("code")
-    status = code if isinstance(code, int) else None
-    return ProviderError(
-        message,
-        status=status,
-        body=json.dumps(chunk),
-        retryable=status in RETRYABLE_STATUSES if status else False,
-    )
+    return _provider_error(chunk.get("error"), status=None, body=json.dumps(chunk), stream=True)
 
 
 async def _iter_sse_data(response: httpx.Response) -> AsyncIterator[str]:
@@ -199,34 +251,89 @@ class ChatClient:
                 async for data in _iter_sse_data(response):
                     if data.strip() == "[DONE]":
                         break
-                    chunk = json.loads(data)
-                    if isinstance(chunk, dict) and "error" in chunk:
-                        raise _error_from_stream_chunk(chunk)
-                    usage = chunk.get("usage")
-                    if usage:
-                        # OpenRouter's usage extension reports the real billed
-                        # amount as ``cost``; normalize to our ``cost_usd``.
-                        if "cost" in usage and "cost_usd" not in usage:
-                            usage["cost_usd"] = usage["cost"]
-                        yield Usage(usage=usage)
-                    for choice in chunk.get("choices") or []:
-                        delta = choice.get("delta") or {}
-                        content = delta.get("content")
-                        if content:
-                            yield TokenDelta(text=content)
-                        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-                        if reasoning:
-                            yield ReasoningDelta(text=reasoning)
-                        for tool_call in delta.get("tool_calls") or []:
-                            function = tool_call.get("function") or {}
-                            yield ToolCallDelta(
-                                index=tool_call.get("index", 0),
-                                id=tool_call.get("id") or "",
-                                name=function.get("name") or "",
-                                arguments_chunk=function.get("arguments") or "",
-                            )
-                        if choice.get("finish_reason"):
-                            finish_reason = choice["finish_reason"]
+                    try:
+                        chunk = json.loads(data)
+                        if not isinstance(chunk, dict):
+                            raise TypeError("stream event must be an object")
+                        if "error" in chunk:
+                            raise _error_from_stream_chunk(chunk)
+                        usage = chunk.get("usage")
+                        if usage is not None and not isinstance(usage, dict):
+                            raise TypeError("stream usage must be an object")
+                        if usage:
+                            for field in (
+                                "input_tokens",
+                                "output_tokens",
+                                "prompt_tokens",
+                                "completion_tokens",
+                            ):
+                                if usage.get(field) is not None:
+                                    int(usage[field])
+                            for field in ("cost", "cost_usd"):
+                                if usage.get(field) is not None:
+                                    float(usage[field])
+                            # OpenRouter reports the real billed amount as ``cost``.
+                            if "cost" in usage and "cost_usd" not in usage:
+                                usage["cost_usd"] = usage["cost"]
+                            yield Usage(usage=usage)
+                        choices = chunk.get("choices")
+                        if choices is not None and not isinstance(choices, list):
+                            raise TypeError("stream choices must be a list")
+                        for choice in choices or []:
+                            delta = choice.get("delta")
+                            if delta is not None and not isinstance(delta, dict):
+                                raise TypeError("stream delta must be an object")
+                            delta = delta or {}
+                            content = delta.get("content")
+                            reasoning_content = delta.get("reasoning_content")
+                            reasoning = delta.get("reasoning")
+                            finish = choice.get("finish_reason")
+                            if any(
+                                value is not None and not isinstance(value, str)
+                                for value in (content, reasoning_content, reasoning, finish)
+                            ):
+                                raise TypeError("stream text must be a string")
+                            if finish == "error":
+                                raise ProviderError("provider stream error", category="stream")
+                            reasoning = reasoning_content or reasoning
+                            if content:
+                                yield TokenDelta(text=content)
+                            if reasoning:
+                                yield ReasoningDelta(text=reasoning)
+                            tool_calls = delta.get("tool_calls")
+                            if tool_calls is not None and not isinstance(tool_calls, list):
+                                raise TypeError("stream tool calls must be a list")
+                            for tool_call in tool_calls or []:
+                                function = tool_call.get("function")
+                                if function is not None and not isinstance(function, dict):
+                                    raise TypeError("stream function must be an object")
+                                function = function or {}
+                                index = tool_call.get("index", 0)
+                                if (
+                                    type(index) is not int
+                                    or index < 0
+                                    or any(
+                                        value is not None and not isinstance(value, str)
+                                        for value in (
+                                            tool_call.get("id"),
+                                            function.get("name"),
+                                            function.get("arguments"),
+                                        )
+                                    )
+                                ):
+                                    raise TypeError("invalid stream tool call")
+                                yield ToolCallDelta(
+                                    index=index,
+                                    id=tool_call.get("id") or "",
+                                    name=function.get("name") or "",
+                                    arguments_chunk=function.get("arguments") or "",
+                                )
+                            if finish:
+                                finish_reason = finish
+                    except (ValueError, AttributeError, TypeError, OverflowError) as e:
+                        raise ProviderError(
+                            "malformed provider stream event", category="stream"
+                        ) from e
         except httpx.TransportError as e:
             raise ProviderError(str(e), retryable=True) from e
         yield Done(finish_reason=finish_reason)

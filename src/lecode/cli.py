@@ -3,7 +3,7 @@
 Scope: ``--version``, the startup dependency check (fd / rg / rtk), headless
 mode (``-p/--prompt``: auto-approved tools, auto-named session, final
 response on stdout, token/cost summary on stderr, exit codes 0 done /
-1 error / 2 startup / 3 max turns), and the interactive TUI (default when
+1 error / 2 startup / 3 max turns / 4-9 provider failures), and the interactive TUI (default when
 no ``-p`` is given): session-name prompt → session on disk → chat, with
 ``-r/--resume`` and ``-c/--continue`` reopening existing sessions.
 """
@@ -74,6 +74,24 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_STARTUP = 2
 EXIT_MAX_TURNS = 3
+EXIT_AUTHENTICATION = 4
+EXIT_BUDGET = 5
+EXIT_MODEL_NOT_FOUND = 6
+EXIT_RATE_LIMIT = 7
+EXIT_UPSTREAM = 8
+EXIT_STREAM = 9
+
+
+def _provider_exit_code(error: ProviderError) -> int:
+    return {
+        "authentication": EXIT_AUTHENTICATION,
+        "budget": EXIT_BUDGET,
+        "model_not_found": EXIT_MODEL_NOT_FOUND,
+        "rate_limit": EXIT_RATE_LIMIT,
+        "upstream": EXIT_UPSTREAM,
+        "stream": EXIT_STREAM,
+    }.get(error.category or "", EXIT_ERROR)
+
 
 #: Value produced when ``-p/--prompt`` is given without an argument: read stdin.
 _STDIN_MARKER = ""
@@ -408,7 +426,7 @@ def run_headless(
         result = asyncio.run(_run_with_mcp(runtime, client, runner, messages))
     except ProviderError as e:
         typer.echo(f"error: {e}", err=True)
-        return EXIT_ERROR
+        return _provider_exit_code(e)
     except KeyboardInterrupt:
         _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
@@ -547,7 +565,7 @@ def run_loop_mode(
         result = asyncio.run(_loop())
     except ProviderError as e:
         typer.echo(f"error: {e}", err=True)
-        return EXIT_ERROR
+        return _provider_exit_code(e)
     except KeyboardInterrupt:
         _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
@@ -664,7 +682,7 @@ def run_chain_mode(
         asyncio.run(_chain())
     except ProviderError as e:
         typer.echo(f"error: {e}", err=True)
-        return EXIT_ERROR
+        return _provider_exit_code(e)
     except KeyboardInterrupt:
         _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
