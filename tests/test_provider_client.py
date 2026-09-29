@@ -394,6 +394,24 @@ async def test_string_coded_stream_error_retries_and_recovers(monkeypatch, code)
 
 
 @respx.mock
+async def test_malformed_compressed_stream_is_not_retried():
+    def handler(request):
+        return httpx.Response(
+            200,
+            content=_aiter(b"not-a-gzip-stream"),
+            headers={"content-type": "text/event-stream", "content-encoding": "gzip"},
+        )
+
+    route = respx.post(CHAT_URL).mock(side_effect=handler)
+    async with ChatClient(BASE) as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await retry_async(lambda: _collect_once(client))
+    assert excinfo.value.category == "stream"
+    assert excinfo.value.retryable is False
+    assert route.call_count == 1
+
+
+@respx.mock
 async def test_transport_error_is_retryable():
     respx.post(CHAT_URL).mock(side_effect=httpx.ConnectError("connection refused"))
     async with ChatClient(BASE) as client:

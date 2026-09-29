@@ -333,6 +333,8 @@ class ChatClient:
                         raise ProviderError(
                             "malformed provider stream event", category="stream"
                         ) from e
+        except httpx.DecodingError as e:
+            raise ProviderError("malformed provider stream encoding", category="stream") from e
         except httpx.TransportError as e:
             raise ProviderError(str(e), retryable=True) from e
         yield Done(finish_reason=finish_reason)
