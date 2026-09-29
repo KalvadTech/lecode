@@ -293,7 +293,7 @@ def test_setup_runs_wizard_and_exits(cfg_dir, monkeypatch):
         called.append(True)
         return config_dir() / "config.toml"
 
-    monkeypatch.setattr("lecode.cli.run_wizard", fake_wizard)
+    monkeypatch.setattr("lecode.setup_wizard.run_wizard", fake_wizard)
     assert run_setup() == 0
     assert called == [True]
 
@@ -306,7 +306,7 @@ def test_setup_cancelled_exits_1(cfg_dir, monkeypatch):
     async def cancelled():
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("lecode.cli.run_wizard", cancelled)
+    monkeypatch.setattr("lecode.setup_wizard.run_wizard", cancelled)
     assert run_setup() == 1
 
 
@@ -352,8 +352,8 @@ def _patch_past_offer(monkeypatch, offered):
     async def no_name(store, **kwargs):
         return None  # Ctrl-D at the name prompt → exit 0
 
-    monkeypatch.setattr("lecode.cli.offer_first_run_setup", fake_offer)
-    monkeypatch.setattr("lecode.cli.prompt_session_name", no_name)
+    monkeypatch.setattr("lecode.setup_wizard.offer_first_run_setup", fake_offer)
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", no_name)
 
 
 def test_interactive_first_run_offers_setup(tmp_path, monkeypatch):

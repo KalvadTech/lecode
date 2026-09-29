@@ -344,9 +344,9 @@ def test_interactive_startup_prints_loading_screen(env, monkeypatch, capsys):
     """run_interactive prints the banner and step lines before the chat."""
     import lecode.cli as cli
 
-    monkeypatch.setattr(cli, "prompt_session_name", _fake_name_prompt)
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _fake_name_prompt)
     monkeypatch.setattr(cli, "build_provider", lambda config, api_key=None: object())
-    monkeypatch.setattr(cli, "TuiApp", _FakeTui)
+    monkeypatch.setattr("lecode.tui.app.TuiApp", _FakeTui)
     monkeypatch.setattr(cli, "_run_tui", _fake_run_tui)
     code = cli.run_interactive()
     assert code == 0
@@ -379,7 +379,7 @@ def test_catalog_fetch_runs_in_background(env, monkeypatch):
     from lecode.providers.live import LoadedCatalog
 
     events: list[str] = []
-    monkeypatch.setattr(cli, "prompt_session_name", _fake_name_prompt)
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _fake_name_prompt)
     monkeypatch.setattr(cli, "build_provider", lambda config, api_key=None: object())
 
     class FakeTui:
@@ -400,7 +400,7 @@ def test_catalog_fetch_runs_in_background(env, monkeypatch):
         events.append("fetch-done")
         return LoadedCatalog(Catalog.default(), "live", 427)
 
-    monkeypatch.setattr(cli, "TuiApp", FakeTui)
+    monkeypatch.setattr("lecode.tui.app.TuiApp", FakeTui)
     monkeypatch.setattr(cli, "_run_tui", fake_run_tui)
     monkeypatch.setattr(cli, "fetch_catalog", slow_fetch)
     assert cli.run_interactive() == 0

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from lecode.agent.tools.read import line_anchor, make_tool
 
 
@@ -74,3 +78,38 @@ def test_anchor_format():
     anchor = line_anchor(12, "  hello world  ")
     assert anchor.startswith("12:")
     assert len(anchor.split(":")[1]) == 2
+
+
+@pytest.mark.parametrize(
+    "text,offset,limit",
+    [
+        ("one\r\ntwo\rthree\n", 2, 1),
+        ("one\vtwo\fthree\x85four\u2028five\u2029\nlast", 2, 3),
+        ("\n\none\n\n", 1, 3),
+        ("one\ntwo", 10, 2),
+        ("", 1, 2),
+        ("one\ntwo\nthree\nfour", 1, -2),
+    ],
+)
+async def test_read_streams_page_with_splitlines_semantics(
+    tool_ctx, tmp_path, monkeypatch, text, offset, limit
+):
+    path = tmp_path / "page.txt"
+    path.write_text(text, encoding="utf-8")
+
+    def deny_whole_file_read(*args, **kwargs):
+        pytest.fail("paginated reads must not load the entire file")
+
+    if limit > 0:
+        monkeypatch.setattr(Path, "read_text", deny_whole_file_read)
+    result = await make_tool().run(
+        {"path": "page.txt", "offset": offset, "limit": limit, "with_anchors": True}, tool_ctx
+    )
+    lines = text.splitlines()
+    page = lines[offset - 1 : offset - 1 + limit]
+    expected = [f"{line_anchor(i, line)}\t{line}" for i, line in enumerate(page, offset)]
+    remaining = len(lines) - (offset - 1 + len(page))
+    if remaining > 0:
+        expected.append(f"… {remaining} more lines (continue with offset={offset + len(page)})")
+    assert result.content == "\n".join(expected or ["(empty file)"])
+    assert str(path) in tool_ctx.read_paths

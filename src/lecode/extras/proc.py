@@ -36,20 +36,27 @@ class ProcResult:
     truncated: bool = False
 
 
-def _cap(data: bytes, max_bytes: int) -> tuple[str, bool]:
-    """Decode with head/tail keeping; the middle is elided past the cap."""
-    if len(data) <= max_bytes:
-        return data.decode("utf-8", errors="replace"), False
+async def _read_capped(stream: asyncio.StreamReader, max_bytes: int) -> tuple[str, bool]:
+    """Drain a pipe while retaining the reported prefix and suffix."""
+    head = bytearray()
+    tail = bytearray()
+    total = 0
     half = max_bytes // 2
-    head = data[:half]
-    tail = data[-half:]
-    skipped = len(data) - len(head) - len(tail)
-    text = (
-        head.decode("utf-8", errors="replace")
-        + TRUNCATION_MARKER.format(skipped=skipped)
-        + tail.decode("utf-8", errors="replace")
+    while chunk := await stream.read(65536):
+        total += len(chunk)
+        head.extend(chunk[: max_bytes - len(head)])
+        if half:
+            tail.extend(chunk)
+            if len(tail) > half:
+                del tail[:-half]
+    if total <= max_bytes:
+        return bytes(head).decode("utf-8", errors="replace"), False
+    return (
+        bytes(head[:half]).decode("utf-8", errors="replace")
+        + TRUNCATION_MARKER.format(skipped=total - half - len(tail))
+        + bytes(tail).decode("utf-8", errors="replace"),
+        True,
     )
-    return text, True
 
 
 async def run_proc(
@@ -70,27 +77,50 @@ async def run_proc(
         limit=max_output_bytes * 2,
         start_new_session=True,  # own process group so _kill works on trees
     )
+
+    async def feed_input() -> None:
+        if proc.stdin is not None:
+            try:
+                proc.stdin.write(input.encode())
+                await proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # Match communicate(): a child may close stdin early.
+            finally:
+                proc.stdin.close()
+
+    tasks = [
+        asyncio.create_task(_read_capped(proc.stdout, max_output_bytes)),
+        asyncio.create_task(_read_capped(proc.stderr, max_output_bytes)),
+        asyncio.create_task(feed_input()),
+    ]
+
+    async def communicate():
+        stdout, stderr, _ = await asyncio.gather(*tasks)
+        await proc.wait()
+        return stdout, stderr
+
+    communication = asyncio.create_task(communicate())
     timed_out = False
     try:
-        stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(input.encode() if input is not None else None),
-            timeout=timeout,
-        )
+        results = await asyncio.wait_for(asyncio.shield(communication), timeout=timeout)
     except TimeoutError:
         timed_out = True
         _kill(proc)
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            results = await asyncio.wait_for(asyncio.shield(communication), timeout=5.0)
         except TimeoutError:
-            stdout_b, stderr_b = b"", b""
-    except asyncio.CancelledError:
-        # Caller aborted (Ctrl-C): never leave the child running.
+            results = [("", False), ("", False)]
+    except BaseException:
         _kill(proc)
         with contextlib.suppress(TimeoutError, asyncio.CancelledError):
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         raise
-    stdout, out_truncated = _cap(stdout_b or b"", max_output_bytes)
-    stderr, err_truncated = _cap(stderr_b or b"", max_output_bytes)
+    finally:
+        communication.cancel()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(communication, *tasks, return_exceptions=True)
+    (stdout, out_truncated), (stderr, err_truncated) = results[:2]
     exit_code = proc.returncode if proc.returncode is not None else -1
     return ProcResult(
         exit_code=exit_code,

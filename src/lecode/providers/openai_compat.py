@@ -164,9 +164,10 @@ class ChatClient:
         tls_verify: bool = True,
         default_extra_body: dict[str, Any] | None = None,
     ) -> None:
-        headers = {"Content-Type": "application/json"}
+        headers = httpx.Headers({"Content-Type": "application/json"})
         if default_headers:
-            headers.update(default_headers)
+            for name, value in default_headers.items():
+                headers[name] = value
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         if timeout is None:
