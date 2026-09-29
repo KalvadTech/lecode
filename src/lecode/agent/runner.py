@@ -107,7 +107,7 @@ class LlmCall:
 
 @dataclass(frozen=True)
 class LlmResponse:
-    """One model invocation finished — per-call usage for the logbook."""
+    """Per-call usage, including a partial attempt when completed is false."""
 
     model: str
     turn: int
@@ -119,6 +119,10 @@ class LlmResponse:
     usage_incomplete: bool = False
     #: Model-call seconds, including latency/retries but excluding tool execution.
     elapsed_s: float = 0.0
+    input_tokens_known: bool = True
+    output_tokens_known: bool = True
+    cost_usd_known: bool = True
+    completed: bool = True
 
 
 @dataclass(frozen=True)
@@ -245,11 +249,33 @@ class RunResult:
     review: str | None = None
 
 
+@dataclass(frozen=True)
+class _CallUsage:
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    incomplete: bool
+    cost_known: bool
+
+
 def _usage_tokens(usage: dict[str, Any]) -> tuple[int, int]:
     """Accept both our (input/output) and OpenAI-style (prompt/completion) keys."""
     in_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
     out_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
     return in_tokens, out_tokens
+
+
+def _usage_availability(usage: dict[str, Any] | None, cost_known: bool) -> dict[str, bool]:
+    usage = usage or {}
+    return {
+        "input_tokens_known": any(
+            usage.get(key) is not None for key in ("input_tokens", "prompt_tokens")
+        ),
+        "output_tokens_known": any(
+            usage.get(key) is not None for key in ("output_tokens", "completion_tokens")
+        ),
+        "cost_usd_known": cost_known,
+    }
 
 
 class AgentRunner:
@@ -324,17 +350,28 @@ class AgentRunner:
                 unknown_usage_calls += 1
                 usage_incomplete = True
             else:
-                in_tok, out_tok, cost, incomplete = self._usage_cost(self.model, usage)
-                input_tokens += in_tok
-                output_tokens += out_tok
-                cost_usd += cost
-                usage_incomplete |= incomplete
+                call_usage = self._usage_cost(self.model, usage)
+                input_tokens += call_usage.input_tokens
+                output_tokens += call_usage.output_tokens
+                cost_usd += call_usage.cost_usd
+                usage_incomplete |= call_usage.incomplete
 
         context_tokens = 0
         turns = 0
         tool_calls = 0
         started_at = time.monotonic()
         empty_retries = 0
+
+        async def account_partial_usage(event: AgentEvent) -> None:
+            nonlocal input_tokens, output_tokens, cost_usd, usage_incomplete
+            if isinstance(event, LlmResponse) and not event.completed:
+                input_tokens += event.input_tokens
+                output_tokens += event.output_tokens
+                cost_usd += event.cost_usd
+                usage_incomplete = True
+                event = replace(event, turn=turns + 1)
+            await self._emit(on_event, event)
+
         final_text = ""
         continuing = False
         stop_reason = "done"
@@ -396,15 +433,16 @@ class AgentRunner:
                 )
                 await self._emit(on_event, LlmCall(model=self.model, turn=turns + 1))
                 call_started_at = time.monotonic()
-                completed = await self._stream_turn(history, on_event, source_version)
+                completed = await self._stream_turn(history, account_partial_usage, source_version)
                 call_elapsed_s = time.monotonic() - call_started_at
                 turns += 1
 
-                in_tok, out_tok, cost, incomplete = self._turn_cost(completed)
-                usage_incomplete |= incomplete
-                if in_tok:
+                call_usage = self._turn_cost(completed)
+                usage_incomplete |= call_usage.incomplete
+                if call_usage.input_tokens:
                     self._bytes_per_token = min(
-                        self._bytes_per_token, request_size(history, specs) / in_tok
+                        self._bytes_per_token,
+                        request_size(history, specs) / call_usage.input_tokens,
                     )
                 self._check_generation()
                 if (
@@ -421,20 +459,21 @@ class AgentRunner:
                     LlmResponse(
                         model=self.model,
                         turn=turns,
-                        input_tokens=in_tok,
-                        output_tokens=out_tok,
-                        cost_usd=cost,
+                        input_tokens=call_usage.input_tokens,
+                        output_tokens=call_usage.output_tokens,
+                        cost_usd=call_usage.cost_usd,
                         prompt_chars=prompt_chars,
-                        usage_incomplete=incomplete,
+                        usage_incomplete=call_usage.incomplete,
                         elapsed_s=call_elapsed_s,
+                        **_usage_availability(completed.usage, call_usage.cost_known),
                     ),
                 )
-                input_tokens += in_tok
-                output_tokens += out_tok
-                cost_usd += cost
-                context_tokens = in_tok or context_tokens
+                input_tokens += call_usage.input_tokens
+                output_tokens += call_usage.output_tokens
+                cost_usd += call_usage.cost_usd
+                context_tokens = call_usage.input_tokens or context_tokens
                 history.append(completed.as_message())
-                self._persist_assistant(completed, in_tok, out_tok, cost, incomplete)
+                self._persist_assistant(completed, call_usage)
 
                 if completed.tool_calls:
                     final_text = ""
@@ -489,7 +528,7 @@ class AgentRunner:
             final_text = ""
             stop_reason = "context_overflow"
             await self._emit(on_event, Error(message=str(exc)))
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, ProviderError):
             self._persist_partial(history)
             raise
 
@@ -523,39 +562,54 @@ class AgentRunner:
         pierre = self.config.pierre
         if pierre.enabled and stop_reason == "done" and final_text:
             review_generation = self.memory_generation()
+            review_model = pierre.model or self.model
+            recorded_review_usage = None
+
+            def record_review_usage(usage: dict[str, Any] | None) -> None:
+                nonlocal input_tokens, output_tokens, cost_usd, usage_incomplete
+                nonlocal unknown_usage_calls, recorded_review_usage
+                call_usage = self._usage_cost(review_model, usage)
+                input_tokens += call_usage.input_tokens
+                output_tokens += call_usage.output_tokens
+                cost_usd += call_usage.cost_usd
+                usage_incomplete |= call_usage.incomplete
+                unknown_usage_calls += int(usage is None)
+                recorded_review_usage = {
+                    "input_tokens": call_usage.input_tokens,
+                    "output_tokens": call_usage.output_tokens,
+                    "cost_usd": call_usage.cost_usd,
+                    "incomplete": call_usage.incomplete,
+                    **_usage_availability(usage, call_usage.cost_known),
+                }
+
             outcome = await review(
                 self.provider,
-                pierre.model or self.model,
+                review_model,
                 request=user_request(messages),
                 response=final_text,
                 cwd=self.ctx.cwd,
+                on_usage=record_review_usage,
             )
             if self.memory_generation() != review_generation:
                 outcome = None
                 final_text = ""
                 stop_reason = "context_overflow"
+            if (
+                recorded_review_usage is not None
+                and self.session is not None
+                and self.store is not None
+            ):
+                self.store.append_event(
+                    self.session,
+                    "pierre",
+                    {
+                        "model": review_model,
+                        "feedback": outcome.feedback if outcome else "",
+                        "usage": recorded_review_usage,
+                    },
+                )
             if outcome is not None:
                 review_text = outcome.feedback
-                in_tok, out_tok, cost, incomplete = self._usage_cost(outcome.model, outcome.usage)
-                usage_incomplete |= incomplete
-                input_tokens += in_tok
-                output_tokens += out_tok
-                cost_usd += cost
-                if self.session is not None and self.store is not None:
-                    self.store.append_event(
-                        self.session,
-                        "pierre",
-                        {
-                            "model": outcome.model,
-                            "feedback": outcome.feedback,
-                            "usage": {
-                                "input_tokens": in_tok,
-                                "output_tokens": out_tok,
-                                "cost_usd": cost,
-                                "incomplete": incomplete,
-                            },
-                        },
-                    )
                 await self._emit(on_event, Review(feedback=outcome.feedback, model=outcome.model))
 
         if self.memory_generation() != self._request_generation:
@@ -712,9 +766,45 @@ class AgentRunner:
                     usage = event.usage
                 elif isinstance(event, StreamDone):
                     finish_reason = event.finish_reason
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, ProviderError) as error:
             self._partial = self._assemble(text_parts, reasoning_parts, calls, usage, None)
+            call_usage = self._usage_cost(self.model, usage)
+            availability = _usage_availability(usage, call_usage.cost_known)
+            if (
+                isinstance(error, ProviderError)
+                and self.store is not None
+                and self.session is not None
+            ):
+                self.store.append_event(
+                    self.session,
+                    "provider_usage",
+                    {
+                        "model": self.model,
+                        "usage": {
+                            "input_tokens": call_usage.input_tokens,
+                            "output_tokens": call_usage.output_tokens,
+                            "cost_usd": call_usage.cost_usd,
+                            "incomplete": True,
+                            **availability,
+                        },
+                    },
+                )
+                self._partial = None
+            await self._emit(
+                on_event,
+                LlmResponse(
+                    model=self.model,
+                    turn=0,
+                    input_tokens=call_usage.input_tokens,
+                    output_tokens=call_usage.output_tokens,
+                    cost_usd=call_usage.cost_usd,
+                    usage_incomplete=True,
+                    completed=False,
+                    **availability,
+                ),
+            )
             raise
+        self._partial = None
         return self._assemble(text_parts, reasoning_parts, calls, usage, finish_reason)
 
     @staticmethod
@@ -939,34 +1029,46 @@ class AgentRunner:
 
     # -- usage / cost ---------------------------------------------------------------
 
-    def _usage_cost(self, model: str, usage: dict[str, Any] | None) -> tuple[int, int, float, bool]:
-        """Input/output tokens, known cost in USD, and whether usage is incomplete."""
+    def _usage_cost(self, model: str, usage: dict[str, Any] | None) -> _CallUsage:
+        """Input/output tokens, cost in USD, incompleteness, and cost availability."""
         if not usage:
-            return 0, 0, 0.0, True
+            return _CallUsage(0, 0, 0.0, incomplete=True, cost_known=False)
         in_tok, out_tok = _usage_tokens(usage)
-        incomplete = bool(usage.get("incomplete"))
+        availability = _usage_availability(usage, cost_known=True)
+        incomplete = bool(usage.get("incomplete")) or not all(availability.values())
         if usage.get("cost_usd") is not None:
-            return in_tok, out_tok, float(usage["cost_usd"]), incomplete
+            return _CallUsage(
+                in_tok, out_tok, float(usage["cost_usd"]), incomplete=incomplete, cost_known=True
+            )
+        if not (availability["input_tokens_known"] or availability["output_tokens_known"]):
+            return _CallUsage(in_tok, out_tok, 0.0, incomplete=True, cost_known=False)
         if self._catalog is None:
             self._catalog = self.ctx.catalog or Catalog.default()
         try:
             pricing = self._catalog.get(model).pricing
         except (ModelNotFoundError, AmbiguousModelError):
-            return in_tok, out_tok, 0.0, True
+            return _CallUsage(in_tok, out_tok, 0.0, incomplete=True, cost_known=False)
         cost = (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
-        return in_tok, out_tok, cost, incomplete
+        return _CallUsage(in_tok, out_tok, cost, incomplete=incomplete, cost_known=True)
 
-    def _turn_cost(self, completed: CompletedMessage) -> tuple[int, int, float, bool]:
+    def _turn_cost(self, completed: CompletedMessage) -> _CallUsage:
         """Input/output tokens, known cost, and completeness for one turn."""
         return self._usage_cost(self.model, completed.usage)
 
     # -- persistence ------------------------------------------------------------------
 
     def _persist_assistant(
-        self, completed: CompletedMessage, in_tok: int, out_tok: int, cost: float, incomplete: bool
+        self,
+        completed: CompletedMessage,
+        call_usage: _CallUsage,
     ) -> None:
-        usage = {"input_tokens": in_tok, "output_tokens": out_tok, "cost_usd": cost}
-        if incomplete:
+        usage = {
+            "input_tokens": call_usage.input_tokens,
+            "output_tokens": call_usage.output_tokens,
+            "cost_usd": call_usage.cost_usd,
+        }
+        usage.update(_usage_availability(completed.usage, call_usage.cost_known))
+        if call_usage.incomplete:
             usage["incomplete"] = True
         self._persist_message(completed.as_message(), usage)
 
@@ -978,6 +1080,13 @@ class AgentRunner:
         derived: bool = False,
     ) -> None:
         if self.session is not None and self.store is not None:
+            if usage is not None:
+                usage = {
+                    key: value
+                    for key, value in usage.items()
+                    if key not in {"input_tokens_known", "output_tokens_known", "cost_usd_known"}
+                    or value is not True
+                }
             self.store.append_message(
                 self.session,
                 dict(message),
@@ -988,7 +1097,7 @@ class AgentRunner:
             )
 
     def _persist_partial(self, history: list[ChatMessage]) -> None:
-        """On cancellation, keep whatever partial assistant turn exists."""
+        """On interruption or provider failure, retain the partial turn and usage."""
         partial = self._partial
         self._partial = None
         if self.memory_generation() != self._request_generation:
@@ -996,14 +1105,15 @@ class AgentRunner:
         if partial is None:
             return
         history.append(partial.as_message())
-        in_tok, out_tok, cost, incomplete = self._turn_cost(partial)
+        call_usage = self._turn_cost(partial)
         self._persist_message(
             {**partial.as_message(), "incomplete": True},
             {
-                "input_tokens": in_tok,
-                "output_tokens": out_tok,
-                "cost_usd": cost,
-                **({"incomplete": True} if incomplete else {}),
+                "input_tokens": call_usage.input_tokens,
+                "output_tokens": call_usage.output_tokens,
+                "cost_usd": call_usage.cost_usd,
+                **_usage_availability(partial.usage, call_usage.cost_known),
+                **({"incomplete": True} if call_usage.incomplete else {}),
             },
         )
 

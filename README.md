@@ -122,10 +122,29 @@ lecode -p "write a haiku about this repo"     # one prompt, then exit
 git diff | lecode -p "review this diff"       # a bare -p reads stdin
 lecode --loop plan.md --loop-cmd "make test"  # iterate until the plan is done
 lecode --chain "redesign the parser"          # brainstorm→plan→code→review
+lecode -p "review this repo" --output-format json
 ```
 
 The final answer goes to stdout; a `tokens: <in> in / <out> out · cost:
 $X.XXXX` summary goes to stderr, so scripts can pipe the answer cleanly.
+
+`--output-format json` works with `--prompt`, `--loop`, and `--chain`.
+It prints one JSON object on stdout with `final_text`, `stop_reason`, `turns`,
+`input_tokens`, `output_tokens`, `cost_usd`, `model`, and `usage_incomplete`.
+Progress and diagnostics go to stderr. Text output remains the default.
+
+For loops and chains, `final_text` is the last iteration or phase's answer,
+and `turns` counts completed main model calls across the run. Token and cost
+totals include recorded worker and subagent usage, compaction, memory learning,
+and review. `model` identifies the main configured model. Cost is in USD,
+using provider-reported cost when available and catalog pricing otherwise.
+
+Failures also emit JSON. Known partial usage is retained as a lower bound
+with `usage_incomplete: true`; unavailable metrics are `null`. Stop reasons
+include `startup_error`, `error`, `interrupted`, `blocked`, and the runner or
+loop's existing reasons (`done`, `empty`, `max_turns`, `context_overflow`,
+`max_iterations`). Help, version, and argument-parsing errors use normal CLI
+output; JSON is unavailable for interactive, setup, and hooks-test modes.
 
 Exit codes: `0` done · `1` error · `2` startup (missing deps, bad flags,
 non-tty `--setup`) · `3` max turns / max loop iterations / context overflow.

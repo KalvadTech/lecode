@@ -187,7 +187,22 @@ def test_missing_usage_and_pricing_are_not_known_zero(store, model, usage):
     store.append_message(session, {"role": "assistant", "content": "done"}, usage=usage)
     stats = session_stats(store, session, catalog=sample_catalog())
     assert stats.cost_usd == 0
-    assert stats.usage_incomplete is (usage != {"cost_usd": 0})
+    assert stats.usage_incomplete
+
+
+@pytest.mark.parametrize("kind", ["message", "compact", "memory_usage", "pierre"])
+def test_partial_call_marks_known_aggregate_incomplete(store, session, kind):
+    usage = {"input_tokens": 7, "cost_usd": 0.25}
+    if kind == "message":
+        store.append_message(session, {"role": "assistant", "content": "partial"}, usage=usage)
+    else:
+        store.append_event(session, kind, {"usage": usage})
+    stats = session_stats(store, session, catalog=sample_catalog())
+    assert stats.input_tokens == 1_001_007
+    assert stats.output_tokens == 1_000_500
+    assert stats.cost_usd == pytest.approx(2.51)
+    assert stats.input_tokens_known and stats.output_tokens_known and stats.cost_usd_known
+    assert stats.usage_incomplete
 
 
 @pytest.mark.parametrize("incomplete", [False, True])

@@ -61,6 +61,11 @@ def priced_usage(usage: dict | None, model: str, catalog: Catalog | None) -> dic
     """Same cost accounting for accepted and rejected memory-model output."""
     if usage is None or "cost_usd" in usage or catalog is None:
         return usage
+    if not any(
+        usage.get(key) is not None
+        for key in ("input_tokens", "prompt_tokens", "output_tokens", "completion_tokens")
+    ):
+        return usage
     try:
         pricing = catalog.get(model).pricing
     except (ModelNotFoundError, AmbiguousModelError):

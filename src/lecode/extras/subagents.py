@@ -16,7 +16,6 @@ child with it (the child is awaited inside the parent's tool dispatch).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import dataclasses
 import time
 import uuid
@@ -25,7 +24,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from lecode.agent.prompts import build_system_prompt
-from lecode.agent.runner import AgentRunner, ToolCall, ToolResult
+from lecode.agent.runner import AgentRunner, LlmResponse, ToolCall, ToolResult, UsageTotals
 from lecode.agent.tools.base import ToolContext, ToolRegistry
 from lecode.hooks import SUBAGENT_END, SUBAGENT_START, build_envelope, dispatch_event
 from lecode.memory.recall import RecallContext
@@ -136,12 +135,13 @@ def _persist_agent_run(
     trail: dict[str, dict[str, Any]],
     trail_order: list[str],
     duration_s: float,
-    result: RunResult | None,
+    turns: int,
+    usage: UsageTotals,
+    usage_events: list[LlmResponse],
 ) -> None:
     """Append the run's bounded activity trail to the parent session.
 
-    Fail-open: activity is display-only, so a storage failure must not break
-    the run or mask its outcome.
+    The record also carries billed usage; failed persistence must be visible.
     """
     store = ctx.session_store
     session = ctx.session
@@ -157,16 +157,24 @@ def _persist_agent_run(
         "tool_calls": [trail[call_id] for call_id in trail_order],
         "duration_s": duration_s,
     }
-    if result is not None:
-        totals = result.usage_totals
-        run.update(
-            turns=result.turns,
-            input_tokens=totals.input_tokens,
-            output_tokens=totals.output_tokens,
-            cost_usd=totals.cost_usd,
-        )
-    with contextlib.suppress(Exception):
+    run.update(
+        turns=turns,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cost_usd=usage.cost_usd,
+        usage_incomplete=usage.usage_incomplete,
+        **{
+            f"{key}_known": any(getattr(event, f"{key}_known") for event in usage_events)
+            for key in ("input_tokens", "output_tokens", "cost_usd")
+        },
+    )
+    try:
         store.record_agent_run(session, run)
+    except Exception:
+        ctx.extras["usage_incomplete"] = True
+        # Tool failures can become results; retain a durable accounting warning.
+        store.append_event(session, "usage_incomplete", {"run_id": run_id}, durable=True)
+        raise
 
 
 async def run_subagent(
@@ -241,9 +249,12 @@ async def run_subagent(
     # Bounded activity trail for the persisted record (tool calls paired by id).
     trail: dict[str, dict[str, Any]] = {}
     trail_order: list[str] = []
+    usage_events: list[LlmResponse] = []
 
     def forward(event: AgentEvent) -> Any:
-        if isinstance(event, ToolCall):
+        if isinstance(event, LlmResponse):
+            usage_events.append(event)
+        elif isinstance(event, ToolCall):
             trail[event.id] = {
                 "name": event.name,
                 "args": event.arguments,
@@ -298,7 +309,18 @@ async def run_subagent(
             trail=trail,
             trail_order=trail_order,
             duration_s=time.monotonic() - started_at,
-            result=result,
+            turns=result.turns
+            if result is not None
+            else sum(event.completed for event in usage_events),
+            usage_events=usage_events,
+            usage=result.usage_totals
+            if result is not None
+            else UsageTotals(
+                input_tokens=sum(event.input_tokens for event in usage_events),
+                output_tokens=sum(event.output_tokens for event in usage_events),
+                cost_usd=sum(event.cost_usd for event in usage_events),
+                usage_incomplete=True,
+            ),
         )
         end_content = result.final_text[:_END_CONTENT_CLIP] if result is not None else error
         await _fire_hook(

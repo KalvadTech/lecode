@@ -11,10 +11,14 @@ no ``-p`` is given): session-name prompt → session on disk → chat, with
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 import sys
 from collections.abc import Callable, Coroutine
+from contextlib import nullcontext, redirect_stdout
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import typer
 from typer.core import TyperGroup, TyperOption
@@ -22,6 +26,7 @@ from typer.core import TyperGroup, TyperOption
 from lecode import __version__
 from lecode.agent.builder import build_runtime, refresh_system_prompt
 from lecode.agent.runner import AgentRunner, RunResult
+from lecode.agent.tools.base import ToolContext
 from lecode.auth import AuthError, resolve_api_key
 from lecode.config.loader import config_dir, find_config_file, load_config
 from lecode.config.models import AuthPolicy, Config
@@ -56,9 +61,12 @@ from lecode.providers.catalog import Catalog
 from lecode.providers.live import LoadedCatalog, load_catalog
 from lecode.providers.openai_compat import ChatClient
 from lecode.providers.types import ChatMessage
+from lecode.session.model import MessageRecord
 from lecode.session.naming import auto_name
+from lecode.session.stats import session_stats
 from lecode.session.storage import (
     AmbiguousSessionError,
+    Session,
     SessionInUseError,
     SessionNotFoundError,
     SessionStore,
@@ -80,6 +88,74 @@ _STDIN_MARKER = ""
 #: Value produced when ``-r/--resume`` is given without an argument: pick from
 #: the current folder's sessions.
 _PICK_MARKER = ""
+
+
+@dataclass
+class _RunOutput:
+    """Collect the noninteractive outcome; emit only the public JSON fields."""
+
+    model: str | None = None
+    final_text: str = ""
+    stop_reason: str = "startup_error"
+    turns: int | None = None
+    usage_incomplete: bool = False
+    invalid_cost: bool = False
+    store: SessionStore | None = None
+    session: Session | None = None
+    catalog: Catalog | None = None
+    ctx: ToolContext | None = None
+
+    def record(self, result: RunResult) -> None:
+        self.final_text = result.final_text
+        self.turns = (self.turns or 0) + result.turns
+        self.usage_incomplete |= result.usage_totals.usage_incomplete
+        self.invalid_cost |= not math.isfinite(result.usage_totals.cost_usd)
+
+    def emit(self) -> None:
+        payload = {
+            "final_text": self.final_text,
+            "stop_reason": self.stop_reason,
+            "turns": self.turns,
+            "input_tokens": None,
+            "output_tokens": None,
+            "cost_usd": None,
+            "model": self.model,
+            "usage_incomplete": True,
+        }
+        if self.store is not None and self.session is not None:
+            try:
+                stats = session_stats(self.store, self.session, self.catalog)
+                records = self.store.read_records(self.session)
+            except OSError:
+                typer.echo("error: cannot read recorded run usage", err=True)
+            else:
+                failed = self.stop_reason in {"error", "interrupted", "startup_error"}
+                persisted_turns = sum(
+                    isinstance(record, MessageRecord)
+                    and record.role == "assistant"
+                    and not record.message.get("incomplete")
+                    for record in records
+                )
+                payload["turns"] = max(self.turns or 0, persisted_turns)
+                no_calls = not failed and not payload["turns"] and not stats.usage_incomplete
+                for key in ("input_tokens", "output_tokens", "cost_usd"):
+                    if no_calls or getattr(stats, f"{key}_known"):
+                        payload[key] = getattr(stats, key)
+                if self.invalid_cost or not math.isfinite(stats.cost_usd):
+                    payload["cost_usd"] = None
+                payload["usage_incomplete"] = (
+                    failed
+                    or bool(self.ctx and self.ctx.extras.get("usage_incomplete"))
+                    or self.usage_incomplete
+                    or self.invalid_cost
+                    or stats.usage_incomplete
+                    or not math.isfinite(stats.cost_usd)
+                    or any(
+                        payload[key] is None
+                        for key in ("input_tokens", "output_tokens", "cost_usd")
+                    )
+                )
+        typer.echo(json.dumps(payload, ensure_ascii=False, allow_nan=False))
 
 
 class _OptionalValueOption(TyperOption):
@@ -299,6 +375,7 @@ def run_headless(
     allowed_tools: str | None = None,
     max_turns: int | None = None,
     worktree: str | None = None,
+    _output: _RunOutput | None = None,
 ) -> int:
     """Run one prompt headlessly; returns the process exit code."""
     config = load_config().config
@@ -312,6 +389,9 @@ def run_headless(
         max_turns=max_turns,
     )
     _init_telemetry(config)
+
+    if _output is not None:
+        _output.model = config.llm.model
 
     try:
         client = build_provider(config, api_key=api_key)
@@ -331,7 +411,11 @@ def run_headless(
         cwd = wt_info.path
     store = SessionStore()
     session = store.create(auto_name(store), cwd, model=config.llm.model)
+    if _output is not None:
+        _output.store, _output.session = store, session
     models = fetch_catalog(config, api_key)
+    if _output is not None:
+        _output.catalog = models.catalog
     runtime = build_runtime(
         config,
         cwd,
@@ -344,6 +428,8 @@ def run_headless(
         project_root=project_root,
         scope=wt_info.branch if wt_info is not None else None,
     )
+    if _output is not None:
+        _output.ctx = runtime.ctx
     runner = AgentRunner(
         client,
         runtime.registry,
@@ -358,6 +444,8 @@ def run_headless(
     _fire_cli_hook(runtime.hooks, SESSION_START)
     prompt_verdict = _fire_cli_hook(runtime.hooks, USER_PROMPT_SUBMIT, prompt=prompt)
     if prompt_verdict is not None and prompt_verdict.verdict == "deny":
+        if _output is not None:
+            _output.stop_reason = "blocked"
         typer.echo(
             f"error: prompt blocked by hook: {prompt_verdict.reason or 'UserPromptSubmit hook'}",
             err=True,
@@ -375,12 +463,16 @@ def run_headless(
     herdr.report("idle", session_id=session.id)
     signals.emit(START)
     herdr.report("working", session_id=session.id)
+    if _output is not None:
+        _output.stop_reason = "error"
     try:
         result = asyncio.run(_run_with_mcp(runtime, client, runner, messages))
     except ProviderError as e:
         typer.echo(f"error: {e}", err=True)
         return EXIT_ERROR
     except KeyboardInterrupt:
+        if _output is not None:
+            _output.stop_reason = "interrupted"
         _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
         return EXIT_ERROR
@@ -391,7 +483,11 @@ def run_headless(
         herdr.release()
         shutdown_telemetry()
 
-    typer.echo(result.final_text)
+    if _output is not None:
+        _output.record(result)
+        _output.stop_reason = result.stop_reason
+    else:
+        typer.echo(result.final_text)
     if result.review:
         typer.echo(f"\npierre: {result.review}", err=True)
     totals = result.usage_totals
@@ -423,6 +519,7 @@ def run_loop_mode(
     tls_verify: bool = True,
     read_only: bool = False,
     allowed_tools: str | None = None,
+    _output: _RunOutput | None = None,
 ) -> int:
     """``--loop``: iterate the agent over a plan file until it is done.
 
@@ -441,6 +538,8 @@ def run_loop_mode(
         max_turns=None,
     )
     _init_telemetry(config)
+    if _output is not None:
+        _output.model = config.llm.model
     try:
         client = build_provider(config, api_key=api_key)
     except (AuthError, ValueError) as e:
@@ -453,7 +552,11 @@ def run_loop_mode(
         plan_path = cwd / plan_path
     store = SessionStore()
     session = store.create(loop_session_name(), cwd, model=config.llm.model)
+    if _output is not None:
+        _output.store, _output.session = store, session
     models = fetch_catalog(config, api_key)
+    if _output is not None:
+        _output.catalog = models.catalog
     runtime = build_runtime(
         config,
         cwd,
@@ -464,6 +567,8 @@ def run_loop_mode(
         allowed_tools=_tool_filter(allowed_tools),
         catalog=models.catalog,
     )
+    if _output is not None:
+        _output.ctx = runtime.ctx
     runner = AgentRunner(
         client,
         runtime.registry,
@@ -482,6 +587,8 @@ def run_loop_mode(
             *store.load_for_model(session),
         ]
         result = await runner.run(messages)
+        if _output is not None:
+            _output.record(result)
         return result.final_text
 
     async def _loop() -> LoopResult:
@@ -510,12 +617,16 @@ def run_loop_mode(
     signals.emit(START)
     herdr.report("working", session_id=session.id)
     _fire_cli_hook(runtime.hooks, SESSION_START)
+    if _output is not None:
+        _output.stop_reason = "error"
     try:
         result = asyncio.run(_loop())
     except ProviderError as e:
         typer.echo(f"error: {e}", err=True)
         return EXIT_ERROR
     except KeyboardInterrupt:
+        if _output is not None:
+            _output.stop_reason = "interrupted"
         _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
         return EXIT_ERROR
@@ -525,6 +636,8 @@ def run_loop_mode(
         herdr.report("idle")
         herdr.release()
         shutdown_telemetry()
+    if _output is not None:
+        _output.stop_reason = result.stop_reason
     if result.stop_reason == "error":
         typer.echo(f"error: {result.error}", err=True)
         return EXIT_ERROR
@@ -548,6 +661,7 @@ def run_chain_mode(
     tls_verify: bool = True,
     read_only: bool = False,
     allowed_tools: str | None = None,
+    _output: _RunOutput | None = None,
 ) -> int:
     """``--chain``: brainstorm → plan → code → review over one topic.
 
@@ -564,6 +678,8 @@ def run_chain_mode(
         max_turns=None,
     )
     _init_telemetry(config)
+    if _output is not None:
+        _output.model = config.llm.model
     try:
         client = build_provider(config, api_key=api_key)
     except (AuthError, ValueError) as e:
@@ -573,7 +689,11 @@ def run_chain_mode(
     cwd = Path.cwd()
     store = SessionStore()
     session = store.create(auto_name(store), cwd, model=config.llm.model)
+    if _output is not None:
+        _output.store, _output.session = store, session
     chain_catalog = fetch_catalog(config, api_key).catalog
+    if _output is not None:
+        _output.catalog = chain_catalog
     runtime = build_runtime(
         config,
         cwd,
@@ -584,6 +704,8 @@ def run_chain_mode(
         allowed_tools=_tool_filter(allowed_tools),
         catalog=chain_catalog,
     )
+    if _output is not None:
+        _output.ctx = runtime.ctx
     signals = StatusEmitter(config.signals, session=session.name)
 
     def factory() -> AgentRunner:
@@ -607,6 +729,7 @@ def run_chain_mode(
                 topic,
                 system_prompt=runtime.system_prompt,
                 on_phase=on_phase,
+                on_result=_output.record if _output is not None else None,
             )
         finally:
             background = runtime.ctx.extras.get(BACKGROUND_EXTRA)
@@ -623,12 +746,16 @@ def run_chain_mode(
     signals.emit(START)
     herdr.report("working", session_id=session.id)
     _fire_cli_hook(runtime.hooks, SESSION_START)
+    if _output is not None:
+        _output.stop_reason = "error"
     try:
         asyncio.run(_chain())
     except ProviderError as e:
         typer.echo(f"error: {e}", err=True)
         return EXIT_ERROR
     except KeyboardInterrupt:
+        if _output is not None:
+            _output.stop_reason = "interrupted"
         _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
         return EXIT_ERROR
@@ -638,6 +765,8 @@ def run_chain_mode(
         herdr.report("idle")
         herdr.release()
         shutdown_telemetry()
+    if _output is not None:
+        _output.stop_reason = "done"
     return EXIT_OK
 
 
@@ -939,6 +1068,10 @@ def callback(
             "Given without a value, the prompt is read from stdin.",
         ),
     ] = None,
+    output_format: Annotated[
+        Literal["text", "json"],
+        typer.Option("--output-format", help="Output format for prompt, loop, and chain runs."),
+    ] = "text",
     model: Annotated[str | None, typer.Option("--model", help="Model id.")] = None,
     provider: Annotated[str | None, typer.Option("--provider", help="Provider name.")] = None,
     base_url: Annotated[
@@ -1009,85 +1142,107 @@ def callback(
     ] = None,
 ) -> None:
     """lecode — minimalist terminal AI coding agent."""
-    if setup:
-        raise typer.Exit(run_setup())
-    if hooks_test:
-        raise typer.Exit(run_hooks_test())
-    check_dependencies()
-    if sum(x is not None for x in (prompt, loop, chain)) > 1:
-        typer.echo("error: --prompt, --loop and --chain are mutually exclusive", err=True)
-        raise typer.Exit(EXIT_STARTUP)
-    if loop is not None:
-        raise typer.Exit(
-            run_loop_mode(
-                loop,
-                loop_cmd=loop_cmd,
-                max_iterations=max_iterations,
-                model=model,
-                provider=provider,
-                base_url=base_url,
-                api_key=api_key,
-                auth_policy=auth_policy,
-                tls_verify=not no_tls_verify,
-                read_only=read_only,
-                allowed_tools=allowed_tools,
+    output = _RunOutput(model=model) if output_format == "json" else None
+    try:
+        with redirect_stdout(sys.stderr) if output is not None else nullcontext():
+            if output is not None and (
+                setup or hooks_test or all(value is None for value in (prompt, loop, chain))
+            ):
+                typer.echo("error: JSON output requires --prompt, --loop, or --chain", err=True)
+                raise typer.Exit(EXIT_STARTUP)
+            if setup:
+                raise typer.Exit(run_setup())
+            if hooks_test:
+                raise typer.Exit(run_hooks_test())
+            check_dependencies()
+            if sum(x is not None for x in (prompt, loop, chain)) > 1:
+                typer.echo("error: --prompt, --loop and --chain are mutually exclusive", err=True)
+                raise typer.Exit(EXIT_STARTUP)
+            if loop is not None:
+                raise typer.Exit(
+                    run_loop_mode(
+                        loop,
+                        loop_cmd=loop_cmd,
+                        max_iterations=max_iterations,
+                        model=model,
+                        provider=provider,
+                        base_url=base_url,
+                        api_key=api_key,
+                        auth_policy=auth_policy,
+                        tls_verify=not no_tls_verify,
+                        read_only=read_only,
+                        allowed_tools=allowed_tools,
+                        _output=output,
+                    )
+                )
+            if chain is not None:
+                raise typer.Exit(
+                    run_chain_mode(
+                        chain,
+                        model=model,
+                        provider=provider,
+                        base_url=base_url,
+                        api_key=api_key,
+                        auth_policy=auth_policy,
+                        tls_verify=not no_tls_verify,
+                        read_only=read_only,
+                        allowed_tools=allowed_tools,
+                        _output=output,
+                    )
+                )
+            if prompt is None:
+                raise typer.Exit(
+                    run_interactive(
+                        model=model,
+                        provider=provider,
+                        base_url=base_url,
+                        api_key=api_key,
+                        auth_policy=auth_policy,
+                        tls_verify=not no_tls_verify,
+                        read_only=read_only,
+                        allowed_tools=allowed_tools,
+                        max_turns=max_turns,
+                        resume=resume,
+                        continue_last=continue_last,
+                        no_color=no_color,
+                        worktree=worktree,
+                    )
+                )
+            if prompt == _STDIN_MARKER:
+                if sys.stdin.isatty():
+                    typer.echo(
+                        "error: -p without a value requires a piped prompt on stdin", err=True
+                    )
+                    raise typer.Exit(EXIT_STARTUP)
+                prompt = sys.stdin.read().strip()
+                if not prompt:
+                    typer.echo("error: empty prompt on stdin", err=True)
+                    raise typer.Exit(EXIT_ERROR)
+            raise typer.Exit(
+                run_headless(
+                    prompt,
+                    model=model,
+                    provider=provider,
+                    base_url=base_url,
+                    api_key=api_key,
+                    auth_policy=auth_policy,
+                    tls_verify=not no_tls_verify,
+                    read_only=read_only,
+                    allowed_tools=allowed_tools,
+                    max_turns=max_turns,
+                    worktree=worktree,
+                    _output=output,
+                )
             )
-        )
-    if chain is not None:
-        raise typer.Exit(
-            run_chain_mode(
-                chain,
-                model=model,
-                provider=provider,
-                base_url=base_url,
-                api_key=api_key,
-                auth_policy=auth_policy,
-                tls_verify=not no_tls_verify,
-                read_only=read_only,
-                allowed_tools=allowed_tools,
-            )
-        )
-    if prompt is None:
-        raise typer.Exit(
-            run_interactive(
-                model=model,
-                provider=provider,
-                base_url=base_url,
-                api_key=api_key,
-                auth_policy=auth_policy,
-                tls_verify=not no_tls_verify,
-                read_only=read_only,
-                allowed_tools=allowed_tools,
-                max_turns=max_turns,
-                resume=resume,
-                continue_last=continue_last,
-                no_color=no_color,
-                worktree=worktree,
-            )
-        )
-    if prompt == _STDIN_MARKER:
-        if sys.stdin.isatty():
-            typer.echo("error: -p without a value requires a piped prompt on stdin", err=True)
-            raise typer.Exit(EXIT_STARTUP)
-        prompt = sys.stdin.read().strip()
-        if not prompt:
-            typer.echo("error: empty prompt on stdin", err=True)
-            raise typer.Exit(EXIT_ERROR)
-    raise typer.Exit(
-        run_headless(
-            prompt,
-            model=model,
-            provider=provider,
-            base_url=base_url,
-            api_key=api_key,
-            auth_policy=auth_policy,
-            tls_verify=not no_tls_verify,
-            read_only=read_only,
-            allowed_tools=allowed_tools,
-            max_turns=max_turns,
-            worktree=worktree,
-        )
-    )
+    except KeyboardInterrupt:
+        if output is None:
+            raise
+        output.stop_reason = "interrupted"
+        typer.echo("error: interrupted", err=True)
+        raise typer.Exit(EXIT_ERROR) from None
+    finally:
+        if output is not None:
+            output.emit()
 
 
 def main() -> None:

@@ -29,6 +29,9 @@ class Stats:
     unknown_usage_calls: int = 0
     #: True when any counted model call has missing usage or unknown cost.
     usage_incomplete: bool = False
+    input_tokens_known: bool = False
+    output_tokens_known: bool = False
+    cost_usd_known: bool = False
 
 
 def _usage_tokens(usage: dict) -> tuple[int, int]:
@@ -38,8 +41,14 @@ def _usage_tokens(usage: dict) -> tuple[int, int]:
     return in_tokens, out_tokens
 
 
-def session_stats(store: SessionStore, session: Session, catalog: Catalog | None = None) -> Stats:
-    """Aggregate stats over the full record history (tombstones included)."""
+def session_stats(
+    store: SessionStore,
+    session: Session,
+    catalog: Catalog | None = None,
+    *,
+    include_message_usage: bool = True,
+) -> Stats:
+    """Aggregate history; event-only usage lets workers reconcile auxiliary calls."""
     records = store.read_records(session)
     messages = [r for r in records if isinstance(r, MessageRecord)]
 
@@ -49,10 +58,24 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
     cost_usd = 0.0
     unknown_usage_calls = 0
     usage_incomplete = False
+    known = {"input_tokens": False, "output_tokens": False, "cost_usd": False}
+
+    def count_known(usage: dict, *, per_call: bool = False) -> None:
+        nonlocal usage_incomplete
+        aliases = {"input_tokens": "prompt_tokens", "output_tokens": "completion_tokens"}
+        for key in known:
+            present = usage.get(key) is not None or usage.get(aliases.get(key, key)) is not None
+            available = bool(usage.get(f"{key}_known", present))
+            known[key] |= available
+            if per_call and key in aliases and not available:
+                usage_incomplete = True
 
     for record in messages:
         role_counts[record.role] = role_counts.get(record.role, 0) + 1
+        if not include_message_usage:
+            continue
         usage = record.usage or {}
+        count_known(usage, per_call=record.role == "assistant")
         usage_incomplete |= bool(usage.get("incomplete")) or (
             record.role == "assistant" and not usage
         )
@@ -73,21 +96,31 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
                 usage_incomplete = True
                 continue
             cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1_000_000
+            known["cost_usd"] = True
 
-    # Auxiliary model calls and worker dispatches carry their usage on events.
+    # Auxiliary/partial model calls and worker dispatches carry usage on events.
     for record in records:
         if not isinstance(record, EventRecord):
             continue
-        if record.kind in {"pierre", "compact", "memory_usage"}:
+        if record.kind == "usage_incomplete":
+            usage_incomplete = True
+            continue
+        if record.kind in {"pierre", "compact", "memory_usage", "provider_usage"}:
             usage = record.data.get("usage") or {}
             if record.data.get("usage") is None:
                 unknown_usage_calls += 1
                 usage_incomplete = True
         elif record.kind == "worker_usage":
             usage = record.data.get("usage") or record.data
+        elif record.kind == "agent_run":
+            usage = record.data
+            usage_incomplete |= bool(usage.get("usage_incomplete"))
         else:
             continue
         usage_incomplete |= bool(record.data.get("incomplete") or usage.get("incomplete"))
+        count_known(
+            usage, per_call=record.kind in {"pierre", "compact", "memory_usage", "provider_usage"}
+        )
         in_tok, out_tok = _usage_tokens(usage)
         input_tokens += in_tok
         output_tokens += out_tok
@@ -102,6 +135,7 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
                 usage_incomplete = True
                 continue
             cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
+            known["cost_usd"] = True
         else:
             usage_incomplete = True
 
@@ -129,4 +163,7 @@ def session_stats(store: SessionStore, session: Session, catalog: Catalog | None
         tombstone_count=sum(isinstance(r, TombstoneRecord) for r in records),
         unknown_usage_calls=unknown_usage_calls,
         usage_incomplete=usage_incomplete,
+        input_tokens_known=known["input_tokens"],
+        output_tokens_known=known["output_tokens"],
+        cost_usd_known=known["cost_usd"],
     )

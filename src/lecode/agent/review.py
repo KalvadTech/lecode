@@ -10,6 +10,7 @@ yields ``None`` and the run completes without a review.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -55,8 +56,9 @@ async def review(
     request: str,
     response: str,
     cwd: Path | None = None,
+    on_usage: Callable[[dict[str, Any] | None], None] | None = None,
 ) -> ReviewOutcome | None:
-    """One reviewer call; ``None`` on any failure (fail-open)."""
+    """One fail-open reviewer call; report usage even without feedback."""
     if not request or not response:
         return None
     prompt = load_text("prompts", "pierre.md", cwd=cwd)
@@ -76,7 +78,11 @@ async def review(
                 )
             )
     except Exception:
+        if on_usage is not None:
+            on_usage(None)
         return None
+    if on_usage is not None:
+        on_usage(completed.usage)
     feedback = (completed.content or "").strip()
     if not feedback:
         return None

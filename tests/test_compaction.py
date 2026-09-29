@@ -428,6 +428,25 @@ async def test_compact_session_empty_summary(store, tmp_path):
     assert not _compacts(store, session)
 
 
+@pytest.mark.parametrize("known_zero", [False, True])
+async def test_compaction_cost_requires_reported_tokens(store, tmp_path, known_zero):
+    from tests.fakes import sample_catalog
+
+    from lecode.session.stats import session_stats
+
+    model = "deepseek/deepseek-v4-flash"
+    session = store.create("cost-availability", tmp_path, model=model)
+    _fill(store, session)
+    usage = {"input_tokens": 0, "output_tokens": 0} if known_zero else {"cached_tokens": 9}
+    provider = FakeProvider([{"text": "summary", "usage": usage}])
+    catalog = sample_catalog()
+    assert await compact_session(provider, store, session, model, catalog=catalog) == "summary"
+    stats = session_stats(store, session, catalog=catalog)
+    assert stats.cost_usd_known is known_zero
+    recorded = _compacts(store, session)[0].data["usage"]
+    assert ("cost_usd" in recorded) is known_zero
+
+
 # -- prefix coverage -----------------------------------------------------------------
 
 

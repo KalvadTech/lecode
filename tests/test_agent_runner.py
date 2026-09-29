@@ -1429,9 +1429,9 @@ async def test_cached_raw_runner_history_respects_working_visibility(tool_ctx, t
         ("missing/model", {"input_tokens": 7, "output_tokens": 2}, True),
         ("missing/model", {"input_tokens": 0, "output_tokens": 0}, True),
         ("missing/model", {"input_tokens": 7, "output_tokens": 2, "cost_usd": 0}, False),
-        ("missing/model", {"cost_usd": 0}, False),
+        ("missing/model", {"cost_usd": 0}, True),
         ("openai/gpt-5-", {"input_tokens": 7}, True),
-        ("openai/gpt-5-", {"cost_usd": 0}, False),
+        ("openai/gpt-5-", {"cost_usd": 0}, True),
         ("free/model", {"input_tokens": 7, "output_tokens": 2}, False),
         ("free/model", {"input_tokens": 0, "output_tokens": 0}, False),
         ("free/model", None, True),
@@ -1504,7 +1504,16 @@ async def test_cancel_preserves_known_usage_or_unknown_marker(
     recorded = store.load_messages(session)
     assert len(recorded) == 1
     assert recorded[0].usage == (
-        usage or {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0, "incomplete": True}
+        usage
+        or {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0,
+            "incomplete": True,
+            "input_tokens_known": False,
+            "output_tokens_known": False,
+            "cost_usd_known": False,
+        }
     )
     stats = session_stats(store, session)
     assert stats.usage_incomplete is (usage is None)
@@ -1530,7 +1539,7 @@ async def test_pierre_usage_completeness_is_persisted(
         session=session,
     )
     result = await runner.run([{"role": "user", "content": "hi"}])
-    incomplete = review_usage != {"cost_usd": 0}
+    incomplete = True
     assert result.review == "review"
     assert result.usage_totals.usage_incomplete is incomplete
     assert store.load_events(session, "pierre")[0]["usage"]["incomplete"] is incomplete

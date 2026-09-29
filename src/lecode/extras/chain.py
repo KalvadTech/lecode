@@ -11,10 +11,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lecode.context.resources import load_text
 from lecode.providers.openai_compat import ProviderError
+
+if TYPE_CHECKING:
+    from lecode.agent.runner import RunResult
 
 #: The chain's phases, in order.
 PHASES = ("brainstorm", "plan", "code", "review")
@@ -41,12 +44,14 @@ async def run_chain(
     system_prompt: str | None = None,
     cwd: Path | None = None,
     on_phase: Callable[[str, str], None] | None = None,
+    on_result: Callable[[RunResult], None] | None = None,
 ) -> ChainResult:
     """Run the chain over ``topic``.
 
     ``runner_factory`` builds a fresh runner per phase — each phase is its
     own conversation, chained only through the accumulated context text.
     ``on_phase(phase, output)`` fires as each phase completes.
+    ``on_result(result)`` receives each completed run, including paused runs.
     """
     outputs: list[tuple[str, str]] = []
     context: list[str] = []
@@ -64,6 +69,8 @@ async def run_chain(
         if generation is None:
             generation = runner.memory_generation()
         result = await runner.run(messages, expected_generation=generation)
+        if on_result is not None:
+            on_result(result)
         if result.stop_reason == "context_overflow":
             raise ProviderError(
                 f"chain paused during {phase}: context cannot safely fit", retryable=False
