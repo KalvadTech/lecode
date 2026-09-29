@@ -1,6 +1,6 @@
 """lecode command-line interface.
 
-Scope: ``--version``, the startup dependency check (fd / rg / rtk), headless
+Scope: the startup dependency check (fd / rg / rtk), headless
 mode (``-p/--prompt``: auto-approved tools, auto-named session, final
 response on stdout, token/cost summary on stderr, exit codes 0 done /
 1 error / 2 startup / 3 max turns / 4-9 provider failures), and the interactive TUI (default when
@@ -154,12 +154,6 @@ app = typer.Typer(
     no_args_is_help=False,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-
-
-def _version_callback(value: bool) -> None:
-    if value:
-        typer.echo(f"lecode {__version__}")
-        raise typer.Exit(EXIT_OK)
 
 
 def check_dependencies() -> None:
@@ -986,10 +980,6 @@ def run_setup() -> int:
 
 @app.callback(cls=_LeCodeGroup, invoke_without_command=True)
 def callback(
-    version: Annotated[
-        bool,
-        typer.Option("--version", "-V", callback=_version_callback, is_eager=True),
-    ] = False,
     prompt: Annotated[
         str | None,
         typer.Option(

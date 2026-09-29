@@ -416,8 +416,7 @@ def test_progressive_banner_prints_immediately():
     assert "by Kalvad" in text
 
 
-def test_banner_shows_version_splash_and_gradient():
-    from lecode import __version__
+def test_banner_shows_splash_and_gradient():
     from lecode.tui.loading import print_banner
 
     out = io.StringIO()
@@ -427,7 +426,6 @@ def test_banner_shows_version_splash_and_gradient():
     print_banner(console, THEME, splash="test splash")
     raw = out.getvalue()
     text = Text.from_ansi(raw).plain
-    assert f"v{__version__}" in text
     assert "by Kalvad" in text
     assert "test splash" in text
     # the banner is colored per column — leftmost glyph is the deep-purple endpoint

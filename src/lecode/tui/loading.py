@@ -315,14 +315,10 @@ def build_load_report(
 
 
 def _byline_text(theme: Theme, splash: str | None) -> Text:
-    """Version, ``by Kalvad`` link, and the splash tagline on one line."""
-    from lecode import __version__
-
+    """The ``by Kalvad`` link and the splash tagline on one line."""
     if splash is None:
         splash = random.choice(_SPLASHES)
     line = Text()
-    line.append(f"v{__version__}", style=theme.muted)
-    line.append(" · ", style=theme.muted)
     line.append("by ", style=theme.muted)
     line.append("Kalvad", style=f"bold {theme.accent} link https://kalvad.com")
     line.append(f" — {splash}", style=f"italic {theme.permission}")
