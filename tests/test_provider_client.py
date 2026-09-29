@@ -9,6 +9,7 @@ import pytest
 import respx
 
 from lecode.providers.openai_compat import ChatClient, ProviderError
+from lecode.providers.retry import retry_async
 from lecode.providers.types import Done, TokenDelta, ToolCallDelta, Usage, collect
 
 BASE = "https://api.test/v1"
@@ -171,9 +172,15 @@ async def test_interleaved_tool_calls_accumulate_by_index():
     ]
 
 
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        {"input_tokens": "10", "output_tokens": "5", "cost_usd": "0.25"},
+    ],
+)
 @respx.mock
-async def test_usage_captured_from_final_chunk():
-    usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+async def test_usage_captured_from_final_chunk(usage):
     body = _sse(_chunk({"content": "ok"}, "stop"), _chunk(usage=usage), "data: [DONE]")
     _sse_route(body)
     async with ChatClient(BASE) as client:
@@ -263,6 +270,127 @@ async def test_midstream_error_event_raises():
     assert excinfo.value.status == 502
     assert excinfo.value.retryable is True
     assert "upstream exploded" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("code", "metadata", "status", "category", "retryable"),
+    [
+        ("401", None, 401, "authentication", False),
+        ("402", None, 402, "budget", False),
+        ("404", None, 404, "model_not_found", False),
+        ("429", None, 429, "rate_limit", True),
+        ("502", None, 502, "upstream", True),
+        ("server_error", None, 500, "upstream", True),
+        ("invalid_api_key", None, 401, "authentication", False),
+        ("model_not_found", None, 400, "model_not_found", False),
+        ("insufficient_quota", None, 429, "budget", False),
+        ("credit_balance_exhausted", None, 429, "budget", False),
+        (500, {"error_type": "authentication"}, 500, "authentication", True),
+        ("server_error", {"error_type": "payment_required"}, 500, "budget", False),
+        (429, {"error_type": "not_found"}, 429, "model_not_found", True),
+        (429, {"error_type": "payment_required"}, 429, "budget", False),
+        (502, {"error_type": "provider_overloaded"}, 502, "upstream", True),
+        ("429", [], 429, "rate_limit", True),
+    ],
+)
+@respx.mock
+async def test_http_and_stream_errors_share_classification(
+    stream, code, metadata, status, category, retryable
+):
+    error = {"code": code, "message": "provider failed", "metadata": metadata}
+    if stream:
+        _sse_route(_sse("data: " + json.dumps({"error": error})))
+    else:
+        respx.post(CHAT_URL).respond(status, json={"error": error})
+    async with ChatClient(BASE) as client:
+        with pytest.raises(ProviderError, match="provider failed") as excinfo:
+            await _collect_once(client)
+    assert excinfo.value.category == category
+    assert excinfo.value.retryable is retryable
+    if not stream:
+        assert excinfo.value.status == status
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("status", [400, 501])
+@respx.mock
+async def test_semantic_codes_do_not_expand_numeric_retry_policy(stream, status):
+    error = (
+        {"code": status, "metadata": {"error_type": "server"}}
+        if stream
+        else {"code": "server_error"}
+    )
+    if stream:
+        _sse_route(_sse("data: " + json.dumps({"error": error})))
+    else:
+        respx.post(CHAT_URL).respond(status, json={"error": error})
+    async with ChatClient(BASE) as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await _collect_once(client)
+    assert excinfo.value.status == status
+    assert excinfo.value.category == "upstream"
+    assert excinfo.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"error": {"code": "unknown"}}',
+        '{"error": {"code": []}}',
+        '{"error": {"code": true}}',
+        '{"error": {"code": 429.0}}',
+        '{"error": {"code": "\uff14\uff12\uff19"}}',
+        '{"error": []}',
+        '{"error": null}',
+        "{invalid json",
+        "[]",
+        "null",
+        '{"choices": [null]}',
+        '{"choices": {}}',
+        '{"usage": [1]}',
+        '{"usage": {"prompt_tokens": "invalid"}}',
+        '{"usage": {"cost_usd": "invalid"}}',
+        '{"choices": [{"delta": {"content": 1}}]}',
+        '{"choices": [{"delta": {"reasoning": [1]}}]}',
+        '{"choices": [{"delta": {"reasoning_content": []}}]}',
+        '{"choices": [{"delta": {"reasoning_content": false}}]}',
+        '{"choices": [{"delta": {"tool_calls": [{"index": []}]}}]}',
+        '{"choices": [{"finish_reason": "error"}]}',
+    ],
+)
+@respx.mock
+async def test_unknown_or_malformed_stream_errors_are_not_retried(payload):
+    _sse_route(_sse("data: " + payload))
+    async with ChatClient(BASE) as client:
+        with pytest.raises(ProviderError) as excinfo:
+            await _collect_once(client)
+    assert excinfo.value.category == "stream"
+    assert excinfo.value.retryable is False
+
+
+@pytest.mark.parametrize("code", ["429", "server_error"])
+@respx.mock
+async def test_string_coded_stream_error_retries_and_recovers(monkeypatch, code):
+    async def no_sleep(delay):
+        pass
+
+    monkeypatch.setattr("lecode.providers.retry.sleep", no_sleep)
+    first = _sse(
+        _chunk({"content": "discard this partial answer"}),
+        "data: " + json.dumps({"error": {"code": code}}),
+    )
+    second = _sse(_chunk({"content": "recovered"}, "stop"), "data: [DONE]")
+    route = respx.post(CHAT_URL).mock(
+        side_effect=[
+            httpx.Response(200, content=_aiter(first)),
+            httpx.Response(200, content=_aiter(second)),
+        ]
+    )
+    async with ChatClient(BASE) as client:
+        result = await retry_async(lambda: _collect_once(client))
+    assert result.content == "recovered"
+    assert route.call_count == 2
 
 
 @respx.mock
