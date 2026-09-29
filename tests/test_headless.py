@@ -72,7 +72,7 @@ def test_headless_thinking_reaches_model_request(headless, monkeypatch, level):
     tmp_path, use_script = headless
     monkeypatch.chdir(tmp_path)
     config_path = tmp_path / "cfg" / "config.toml"
-    config_path.parent.mkdir()
+    config_path.parent.mkdir(exist_ok=True)
     original = 'schema_version = 1\n\n[llm]\nthinking = "high"\n'
     config_path.write_text(original)
     provider = use_script([{"text": "ok"}])
