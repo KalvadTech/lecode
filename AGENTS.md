@@ -43,8 +43,8 @@
   `LECODE_CONFIG_DIR`, `LECODE_SKILLS_DIR`, and project cwd under `tmp_path`.
   The shared `tool_ctx` fixture is not autouse and isolates only the config directory.
 - Reuse `tests/fakes.py` for providers/catalogs. MCP tests launch mock subprocesses
-  and localhost servers; disable auto servers as in `tests/test_mcp.py:mcp_config`
-  to avoid ambient credentials activating Exa. Keep the SSE shutdown reset in
+  and localhost servers, configured explicitly via `tests/test_mcp.py:mcp_config`.
+  Keep the SSE shutdown reset in
   `tests/conftest.py`; it prevents order-dependent failures across server tests.
 - `docs/build-plan.md` is historical, not the current spec: permissions now have
   two modes, config is TOML-only, and the catalog is live with an empty fallback.
