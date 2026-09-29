@@ -45,9 +45,10 @@ async def _read_capped(stream: asyncio.StreamReader, max_bytes: int) -> tuple[st
     while chunk := await stream.read(65536):
         total += len(chunk)
         head.extend(chunk[: max_bytes - len(head)])
-        tail.extend(chunk)
-        if half and len(tail) > half:
-            del tail[:-half]
+        if half:
+            tail.extend(chunk)
+            if len(tail) > half:
+                del tail[:-half]
     if total <= max_bytes:
         return bytes(head).decode("utf-8", errors="replace"), False
     return (

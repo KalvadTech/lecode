@@ -61,7 +61,8 @@ async def test_streamed_cap_preserves_byte_boundaries(cap):
     text, truncated = await _read_capped(stream, cap)
     assert truncated == (len(data) > cap)
     if truncated:
-        head, tail = data[: cap // 2], data[-(cap // 2) :]
+        head = data[: cap // 2]
+        tail = data[-(cap // 2) :] if cap // 2 else b""
         assert text == (
             head.decode("utf-8", errors="replace")
             + TRUNCATION_MARKER.format(skipped=len(data) - len(head) - len(tail))
@@ -94,7 +95,8 @@ async def test_large_stdout_and_stderr_are_drained_while_feeding_stdin():
     assert result.stderr.startswith("e" * 1024) and result.stderr.endswith("e" * 1024)
 
 
-async def test_output_retention_is_bounded():
+@pytest.mark.parametrize("cap", [1, 2048])
+async def test_output_retention_is_bounded(cap):
     tracemalloc.start()
     try:
         result = await run_proc(
@@ -103,7 +105,7 @@ async def test_output_retention_is_bounded():
                 "-c",
                 ("import sys\nfor _ in range(128): sys.stdout.buffer.write(b'x'*65536)"),
             ],
-            max_output_bytes=2048,
+            max_output_bytes=cap,
         )
         _, peak = tracemalloc.get_traced_memory()
     finally:
