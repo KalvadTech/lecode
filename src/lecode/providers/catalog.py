@@ -2,9 +2,9 @@
 
 The catalog is fetched live from the provider's ``/models`` endpoint at
 startup (see :mod:`lecode.providers.live`); there is **no bundled snapshot**.
-:meth:`Catalog.default` returns an empty catalog — every consumer fails open
-on unknown models (no pricing → cost 0, no modality flags → let the provider
-decide, no context window → the configured default).
+:meth:`Catalog.default` returns an empty catalog. Unbudgeted runs allow
+unknown models (incomplete cost, provider-defined modalities, configured
+context window); headless cost limits reject unknown prices before a call.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ class Pricing(BaseModel):
 
     prompt: float
     completion: float
+    #: False when the endpoint omitted or returned invalid prices; zero can be free.
+    known: bool = True
 
 
 class Modalities(BaseModel):

@@ -26,6 +26,7 @@ class Stats:
     created_at: str
     last_active: str | None
     tombstone_count: int
+    completed_turns: int = 0
     unknown_usage_calls: int = 0
     #: True when any counted model call has missing usage or unknown cost.
     usage_incomplete: bool = False
@@ -49,8 +50,10 @@ def session_stats(
     include_message_usage: bool = True,
 ) -> Stats:
     """Aggregate history; event-only usage lets workers reconcile auxiliary calls."""
-    records = store.read_records(session)
-    messages = [r for r in records if isinstance(r, MessageRecord)]
+    message_count = completed_turns = tombstone_count = 0
+    last_active = None
+    context_candidates: list[tuple[int, int]] = []
+    replay_events: list[EventRecord | TombstoneRecord] = []
 
     role_counts: dict[str, int] = {}
     input_tokens = 0
@@ -70,7 +73,22 @@ def session_stats(
             if per_call and key in aliases and not available:
                 usage_incomplete = True
 
-    for record in messages:
+    for record in store.iter_records(session):
+        if isinstance(record, MessageRecord | EventRecord | TombstoneRecord):
+            last_active = max(last_active or record.ts, record.ts)
+        if isinstance(record, TombstoneRecord):
+            tombstone_count += 1
+            replay_events.append(record)
+        elif isinstance(record, EventRecord) and record.kind == "redo":
+            replay_events.append(record)
+        if not isinstance(record, MessageRecord):
+            continue
+        message_count += 1
+        if record.role == "assistant":
+            completed_turns += not record.message.get("incomplete", False)
+            in_tok, _ = _usage_tokens(record.usage or {})
+            if in_tok:
+                context_candidates.append((record.seq, in_tok))
         role_counts[record.role] = role_counts.get(record.role, 0) + 1
         if not include_message_usage:
             continue
@@ -96,10 +114,11 @@ def session_stats(
                 usage_incomplete = True
                 continue
             cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1_000_000
-            known["cost_usd"] = True
+            usage_incomplete |= not pricing.known
+            known["cost_usd"] |= pricing.known
 
     # Auxiliary/partial model calls and worker dispatches carry usage on events.
-    for record in records:
+    for record in store.iter_records(session):
         if not isinstance(record, EventRecord):
             continue
         if record.kind == "usage_incomplete":
@@ -135,32 +154,32 @@ def session_stats(
                 usage_incomplete = True
                 continue
             cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
-            known["cost_usd"] = True
+            usage_incomplete |= not pricing.known
+            known["cost_usd"] |= pricing.known
         else:
             usage_incomplete = True
 
-    timestamps = [
-        r.ts for r in records if isinstance(r, MessageRecord | EventRecord | TombstoneRecord)
-    ]
-    # Context fill = input tokens of the last *visible* assistant message
-    # (tombstoned turns no longer sit in the context window).
-    context_tokens = 0
-    for record in reversed(store.load_messages(session)):
-        if record.role == "assistant" and record.usage:
-            in_tok, _ = _usage_tokens(record.usage)
-            if in_tok:
-                context_tokens = in_tok
-                break
+    # Retain only usage/undo metadata, never the transcript or tool payloads.
+    tombstones = store._active_tombstones(replay_events)
+    context_tokens = next(
+        (
+            tokens
+            for seq, tokens in reversed(context_candidates)
+            if not store._is_hidden(seq, tombstones)
+        ),
+        0,
+    )
     return Stats(
-        message_count=len(messages),
+        message_count=message_count,
         role_counts=role_counts,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost_usd=cost_usd,
         context_tokens=context_tokens,
         created_at=session.meta.created_at,
-        last_active=max(timestamps) if timestamps else None,
-        tombstone_count=sum(isinstance(r, TombstoneRecord) for r in records),
+        last_active=last_active,
+        tombstone_count=tombstone_count,
+        completed_turns=completed_turns,
         unknown_usage_calls=unknown_usage_calls,
         usage_incomplete=usage_incomplete,
         input_tokens_known=known["input_tokens"],

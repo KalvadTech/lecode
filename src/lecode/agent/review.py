@@ -10,6 +10,7 @@ yields ``None`` and the run completes without a review.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,9 +78,11 @@ async def review(
                     model=model,
                 )
             )
-    except Exception:
+    except (Exception, asyncio.CancelledError) as exc:
         if on_usage is not None:
-            on_usage(None)
+            on_usage(getattr(exc, "usage", None))
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         return None
     if on_usage is not None:
         on_usage(completed.usage)

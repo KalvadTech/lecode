@@ -32,6 +32,7 @@ from lecode.agent.tools.base import ToolContext, ToolRegistry
 from lecode.config.models import Config
 from lecode.extras.background import BACKGROUND_EXTRA
 from lecode.hooks import STOP
+from lecode.providers.budget import BudgetedProvider, CostLimitError
 from lecode.providers.catalog import AmbiguousModelError, Catalog, ModelNotFoundError
 from lecode.providers.openai_compat import ProviderError
 from lecode.providers.retry import retry_async
@@ -330,6 +331,7 @@ class AgentRunner:
             replay = self.store.load_for_model(self.session)
             if replay and replay[0].get("role") == "system" and history[:1] == replay[:1]:
                 history.insert(0, {"role": "system", "content": ""})
+            del replay
         # The live conversation, visible through ctx (subagents, hooks).
         self.ctx.extras["conversation"] = history
         manager = self.ctx.extras.get("workers")
@@ -528,31 +530,43 @@ class AgentRunner:
             final_text = ""
             stop_reason = "context_overflow"
             await self._emit(on_event, Error(message=str(exc)))
+        except CostLimitError as exc:
+            self._persist_partial(history)
+            stop_reason = "cost_limit"
+            final_text = ""
+            await self._emit(on_event, Error(message=str(exc)))
         except (asyncio.CancelledError, ProviderError):
             self._persist_partial(history)
             raise
 
-        if stop_reason != "done":
-            manager = self.ctx.extras.get("workers")
-            message = (
-                manager.stop_message(self.ctx.extras.get("worker_id"), stop_reason)
-                if manager is not None
-                else f"Run stopped: {stop_reason}."
-            )
-            if self.session is not None and self.store is not None:
-                self.store.append_event(
-                    self.session,
-                    "run_stopped",
-                    {
-                        "reason": stop_reason,
-                        "message": message,
-                    },
+        async def finish() -> None:
+            if stop_reason != "done":
+                manager = self.ctx.extras.get("workers")
+                message = (
+                    manager.stop_message(self.ctx.extras.get("worker_id"), stop_reason)
+                    if manager is not None
+                    else f"Run stopped: {stop_reason}."
                 )
-            await self._emit(on_event, Error(message))
-        await self._emit(on_event, Done(stop_reason=stop_reason, turns=turns))
-        hooks = self.ctx.extras.get("hooks")
-        if hooks is not None and hooks.handlers.get(STOP):
-            await hooks.fire(STOP, reason=stop_reason)
+                if self.session is not None and self.store is not None:
+                    self.store.append_event(
+                        self.session,
+                        "run_stopped",
+                        {
+                            "reason": stop_reason,
+                            "message": message,
+                        },
+                    )
+                await self._emit(on_event, Error(message))
+            await self._emit(on_event, Done(stop_reason=stop_reason, turns=turns))
+            hooks = self.ctx.extras.get("hooks")
+            if hooks is not None and hooks.handlers.get(STOP):
+                await hooks.fire(STOP, reason=stop_reason)
+
+        budgeted = isinstance(self.provider, BudgetedProvider)
+        if budgeted and self.provider.error is not None:
+            stop_reason = "cost_limit"
+        if not budgeted:
+            await finish()
         if self.memory_generation() != self._request_generation:
             final_text = ""
             stop_reason = "context_overflow"
@@ -582,32 +596,35 @@ class AgentRunner:
                     **_usage_availability(usage, call_usage.cost_known),
                 }
 
-            outcome = await review(
-                self.provider,
-                review_model,
-                request=user_request(messages),
-                response=final_text,
-                cwd=self.ctx.cwd,
-                on_usage=record_review_usage,
-            )
-            if self.memory_generation() != review_generation:
-                outcome = None
-                final_text = ""
-                stop_reason = "context_overflow"
-            if (
-                recorded_review_usage is not None
-                and self.session is not None
-                and self.store is not None
-            ):
-                self.store.append_event(
-                    self.session,
-                    "pierre",
-                    {
-                        "model": review_model,
-                        "feedback": outcome.feedback if outcome else "",
-                        "usage": recorded_review_usage,
-                    },
+            outcome = None
+            try:
+                outcome = await review(
+                    self.provider,
+                    review_model,
+                    request=user_request(messages),
+                    response=final_text,
+                    cwd=self.ctx.cwd,
+                    on_usage=record_review_usage,
                 )
+                if self.memory_generation() != review_generation:
+                    outcome = None
+                    final_text = ""
+                    stop_reason = "context_overflow"
+            finally:
+                if (
+                    recorded_review_usage is not None
+                    and self.session is not None
+                    and self.store is not None
+                ):
+                    self.store.append_event(
+                        self.session,
+                        "pierre",
+                        {
+                            "model": review_model,
+                            "feedback": outcome.feedback if outcome else "",
+                            "usage": recorded_review_usage,
+                        },
+                    )
             if outcome is not None:
                 review_text = outcome.feedback
                 await self._emit(on_event, Review(feedback=outcome.feedback, model=outcome.model))
@@ -616,6 +633,10 @@ class AgentRunner:
             final_text = ""
             review_text = None
             stop_reason = "context_overflow"
+        if budgeted:
+            if self.provider.error is not None:
+                stop_reason = "cost_limit"
+            await finish()
         elapsed_s = time.monotonic() - started_at
         record_turn(
             model=self.model,
@@ -772,6 +793,7 @@ class AgentRunner:
             availability = _usage_availability(usage, call_usage.cost_known)
             if (
                 isinstance(error, ProviderError)
+                and not isinstance(error, CostLimitError)
                 and self.store is not None
                 and self.session is not None
             ):
@@ -1031,6 +1053,18 @@ class AgentRunner:
 
     def _usage_cost(self, model: str, usage: dict[str, Any] | None) -> _CallUsage:
         """Input/output tokens, cost in USD, incompleteness, and cost availability."""
+        if isinstance(self.provider, BudgetedProvider):
+            # Partial snapshots retain billable usage; admission checks remain strict.
+            try:
+                return _CallUsage(
+                    *self.provider.usage_totals(
+                        model, {**usage, "incomplete": False} if isinstance(usage, dict) else usage
+                    ),
+                    incomplete=bool(usage and usage.get("incomplete")),
+                    cost_known=True,
+                )
+            except (TypeError, ValueError, OverflowError):
+                return _CallUsage(0, 0, 0.0, incomplete=True, cost_known=False)
         if not usage:
             return _CallUsage(0, 0, 0.0, incomplete=True, cost_known=False)
         in_tok, out_tok = _usage_tokens(usage)
@@ -1049,7 +1083,13 @@ class AgentRunner:
         except (ModelNotFoundError, AmbiguousModelError):
             return _CallUsage(in_tok, out_tok, 0.0, incomplete=True, cost_known=False)
         cost = (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
-        return _CallUsage(in_tok, out_tok, cost, incomplete=incomplete, cost_known=True)
+        return _CallUsage(
+            in_tok,
+            out_tok,
+            cost,
+            incomplete=incomplete or not pricing.known,
+            cost_known=pricing.known,
+        )
 
     def _turn_cost(self, completed: CompletedMessage) -> _CallUsage:
         """Input/output tokens, known cost, and completeness for one turn."""

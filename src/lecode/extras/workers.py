@@ -347,7 +347,7 @@ class WorkerManager:
         # ponytail: scan the root ledger per dispatch; index if session size warrants it.
         recorded = [
             r.data
-            for r in self.store.read_records(self.session)
+            for r in self.store.iter_records(self.session)
             if isinstance(r, EventRecord)
             and r.kind == "worker_usage"
             and r.data.get("worker_id") == worker.id
