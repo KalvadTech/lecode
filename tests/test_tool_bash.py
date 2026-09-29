@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shlex
 import stat
 import subprocess
+
+import pytest
 
 from lecode.agent.tools import bash
 from lecode.agent.tools.bash import MAX_OUTPUT_BYTES
@@ -62,6 +65,62 @@ async def test_truncation_and_overflow_file(tool_ctx, tmp_path):
     assert files[0].read_text().count("repeated-output-line") > 1000
     assert len(result.content) < MAX_OUTPUT_BYTES + 500
     assert result.metadata["proc_result"].truncated
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"x" * (MAX_OUTPUT_BYTES - 1),
+        b"x" * MAX_OUTPUT_BYTES,
+        "🙂".encode() * 20000,
+        b"a" * 65535 + "🙂".encode() + b"\xff\r\n" * 30000 + b"\xf0",
+    ],
+    ids=["below_cap", "at_cap", "unicode", "invalid_utf8"],
+)
+async def test_output_and_overflow_preserve_decoding(tool_ctx, tmp_path, monkeypatch, payload):
+    async def unchanged(command):
+        return command
+
+    monkeypatch.setattr(bash, "rewrite_command", unchanged)
+    source = tmp_path / "output.bin"
+    source.write_bytes(payload)
+    result = await bash.make_tool().run({"command": f"cat {shlex.quote(str(source))}"}, tool_ctx)
+    assert not result.is_error
+    text = payload.decode("utf-8", errors="replace")
+    files = list((tmp_path / "cfg" / "overflow").glob("*.log"))
+    if len(payload) > MAX_OUTPUT_BYTES:
+        assert len(files) == 1
+        assert files[0].read_bytes() == text.encode()
+        half = MAX_OUTPUT_BYTES // 2
+        expected = (
+            text[:half]
+            + f"\n… [output truncated; full output saved to {files[0]}] …\n"
+            + text[-half:]
+        )
+    else:
+        assert not files
+        expected = text
+    assert result.metadata["proc_result"].stdout == expected
+    assert result.content == expected.rstrip("\n")
+    assert result.metadata["proc_result"].truncated == (len(payload) > MAX_OUTPUT_BYTES)
+
+
+async def test_output_write_failure_kills_child(tmp_path):
+    def failed_write(chunk):
+        raise OSError("output disk full")
+
+    slot = {}
+    with pytest.raises(OSError, match="output disk full"):
+        await bash._run_shell(
+            "echo ready; sleep 30",
+            tmp_path,
+            30,
+            30,
+            MAX_OUTPUT_BYTES,
+            on_chunk=failed_write,
+            proc_slot=slot,
+        )
+    assert slot["proc"].returncode is not None
 
 
 async def test_rtk_rewrite_applied(tool_ctx, tmp_path, monkeypatch):
