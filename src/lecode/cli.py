@@ -3,7 +3,8 @@
 Scope: ``--version``, the startup dependency check (fd / rg / rtk), headless
 mode (``-p/--prompt``: auto-approved tools, auto-named session, final
 response on stdout, token/cost summary on stderr, exit codes 0 done /
-1 error / 2 startup / 3 max turns), and the interactive TUI (default when
+1 error / 2 startup / 3 max turns / 4 context overflow / 5 cost / 6 timeout),
+and the interactive TUI (default when
 no ``-p`` is given): session-name prompt → session on disk → chat, with
 ``-r/--resume`` and ``-c/--continue`` reopening existing sessions.
 """
@@ -11,8 +12,10 @@ no ``-p`` is given): session-name prompt → session on disk → chat, with
 from __future__ import annotations
 
 import asyncio
+import math
 import sys
 from collections.abc import Callable, Coroutine
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -50,8 +53,10 @@ from lecode.hooks import (
     dispatch_event,
     dispatcher_from_config,
 )
+from lecode.hooks import STOP as HOOK_STOP
 from lecode.memory.store import resolve_project_root
 from lecode.providers import ProviderError, build_client, resolve_provider
+from lecode.providers.budget import BudgetedProvider
 from lecode.providers.catalog import Catalog
 from lecode.providers.live import LoadedCatalog, load_catalog
 from lecode.providers.openai_compat import ChatClient
@@ -73,6 +78,20 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_STARTUP = 2
 EXIT_MAX_TURNS = 3
+EXIT_CONTEXT_OVERFLOW = 4
+EXIT_COST_LIMIT = 5
+EXIT_TIMEOUT = 6
+
+
+class HeadlessTimeoutError(TimeoutError):
+    """The active headless execution deadline expired."""
+
+
+def _positive_limit(value: float | None) -> float | None:
+    if value is not None and (not math.isfinite(value) or value <= 0):
+        raise typer.BadParameter("must be a finite number greater than zero")
+    return value
+
 
 #: Value produced when ``-p/--prompt`` is given without an argument: read stdin.
 _STDIN_MARKER = ""
@@ -182,38 +201,42 @@ def fetch_catalog(config: Config, api_key: str | None = None) -> LoadedCatalog:
         return LoadedCatalog(Catalog.default(), "empty")
 
 
-async def _run_headless(
-    provider: Any, runner: AgentRunner, messages: list[ChatMessage]
-) -> RunResult:
-    try:
-        return await runner.run(messages)
-    finally:
-        workers = runner.ctx.extras.get(WORKER_EXTRA)
-        if workers is not None:
-            await workers.shutdown()
-        aclose = getattr(provider, "aclose", None)
-        if aclose is not None:
-            await aclose()
-
-
 async def _run_with_mcp(
-    runtime: Any, provider: Any, runner: AgentRunner, messages: list[ChatMessage]
+    runtime: Any,
+    provider: Any,
+    runner: AgentRunner,
+    messages: list[ChatMessage],
+    *,
+    timeout: float | None = None,
 ) -> RunResult:
     """Headless run with MCP servers attached (tools registered, shut down after)."""
-    from lecode.extras.mcp_client import attach_mcp
+    from lecode.extras.mcp_client import MCP_EXTRA, attach_mcp
 
     async def _notify(text: str) -> None:
         print(text, file=sys.stderr)
 
-    manager = await attach_mcp(runtime.registry, runtime.ctx, notify=_notify)
-    try:
-        return await _run_headless(provider, runner, messages)
-    finally:
-        background = runtime.ctx.extras.get(BACKGROUND_EXTRA)
-        if background is not None:
-            await background.shutdown()
-        await manager.shutdown()
-        runtime.close()
+    async def shutdown_extra(key: str) -> None:
+        manager = runtime.ctx.extras.get(key)
+        if manager is not None:
+            await manager.shutdown()
+
+    # Teardown remains outside the deadline, even if MCP attachment is cancelled.
+    async with AsyncExitStack() as cleanup:
+        cleanup.callback(runtime.close)
+        for key in (MCP_EXTRA, BACKGROUND_EXTRA):
+            cleanup.push_async_callback(shutdown_extra, key)
+        cleanup.push_async_callback(_aclose, provider)
+        cleanup.push_async_callback(shutdown_extra, WORKER_EXTRA)
+        try:
+            async with asyncio.timeout(timeout) as deadline:
+                if isinstance(provider, BudgetedProvider):
+                    provider.check(runner.model)
+                await attach_mcp(runtime.registry, runtime.ctx, notify=_notify)
+                return await runner.run(messages)
+        except TimeoutError as exc:
+            if deadline.expired():
+                raise HeadlessTimeoutError("execution timeout reached") from exc
+            raise
 
 
 async def _aclose(provider: Any) -> None:
@@ -299,8 +322,16 @@ def run_headless(
     allowed_tools: str | None = None,
     max_turns: int | None = None,
     worktree: str | None = None,
+    max_cost: float | None = None,
+    timeout: float | None = None,
 ) -> int:
     """Run one prompt headlessly; returns the process exit code."""
+    try:
+        _positive_limit(max_cost)
+        _positive_limit(timeout)
+    except typer.BadParameter as exc:
+        typer.echo(f"error: {exc}", err=True)
+        return EXIT_STARTUP
     config = load_config().config
     _apply_cli_overrides(
         config,
@@ -332,6 +363,9 @@ def run_headless(
     store = SessionStore()
     session = store.create(auto_name(store), cwd, model=config.llm.model)
     models = fetch_catalog(config, api_key)
+    budget = BudgetedProvider(client, models.catalog, max_cost) if max_cost is not None else None
+    if budget is not None:
+        client = budget
     runtime = build_runtime(
         config,
         cwd,
@@ -375,16 +409,37 @@ def run_headless(
     herdr.report("idle", session_id=session.id)
     signals.emit(START)
     herdr.report("working", session_id=session.id)
+    limit_reason = None
+    result = None
     try:
-        result = asyncio.run(_run_with_mcp(runtime, client, runner, messages))
-    except ProviderError as e:
+        result = asyncio.run(_run_with_mcp(runtime, client, runner, messages, timeout=timeout))
+        if budget is not None and budget.error is not None:
+            raise budget.error
+    except HeadlessTimeoutError as e:
+        limit_reason = "timeout"
         typer.echo(f"error: {e}", err=True)
-        return EXIT_ERROR
+        return EXIT_TIMEOUT
+    except ProviderError as e:
+        if budget is not None and budget.error is not None:
+            limit_reason = "cost_limit"
+        error = budget.error if limit_reason else e
+        typer.echo(f"error: {error}", err=True)
+        return EXIT_COST_LIMIT if limit_reason else EXIT_ERROR
     except KeyboardInterrupt:
         _fire_cli_hook(runtime.hooks, INTERRUPT)
         typer.echo("error: interrupted", err=True)
         return EXIT_ERROR
     finally:
+        if limit_reason is not None and (result is None or result.stop_reason != limit_reason):
+            store.append_event(session, "run_stopped", {"reason": limit_reason})
+            _fire_cli_hook(runtime.hooks, HOOK_STOP, reason=limit_reason)
+        if budget is not None:
+            qualifier = "known " if budget.usage_incomplete else ""
+            typer.echo(
+                f"tokens: {budget.input_tokens} in / {budget.output_tokens} out "
+                f"· cost: {qualifier}${budget.cost_usd:.4f}",
+                err=True,
+            )
         _fire_cli_hook(runtime.hooks, SESSION_END)
         signals.emit(STOP)
         herdr.report("idle")
@@ -395,16 +450,18 @@ def run_headless(
     if result.review:
         typer.echo(f"\npierre: {result.review}", err=True)
     totals = result.usage_totals
-    typer.echo(
-        f"tokens: {totals.input_tokens} in / {totals.output_tokens} out "
-        f"· cost: ${totals.cost_usd:.4f}",
-        err=True,
-    )
+    if budget is None:
+        qualifier = "known " if totals.usage_incomplete else ""
+        typer.echo(
+            f"tokens: {totals.input_tokens} in / {totals.output_tokens} out "
+            f"· cost: {qualifier}${totals.cost_usd:.4f}",
+            err=True,
+        )
     if wt_info is not None:
         typer.echo(_worktree_exit_note(wt_info), err=True)
     if result.stop_reason == "context_overflow":
         typer.echo("error: context full even after compaction — start a new session", err=True)
-        return EXIT_MAX_TURNS
+        return EXIT_CONTEXT_OVERFLOW
     if result.stop_reason == "max_turns":
         return EXIT_MAX_TURNS
     return EXIT_OK
@@ -965,6 +1022,18 @@ def callback(
     max_turns: Annotated[
         int | None, typer.Option("--max-turns", help="Maximum agent turns.")
     ] = None,
+    max_cost: Annotated[
+        float | None,
+        typer.Option(
+            "--max-cost", callback=_positive_limit, help="Headless cost threshold in USD."
+        ),
+    ] = None,
+    timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--timeout", callback=_positive_limit, help="Headless execution timeout in seconds."
+        ),
+    ] = None,
     hooks_test: Annotated[
         bool,
         typer.Option("--hooks-test", help="Dry-run the configured hook pipeline and exit."),
@@ -1009,6 +1078,11 @@ def callback(
     ] = None,
 ) -> None:
     """lecode — minimalist terminal AI coding agent."""
+    if (max_cost is not None or timeout is not None) and (
+        prompt is None or setup or hooks_test or loop is not None or chain is not None
+    ):
+        typer.echo("error: --max-cost and --timeout require --prompt", err=True)
+        raise typer.Exit(EXIT_STARTUP)
     if setup:
         raise typer.Exit(run_setup())
     if hooks_test:
@@ -1086,6 +1160,8 @@ def callback(
             allowed_tools=allowed_tools,
             max_turns=max_turns,
             worktree=worktree,
+            max_cost=max_cost,
+            timeout=timeout,
         )
     )
 

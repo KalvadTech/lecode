@@ -119,6 +119,7 @@ Alt-Enter                 steer the agent mid-turn
 
 ```sh
 lecode -p "write a haiku about this repo"     # one prompt, then exit
+lecode -p "review this repo" --max-cost 1 --timeout 120
 git diff | lecode -p "review this diff"       # a bare -p reads stdin
 lecode --loop plan.md --loop-cmd "make test"  # iterate until the plan is done
 lecode --chain "redesign the parser"          # brainstorm→plan→code→review
@@ -126,9 +127,24 @@ lecode --chain "redesign the parser"          # brainstorm→plan→code→revie
 
 The final answer goes to stdout; a `tokens: <in> in / <out> out · cost:
 $X.XXXX` summary goes to stderr, so scripts can pipe the answer cleanly.
+Incomplete accounting uses `cost: known $X.XXXX`; this is only the known
+portion of spending, not a complete total.
 
 Exit codes: `0` done · `1` error · `2` startup (missing deps, bad flags,
-non-tty `--setup`) · `3` max turns / max loop iterations / context overflow.
+non-tty `--setup`) · `3` max turns / max loop iterations · `4` context overflow ·
+`5` cost limit or unknown spend · `6` execution timeout.
+
+For single-prompt headless runs, `--max-cost` accepts a positive USD threshold.
+All model calls share it, including workers, subagents, compaction, learning,
+reviews, and retries. Once accounted spending reaches it, no further model
+requests start. Requests already in flight can exceed it. Unknown or invalid
+model prices reject the request before execution, and missing or invalid usage
+stops further requests. Explicit zero prices are valid for free models.
+
+`--timeout` accepts positive seconds and covers active execution from MCP
+connection through model calls, tools, and review. Synchronous startup and
+resource cleanup are outside this deadline, so process exit can occur later.
+Neither flag applies to interactive, loop, or chain mode.
 
 ## A tour of the power features
 

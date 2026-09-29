@@ -879,7 +879,6 @@ async def test_non_success_worker_stop_preserves_result_and_allows_resume(setup,
     else:
         ctx.config.agent.context_window = 3300
         ctx.config.compaction.buffer_tokens = 200
-        ctx.config.compaction.on_overflow = "pause"
         script = [tool, tool, {"text": "summary"}, tool]
     provider = FakeProvider(script)
     ctx.extras["provider"] = provider

@@ -8,6 +8,7 @@ here: message ``cache_control`` fields are serialized untouched by the client.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from lecode.providers.catalog import Modalities, ModelInfo, Pricing
@@ -50,12 +51,15 @@ def openrouter_client(
     )
 
 
-def _per_million(pricing: dict[str, Any], key: str) -> float:
+def _per_million(pricing: dict[str, Any], key: str) -> float | None:
     """Convert OpenRouter per-token pricing (string) to per-million-token float."""
     try:
-        return float(pricing.get(key) or 0) * 1_000_000
-    except (TypeError, ValueError):
-        return 0.0
+        if isinstance(pricing[key], bool):
+            return None
+        value = float(pricing[key]) * 1_000_000
+        return value if math.isfinite(value) and value >= 0 else None
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
 
 
 def map_remote_model(item: dict[str, Any]) -> ModelInfo | None:
@@ -63,7 +67,7 @@ def map_remote_model(item: dict[str, Any]) -> ModelInfo | None:
 
     Tolerates missing fields; returns ``None`` only for entries without an
     id. Entries from a plain OpenAI-shaped endpoint carry just an id — those
-    get a default 128k context window and zeroed pricing.
+    get a default 128k context window and unknown pricing.
     """
     model_id = item.get("id")
     if not model_id:
@@ -76,14 +80,19 @@ def map_remote_model(item: dict[str, Any]) -> ModelInfo | None:
         created = int(item["created"]) if item.get("created") else None
     except (TypeError, ValueError):
         created = None
+    pricing = item.get("pricing")
+    pricing = pricing if isinstance(pricing, dict) else {}
+    prompt_price = _per_million(pricing, "prompt")
+    completion_price = _per_million(pricing, "completion")
     return ModelInfo(
         id=model_id,
         name=item.get("name") or model_id,
         context_window=int(context_length),
         max_output=top_provider.get("max_completion_tokens") or None,
         pricing=Pricing(
-            prompt=_per_million(item.get("pricing") or {}, "prompt"),
-            completion=_per_million(item.get("pricing") or {}, "completion"),
+            prompt=prompt_price or 0.0,
+            completion=completion_price or 0.0,
+            known=prompt_price is not None and completion_price is not None,
         ),
         modalities=Modalities(
             input=list(architecture.get("input_modalities") or ["text"]),

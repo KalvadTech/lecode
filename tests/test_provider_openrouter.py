@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 import respx
 
 from lecode.providers.openrouter import (
     OPENROUTER_BASE_URL,
     fetch_remote_catalog,
+    map_remote_model,
     openrouter_client,
     routing_extra_body,
 )
@@ -108,6 +110,19 @@ async def test_fetch_remote_catalog_maps_fields():
     defaulted = entries[2]
     assert defaulted.context_window == 128_000
     assert defaulted.pricing.prompt == 0.0
+    assert not defaulted.pricing.known
+
+
+@pytest.mark.parametrize("price", [None, "bad", "-1", "nan", "inf", False])
+def test_missing_or_invalid_prices_are_not_free(price):
+    entry = map_remote_model({"id": "model", "pricing": {"prompt": price, "completion": "0"}})
+    assert not entry.pricing.known
+
+
+def test_explicit_zero_prices_are_known_free():
+    entry = map_remote_model({"id": "free", "pricing": {"prompt": "0", "completion": "0"}})
+    assert entry.pricing.known
+    assert entry.pricing.prompt == entry.pricing.completion == 0
 
 
 @respx.mock

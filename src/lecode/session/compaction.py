@@ -69,7 +69,7 @@ def priced_usage(usage: dict | None, model: str, catalog: Catalog | None) -> dic
         (usage.get("input_tokens") or usage.get("prompt_tokens") or 0) * pricing.prompt
         + (usage.get("output_tokens") or usage.get("completion_tokens") or 0) * pricing.completion
     ) / 1e6
-    return {**usage, "cost_usd": cost}
+    return {**usage, "cost_usd": cost, **({"incomplete": True} if not pricing.known else {})}
 
 
 def request_size(messages: Sequence[Mapping[str, Any]], tools: list[dict] | None = None) -> int:
