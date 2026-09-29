@@ -200,11 +200,6 @@ Payload: `{"event", "session", "ts", …}`; failures are dropped silently.
 
 ## `[mcp]`
 
-| field | default | meaning |
-|---|---|---|
-| `enable_exa` | `true` | auto-configure Exa web search when `EXA_API_KEY` is set |
-| `enable_context7` | `false` | auto-configure the context7 docs server |
-
 `[mcp.servers.<name>]` entries:
 
 | field | default | meaning |

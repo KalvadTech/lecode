@@ -27,7 +27,6 @@ from lecode.tui.themes import THEME
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
-    monkeypatch.delenv("EXA_API_KEY", raising=False)
     (tmp_path / ".git").mkdir()
     return tmp_path
 
@@ -225,60 +224,41 @@ def test_memory_step_states(env):
     assert _step(steps, "memory").detail == "disabled"
 
 
-def test_mcp_step_states(env, monkeypatch):
+def test_mcp_step_states(env):
     steps, *_ = _make(env)
-    # exa on by default but no key
-    assert _step(steps, "mcp").detail == "exa (no EXA_API_KEY)"
-    monkeypatch.setenv("EXA_API_KEY", "k")
-    config = Config(
-        mcp={"enable_context7": True, "servers": {"mine": {"transport": "stdio", "command": "x"}}}
-    )
+    assert _step(steps, "mcp").detail == "no servers"
+    config = Config(mcp={"servers": {"mine": {"transport": "stdio", "command": "x"}}})
     steps, *_ = _make(env, config)
-    mcp = _step(steps, "mcp")
-    assert "exa" in mcp.detail and "context7" in mcp.detail and "mine" in mcp.detail
+    assert _step(steps, "mcp").detail == "mine"
 
 
-def test_mcp_step_live_statuses(env, monkeypatch):
+def test_mcp_step_live_statuses(env):
     from lecode.extras.mcp_client import ServerStatus
     from lecode.tui.loading import WARN
 
-    monkeypatch.setenv("EXA_API_KEY", "k")
     servers = [
-        ServerStatus("context7", "connected", tools=2),
-        ServerStatus("exa", "connected", tools=3),
+        ServerStatus("docs", "connected", tools=2),
+        ServerStatus("web", "connected", tools=3),
         ServerStatus("mine", "failed", error="TimeoutError: connect"),
         ServerStatus("off", "disabled"),
     ]
     steps, *_ = _make(env, mcp_servers=servers)
     mcp = _step(steps, "mcp")
     assert mcp.status == WARN  # one server failed
-    assert "exa: connected · 3 tools" in mcp.detail
-    assert "context7: connected · 2 tools" in mcp.detail
+    assert "web: connected · 3 tools" in mcp.detail
+    assert "docs: connected · 2 tools" in mcp.detail
     assert "mine: failed — TimeoutError: connect" in mcp.detail
     assert "off: disabled" in mcp.detail
 
 
-def test_mcp_step_live_statuses_all_connected(env, monkeypatch):
+def test_mcp_step_live_statuses_all_connected(env):
     from lecode.extras.mcp_client import ServerStatus
     from lecode.tui.loading import OK
 
-    monkeypatch.setenv("EXA_API_KEY", "k")
-    steps, *_ = _make(env, mcp_servers=[ServerStatus("exa", "connected", tools=3)])
+    steps, *_ = _make(env, mcp_servers=[ServerStatus("mine", "connected", tools=3)])
     mcp = _step(steps, "mcp")
     assert mcp.status == OK
-    assert mcp.detail == "exa: connected · 3 tools"
-
-
-def test_mcp_step_live_statuses_exa_key_missing(env, monkeypatch):
-    from lecode.extras.mcp_client import ServerStatus
-    from lecode.tui.loading import WARN
-
-    monkeypatch.delenv("EXA_API_KEY", raising=False)
-    steps, *_ = _make(env, mcp_servers=[ServerStatus("mine", "connected", tools=1)])
-    mcp = _step(steps, "mcp")
-    assert mcp.status == WARN
-    assert "mine: connected · 1 tools" in mcp.detail
-    assert "exa: no EXA_API_KEY" in mcp.detail
+    assert mcp.detail == "mine: connected · 3 tools"
 
 
 def test_permissions_step(env):
@@ -345,9 +325,9 @@ def test_interactive_startup_prints_loading_screen(env, monkeypatch, capsys):
     """run_interactive prints the banner and step lines before the chat."""
     import lecode.cli as cli
 
-    monkeypatch.setattr(cli, "prompt_session_name", _fake_name_prompt)
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _fake_name_prompt)
     monkeypatch.setattr(cli, "build_provider", lambda config, api_key=None: object())
-    monkeypatch.setattr(cli, "TuiApp", _FakeTui)
+    monkeypatch.setattr("lecode.tui.app.TuiApp", _FakeTui)
     monkeypatch.setattr(cli, "_run_tui", _fake_run_tui)
     code = cli.run_interactive()
     assert code == 0
@@ -380,7 +360,7 @@ def test_catalog_fetch_runs_in_background(env, monkeypatch):
     from lecode.providers.live import LoadedCatalog
 
     events: list[str] = []
-    monkeypatch.setattr(cli, "prompt_session_name", _fake_name_prompt)
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _fake_name_prompt)
     monkeypatch.setattr(cli, "build_provider", lambda config, api_key=None: object())
 
     class FakeTui:
@@ -401,7 +381,7 @@ def test_catalog_fetch_runs_in_background(env, monkeypatch):
         events.append("fetch-done")
         return LoadedCatalog(Catalog.default(), "live", 427)
 
-    monkeypatch.setattr(cli, "TuiApp", FakeTui)
+    monkeypatch.setattr("lecode.tui.app.TuiApp", FakeTui)
     monkeypatch.setattr(cli, "_run_tui", fake_run_tui)
     monkeypatch.setattr(cli, "fetch_catalog", slow_fetch)
     assert cli.run_interactive() == 0
