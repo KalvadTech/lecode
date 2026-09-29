@@ -101,7 +101,7 @@ def test_run_flags_override_config_in_every_mode(mode, tmp_path, monkeypatch):
     monkeypatch.setattr("lecode.cli.check_dependencies", lambda: None)
     config_path = tmp_path / "cfg" / "config.toml"
     config_path.parent.mkdir()
-    original = 'schema_version = 1\n\n[llm]\nthinking = "low"\n'
+    original = 'schema_version = 2\n\n[llm]\nthinking = "low"\n'
     config_path.write_text(original)
     SessionStore().create("existing", tmp_path)
 
