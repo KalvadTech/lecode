@@ -50,6 +50,5 @@
   two modes, config is TOML-only, and the catalog is live with an empty fallback.
   For config or hook changes, consult `docs/configuration.md` or `docs/hooks.md`
   and reconcile with the implementation.
-- Releases use conventional commits and release-please, with wheel/sdist attached
-  to GitHub Releases, not PyPI. `.github/workflows/release.yml` separately re-locks
-  `uv.lock` after release-please bumps `pyproject.toml`.
+- Releases are manual: there is no release automation. Commits still follow
+  conventional commits; `pyproject.toml` carries a static version.

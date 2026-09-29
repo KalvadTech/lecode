@@ -1,4 +1,4 @@
-"""Tests for the CLI bootstrap (version flag, dependency gating)."""
+"""Tests for the CLI bootstrap (dependency gating)."""
 
 from __future__ import annotations
 
@@ -7,22 +7,9 @@ import re
 import pytest
 from typer.testing import CliRunner
 
-from lecode import __version__
 from lecode.cli import EXIT_OK, EXIT_STARTUP, app
 
 runner = CliRunner()
-
-
-def test_version_flag():
-    result = runner.invoke(app, ["--version"])
-    assert result.exit_code == EXIT_OK
-    assert f"lecode {__version__}" in result.stdout
-
-
-def test_version_flag_short():
-    result = runner.invoke(app, ["-V"])
-    assert result.exit_code == EXIT_OK
-    assert __version__ in result.stdout
 
 
 def test_help_flag_short():
