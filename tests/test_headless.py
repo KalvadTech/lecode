@@ -53,7 +53,7 @@ def test_headless_thinking_reaches_model_request(headless, monkeypatch, level):
     monkeypatch.chdir(tmp_path)
     config_path = tmp_path / "cfg" / "config.toml"
     config_path.parent.mkdir()
-    original = 'schema_version = 1\n\n[llm]\nthinking = "high"\n'
+    original = 'schema_version = 2\n\n[llm]\nthinking = "high"\n'
     config_path.write_text(original)
     provider = use_script([{"text": "ok"}])
     flags = [] if level is None else ["--thinking", level]
@@ -157,8 +157,6 @@ os.environ["LECODE_SKILLS_DIR"] = str(project / "skills")
 for name in ("HERDR_ENV", "HERDR_BIN_PATH", "HERDR_PANE_ID"):
     os.environ.pop(name, None)
 config = Config()
-config.mcp.enable_exa = False
-config.mcp.enable_context7 = False
 cli.load_config = lambda: SimpleNamespace(config=config)
 turns = 20 if sys.argv[2] == "tools" else 0
 provider = FakeProvider([
