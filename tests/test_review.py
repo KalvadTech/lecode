@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
 from tests.fakes import FakeProvider, sample_catalog
 from tests.test_tui_app import make_app
 
@@ -196,3 +199,86 @@ async def test_pierre_feedback_rendered_after_stats(tmp_path, monkeypatch):
     assert "Covers the request." in rendered
     # stats line first, then the review
     assert rendered.index("answer:") < rendered.index("◆ pierre")
+
+
+@pytest.mark.parametrize("budgeted", [False, True])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_failed_review_preserves_reported_usage(tmp_path, budgeted, cancelled):
+    from lecode.providers.budget import BudgetedProvider
+    from lecode.providers.types import Usage
+
+    class FailedReview(FakeProvider):
+        async def stream_chat(self, *args, **kwargs):
+            yield Usage({"input_tokens": 20, "output_tokens": 3, "cost_usd": 0.5})
+            if cancelled:
+                raise asyncio.CancelledError()
+            raise ProviderError("review failed after usage", status=503)
+
+    provider = FailedReview([])
+    if budgeted:
+        provider = BudgetedProvider(provider, sample_catalog(), 1)
+    recorded = []
+    pending = review(
+        provider,
+        "openai/gpt-5-mini",
+        request="q",
+        response="a",
+        cwd=tmp_path,
+        on_usage=recorded.append,
+    )
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+    else:
+        assert await pending is None
+    assert recorded == [
+        {"input_tokens": 20, "output_tokens": 3, "cost_usd": 0.5, "incomplete": True}
+    ]
+    if budgeted:
+        assert provider.cost_usd == 0.5
+
+
+@pytest.mark.parametrize("budgeted", [False, True])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_runner_retains_failed_review_usage(tool_ctx, tmp_path, budgeted, cancelled):
+    from lecode.providers.budget import BudgetedProvider
+    from lecode.providers.types import Usage
+    from lecode.session.stats import session_stats
+
+    class FailedReview(FakeProvider):
+        calls = 0
+
+        async def stream_chat(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                yield Usage({"input_tokens": 20, "output_tokens": 3, "cost_usd": 0.5})
+                if cancelled:
+                    raise asyncio.CancelledError()
+                raise ProviderError("review failed after usage", status=503)
+            async for event in super().stream_chat(*args, **kwargs):
+                yield event
+
+    tool_ctx.config.pierre.enabled = True
+    store = SessionStore(config_dir=tmp_path / "cfg")
+    session = store.create("partial-review", tmp_path, model=tool_ctx.config.llm.model)
+    provider = FailedReview(
+        [{"text": "done", "usage": {"input_tokens": 10, "output_tokens": 2, "cost_usd": 0.1}}]
+    )
+    if budgeted:
+        provider = BudgetedProvider(provider, sample_catalog(), 1)
+    runner = AgentRunner(provider, ToolRegistry([]), tool_ctx, session=session, store=store)
+    pending = runner.run([{"role": "user", "content": "q"}])
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+    else:
+        result = await pending
+        assert result.usage_totals.input_tokens == 30
+        assert result.usage_totals.output_tokens == 5
+        assert result.usage_totals.cost_usd == pytest.approx(0.6)
+        assert result.usage_totals.usage_incomplete
+    stats = session_stats(store, session)
+    assert stats.input_tokens == 30 and stats.output_tokens == 5
+    assert stats.cost_usd == pytest.approx(0.6)
+    assert stats.usage_incomplete
+    assert len(store.load_events(session, "pierre")) == 1

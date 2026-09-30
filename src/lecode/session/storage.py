@@ -91,6 +91,9 @@ def _bounded_agent_run(run: dict[str, Any]) -> dict[str, Any]:
     for key in ("turns", "input_tokens", "output_tokens"):
         data[key] = int(run.get(key) or 0)
     data["cost_usd"] = float(run.get("cost_usd") or 0.0)
+    data["usage_incomplete"] = bool(run.get("usage_incomplete", run.get("status") != "ok"))
+    for key in ("input_tokens", "output_tokens", "cost_usd"):
+        data[f"{key}_known"] = bool(run.get(f"{key}_known", True))
     data["duration_s"] = float(run.get("duration_s") or 0.0)
     data["truncated"] = truncated
     return data
@@ -573,6 +576,10 @@ class SessionStore:
     def _read_records_at(self, path: Path) -> list[Record]:
         return list(self._iter_records_at(path))
 
+    def iter_records(self, session: Session) -> Iterator[Record]:
+        """Stream records in file order without retaining the transcript."""
+        return self._iter_records_at(session.path)
+
     def read_records(self, session: Session) -> list[Record]:
         """All records in file order; corrupt lines are skipped and counted."""
         return self._read_records_at(session.path)
@@ -816,7 +823,10 @@ class SessionStore:
         records = [
             r
             for r in self.read_records(session)
-            if not (isinstance(r, EventRecord) and r.kind in {"memory_usage", "forget"})
+            if not (
+                isinstance(r, EventRecord)
+                and r.kind in {"memory_usage", "provider_usage", "forget"}
+            )
         ]
         if not records or not isinstance(records[-1], TombstoneRecord):
             return False
@@ -859,6 +869,8 @@ class SessionStore:
                 for line in source:
                     record = parse_record(line.decode("utf-8"))
                     if isinstance(record, EventRecord):
+                        if record.kind == "provider_usage":
+                            continue  # Billing metadata cannot change the model's context.
                         if not include_derivations and record.kind in {"compact", "memory_usage"}:
                             continue
                         if not include_worker_events and record.kind in {

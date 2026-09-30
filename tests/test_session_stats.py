@@ -62,6 +62,22 @@ def test_cost_unknown_model_skipped(store):
     assert stats.usage_incomplete
 
 
+def test_unpriced_auxiliary_usage_stays_unknown(store, tmp_path):
+    from lecode.session.compaction import priced_usage
+
+    catalog = sample_catalog()
+    catalog.get(GPT5_MINI).pricing.known = False
+    session = store.create("unpriced-memory", cwd=tmp_path, model=GPT5_MINI)
+    usage = priced_usage({"input_tokens": 7, "output_tokens": 3}, GPT5_MINI, catalog)
+    store.append_event(session, "memory_usage", {"model": GPT5_MINI, "usage": usage})
+
+    stats = session_stats(store, session, catalog=catalog)
+
+    assert (stats.input_tokens, stats.output_tokens) == (7, 3)
+    assert stats.usage_incomplete
+    assert not stats.cost_usd_known
+
+
 def test_openai_style_usage_keys(store):
     s = store.create("oa", cwd="/tmp", model=GPT5_MINI)
     store.append_message(
@@ -106,6 +122,8 @@ def test_context_tokens_fall_back_after_undo(store, session):
     assert session_stats(store, session).context_tokens == 50_000
     store.undo(session)  # hides the last user turn and its assistant reply
     assert session_stats(store, session).context_tokens == 1_000_000
+    assert store.redo(session)
+    assert session_stats(store, session).context_tokens == 50_000
 
 
 def test_context_tokens_zero_without_usage(store):
@@ -187,7 +205,22 @@ def test_missing_usage_and_pricing_are_not_known_zero(store, model, usage):
     store.append_message(session, {"role": "assistant", "content": "done"}, usage=usage)
     stats = session_stats(store, session, catalog=sample_catalog())
     assert stats.cost_usd == 0
-    assert stats.usage_incomplete is (usage != {"cost_usd": 0})
+    assert stats.usage_incomplete
+
+
+@pytest.mark.parametrize("kind", ["message", "compact", "memory_usage", "pierre"])
+def test_partial_call_marks_known_aggregate_incomplete(store, session, kind):
+    usage = {"input_tokens": 7, "cost_usd": 0.25}
+    if kind == "message":
+        store.append_message(session, {"role": "assistant", "content": "partial"}, usage=usage)
+    else:
+        store.append_event(session, kind, {"usage": usage})
+    stats = session_stats(store, session, catalog=sample_catalog())
+    assert stats.input_tokens == 1_001_007
+    assert stats.output_tokens == 1_000_500
+    assert stats.cost_usd == pytest.approx(2.51)
+    assert stats.input_tokens_known and stats.output_tokens_known and stats.cost_usd_known
+    assert stats.usage_incomplete
 
 
 @pytest.mark.parametrize("incomplete", [False, True])
@@ -271,3 +304,31 @@ async def test_worker_checkpoint_completeness_loads_old_and_new_json(
         assert stats.cost_usd == 0
     finally:
         await manager.shutdown()
+
+
+def test_json_reporting_does_not_retain_transcript(store, tmp_path, capsys):
+    import json
+    import tracemalloc
+
+    from lecode.cli import _RunOutput
+
+    session = store.create("large-report", cwd=tmp_path, model=GPT5_MINI)
+    for _ in range(64):
+        store.append_message(
+            session,
+            {"role": "assistant", "content": "x" * 262144},
+            usage={"input_tokens": 7, "output_tokens": 3, "cost_usd": 0.001},
+        )
+    store.append_message(session, {"role": "assistant", "content": "partial", "incomplete": True})
+    tracemalloc.start()
+    try:
+        _RunOutput(store=store, session=session, model=GPT5_MINI).emit()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["turns"] == 64
+    assert (payload["input_tokens"], payload["output_tokens"]) == (448, 192)
+    assert payload["cost_usd"] == pytest.approx(0.064)
+    assert payload["usage_incomplete"]
+    assert peak < 4 * 1024 * 1024

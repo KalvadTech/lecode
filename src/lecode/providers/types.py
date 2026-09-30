@@ -127,20 +127,25 @@ async def collect(stream: AsyncIterator[StreamEvent]) -> CompletedMessage:
     usage: dict[str, Any] | None = None
     finish_reason: str | None = None
 
-    async for event in stream:
-        if isinstance(event, TokenDelta):
-            text_parts.append(event.text)
-        elif isinstance(event, ReasoningDelta):
-            reasoning_parts.append(event.text)
-        elif isinstance(event, ToolCallDelta):
-            call = calls.setdefault(event.index, {"id": "", "name": "", "arguments": ""})
-            call["id"] += event.id
-            call["name"] += event.name
-            call["arguments"] += event.arguments_chunk
-        elif isinstance(event, Usage):
-            usage = event.usage
-        elif isinstance(event, Done):
-            finish_reason = event.finish_reason
+    try:
+        async for event in stream:
+            if isinstance(event, TokenDelta):
+                text_parts.append(event.text)
+            elif isinstance(event, ReasoningDelta):
+                reasoning_parts.append(event.text)
+            elif isinstance(event, ToolCallDelta):
+                call = calls.setdefault(event.index, {"id": "", "name": "", "arguments": ""})
+                call["id"] += event.id
+                call["name"] += event.name
+                call["arguments"] += event.arguments_chunk
+            elif isinstance(event, Usage):
+                usage = event.usage
+            elif isinstance(event, Done):
+                finish_reason = event.finish_reason
+    except BaseException as exc:
+        if isinstance(usage, dict):
+            exc.usage = {**usage, "incomplete": True}
+        raise
 
     tool_calls: list[ToolCallDict] = [
         {

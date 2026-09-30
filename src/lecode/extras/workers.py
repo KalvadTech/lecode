@@ -12,7 +12,7 @@ import inspect
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,7 @@ from lecode.extras.subagents import SUBAGENT_EVENTS_EXTRA, SubagentError, Subage
 from lecode.extras.worktree import WorktreeError, WorktreeInfo, WorktreeManager
 from lecode.hooks import SUBAGENT_END, SUBAGENT_START, build_envelope, dispatch_event
 from lecode.session.model import EventRecord, MessageRecord
+from lecode.session.stats import session_stats
 from lecode.session.storage import Session, SessionStore
 
 WORKER_EXTRA = "workers"
@@ -346,7 +347,7 @@ class WorkerManager:
         # ponytail: scan the root ledger per dispatch; index if session size warrants it.
         recorded = [
             r.data
-            for r in self.store.read_records(self.session)
+            for r in self.store.iter_records(self.session)
             if isinstance(r, EventRecord)
             and r.kind == "worker_usage"
             and r.data.get("worker_id") == worker.id
@@ -363,15 +364,32 @@ class WorkerManager:
             and recorded[-1]["incomplete"] == worker.usage_incomplete
         ):
             return
+        try:
+            stats = session_stats(self.store, worker.session, catalog=self.root_ctx.catalog)
+        except (OSError, ValueError):
+            worker.usage_incomplete = True
+            stats = None
+        known = {
+            f"{key}_known": bool(getattr(worker.usage_totals, key))
+            or bool(stats and getattr(stats, f"{key}_known"))
+            for key in ("input_tokens", "output_tokens", "cost_usd")
+        }
         self.store.append_event(
             self.session,
             "worker_usage",
             {
                 "worker_id": worker.id,
                 "dispatch_id": worker.dispatch_id,
-                "usage": delta,
+                "usage": {**delta, **known},
                 "incomplete": worker.usage_incomplete,
             },
+        )
+
+    def _checkpoint_usage(self, worker):
+        self.store.append_event(
+            worker.session,
+            "worker_usage_checkpoint",
+            {"dispatch_id": worker.dispatch_id, **asdict(worker.usage_totals)},
         )
 
     def _agent(self, ctx, name):
@@ -757,7 +775,13 @@ class WorkerManager:
             self._record(worker)
 
     async def _execute(self, worker, *, resuming=False):
+        initial_usage = worker.usage_totals
+        initial_stats = initial_auxiliary = None
         try:
+            initial_stats = session_stats(self.store, worker.session, catalog=self.root_ctx.catalog)
+            initial_auxiliary = session_stats(
+                self.store, worker.session, self.root_ctx.catalog, include_message_usage=False
+            )
             start = asyncio.create_task(self._hook(worker, SUBAGENT_START))
             try:
                 await asyncio.shield(start)
@@ -817,12 +841,54 @@ class WorkerManager:
             if worker.id in self._leases:
                 self._leases.remove(worker.id)
                 self._slots.release()
-            worker.usage_incomplete |= any(
-                isinstance(record, MessageRecord)
-                and record.role == "assistant"
-                and record.usage is None
-                for record in self.store.read_records(worker.session)
+            # Each descendant has its own root usage ledger. Reconcile only this worker.
+            try:
+                stats = session_stats(self.store, worker.session, catalog=self.root_ctx.catalog)
+                auxiliary = session_stats(
+                    self.store, worker.session, self.root_ctx.catalog, include_message_usage=False
+                )
+            except (OSError, ValueError) as error:
+                worker.state = "failed"
+                worker.error = worker.error or f"{type(error).__name__}: {error}"
+                worker.usage_incomplete = True
+                stats = None
+            if stats is not None:
+                worker.usage_incomplete |= stats.usage_incomplete
+            runtime = self._runtimes.get(worker.id)
+            worker.usage_incomplete |= bool(runtime and runtime.ctx.extras.get("usage_incomplete"))
+            # Checkpoints precede transcript writes and omit new auxiliary calls.
+            totals = (
+                {
+                    key: max(
+                        getattr(worker.usage_totals, key)
+                        + (
+                            getattr(auxiliary, key) - getattr(initial_auxiliary, key)
+                            if initial_auxiliary is not None
+                            else 0
+                        ),
+                        getattr(stats, key),
+                        (
+                            getattr(initial_usage, key)
+                            + getattr(stats, key)
+                            - getattr(initial_stats, key)
+                            if initial_stats is not None
+                            else getattr(stats, key)
+                        ),
+                    )
+                    for key in ("input_tokens", "output_tokens", "cost_usd", "unknown_usage_calls")
+                }
+                if stats is not None
+                else None
             )
+            if totals is not None:
+                worker.usage_totals = UsageTotals(
+                    **totals,
+                    context_tokens=stats.context_tokens,
+                    usage_incomplete=worker.usage_incomplete,
+                )
+            else:
+                worker.usage_totals = replace(worker.usage_totals, usage_incomplete=True)
+            self._checkpoint_usage(worker)
             self._record_usage(worker)
             self._record(worker)
             await self._hook(worker, SUBAGENT_END)
@@ -899,7 +965,7 @@ class WorkerManager:
             self._record(worker)
 
     async def _event(self, worker, event):
-        if isinstance(event, LlmResponse):
+        if isinstance(event, LlmResponse) and event.completed:
             worker.usage_incomplete |= event.usage_incomplete
             old = worker.usage_totals
             worker.usage_totals = UsageTotals(
@@ -907,16 +973,10 @@ class WorkerManager:
                 old.output_tokens + event.output_tokens,
                 old.cost_usd + event.cost_usd,
                 event.input_tokens or old.context_tokens,
+                unknown_usage_calls=old.unknown_usage_calls,
                 usage_incomplete=worker.usage_incomplete,
             )
-            self.store.append_event(
-                worker.session,
-                "worker_usage_checkpoint",
-                {
-                    "dispatch_id": worker.dispatch_id,
-                    **asdict(worker.usage_totals),
-                },
-            )
+            self._checkpoint_usage(worker)
             self._record(worker)
         callback = self.root_ctx.extras.get(SUBAGENT_EVENTS_EXTRA)
         if callback is not None:

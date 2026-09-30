@@ -124,6 +124,7 @@ lecode -p "review this repo" --max-cost 1 --timeout 120
 git diff | lecode -p "review this diff"       # a bare -p reads stdin
 lecode --loop plan.md --loop-cmd "make test"  # iterate until the plan is done
 lecode --chain "redesign the parser"          # brainstorm→plan→code→review
+lecode -p "review this repo" --output-format json
 ```
 
 The final answer goes to stdout; a `tokens: <in> in / <out> out · cost:
@@ -176,6 +177,25 @@ stops further requests. Explicit zero prices are valid for free models.
 connection through model calls, tools, and review. Synchronous startup and
 resource cleanup are outside this deadline, so process exit can occur later.
 Neither flag applies to interactive, loop, or chain mode.
+
+
+`--output-format json` works with `--prompt`, `--loop`, and `--chain`.
+It prints one JSON object on stdout with `final_text`, `stop_reason`, `turns`,
+`input_tokens`, `output_tokens`, `cost_usd`, `model`, and `usage_incomplete`.
+Progress and diagnostics go to stderr. Text output remains the default.
+
+For loops and chains, `final_text` is the last iteration or phase's answer,
+and `turns` counts completed main model calls across the run. Token and cost
+totals include recorded worker and subagent usage, compaction, memory learning,
+and review. `model` identifies the main configured model. Cost is in USD,
+using provider-reported cost when available and catalog pricing otherwise.
+
+Failures also emit JSON. Known partial usage is retained as a lower bound
+with `usage_incomplete: true`; unavailable metrics are `null`. Stop reasons
+include `startup_error`, `error`, `interrupted`, `blocked`, and the runner or
+loop's existing reasons (`done`, `empty`, `max_turns`, `context_overflow`,
+`max_iterations`, `cost_limit`, `timeout`). Help, version, and argument-parsing errors use normal CLI
+output; JSON is unavailable for interactive, setup, and hooks-test modes.
 
 ## A tour of the power features
 

@@ -705,9 +705,10 @@ def test_lock_holder_reports_pid_while_held(store):
     assert store.lock_holder(s.id) is None
 
 
-def test_worker_inbox_does_not_invalidate_model_sources(store, session):
+@pytest.mark.parametrize("kind", ["worker_inbox", "provider_usage"])
+def test_worker_inbox_does_not_invalidate_model_sources(store, session, kind):
     version = store.source_version(session, include_worker_events=False)
-    store.append_event(session, "worker_inbox", {"id": "queued", "text": "next turn"})
+    store.append_event(session, kind, {"id": "queued", "text": "next turn"})
     assert store.source_version(session, include_worker_events=False) == version
     assert store.source_version(session) != version
 
