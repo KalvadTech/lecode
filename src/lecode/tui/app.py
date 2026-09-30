@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import sys
 from contextvars import ContextVar
 from dataclasses import replace
@@ -192,6 +193,8 @@ def _register_key_sequences() -> None:
     ANSI_SEQUENCES["\x1b[27;2;13~"] = Keys.ControlJ
     ANSI_SEQUENCES.setdefault("\x1b[27u", Keys.Escape)
     ANSI_SEQUENCES.setdefault("\x1b[9;2u", Keys.BackTab)
+    for level in range(3):
+        ANSI_SEQUENCES.setdefault(f"\x1b[>4;{level}m", Keys.Ignore)
 
     controls = {
         ord(char): Keys(f"c-{char.lower()}")
@@ -254,8 +257,9 @@ def _register_key_sequences() -> None:
 #: xterm's modifyOtherKeys level 2. Terminals without support ignore both;
 #: _register_key_sequences maps their modified keys to the existing bindings.
 _ENABLE_KEY_MODES = "\x1b[>1u\x1b[>4;2m"
-# ponytail: xterm has no mode stack; reset its configured default here.
-# Query and restore dynamic prior modes if nested xterm applications need it.
+_QUERY_XTERM_MODE = "\x1b[?4m"
+# ponytail: if xterm does not answer the query, fall back to its configured default.
+# A guaranteed restore would require waiting for a response before enabling the mode.
 _DISABLE_KEY_MODES = "\x1b[<u\x1b[>4m"
 
 
@@ -317,6 +321,7 @@ class TuiApp:
         self._last_response = ""
         #: Active worktree isolation (``/worktree``, ``--worktree``).
         self._worktree: Any | None = None  # WorktreeInfo
+        self._key_mode_restore = _DISABLE_KEY_MODES
         self._worktree_manager: Any | None = None  # WorktreeManager
         self._original_cwd: Path | None = None
         #: Background plan-loop task (``/loop``); while it runs, prompts refuse.
@@ -1133,7 +1138,7 @@ class TuiApp:
                     self._feed.info("$EDITOR is not set")
                     return
                 try:
-                    _set_key_modes(_DISABLE_KEY_MODES, self._key_mode_stdout)
+                    _set_key_modes(self._key_mode_restore, self._key_mode_stdout)
                     edited = await open_in_editor(buf.text)
                 finally:
                     _set_key_modes(_ENABLE_KEY_MODES, self._key_mode_stdout)
@@ -1413,14 +1418,32 @@ class TuiApp:
             output=output,
         )
         if isinstance(app.input, Vt100Input):
-            feed_key = app.input.vt100_parser.feed_key_callback
+            parser = app.input.vt100_parser
+            get_match = parser._get_match
+            feed_key = parser.feed_key_callback
+
+            def match_xterm_unicode(sequence: str):
+                match = get_match(sequence)
+                if match is not None:
+                    return match
+                modified = re.fullmatch(r"\x1b\[27;([234]);([0-9]{1,7})~", sequence)
+                if modified:
+                    code = int(modified[2])
+                    if 127 < code <= 0x10FFFF and chr(code).isprintable():
+                        char = chr(code)
+                        return char if modified[1] == "2" else (Keys.Escape, char)
+                return None
 
             def normalize_xterm_shift(key: KeyPress) -> None:
+                if key.key == Keys.Ignore and key.data.startswith("\x1b[>4;"):
+                    self._key_mode_restore = "\x1b[<u" + key.data
+                    return
                 if key.data.startswith("\x1b[27;2;") and len(key.key) == 1:
                     key = KeyPress(key.key, key.key)
                 feed_key(key)
 
-            app.input.vt100_parser.feed_key_callback = normalize_xterm_shift
+            parser._get_match = match_xterm_unicode
+            parser.feed_key_callback = normalize_xterm_shift
         return app
 
     # -- the driver -----------------------------------------------------------
@@ -1428,6 +1451,7 @@ class TuiApp:
     async def run(self, *, input: Input | None = None, output: Output | None = None) -> int:
         """Run the interactive loop until quit; returns the exit code."""
         self._key_mode_stdout = sys.stdout
+        self._key_mode_restore = _DISABLE_KEY_MODES
         self._hydrate_workers()
         self._status.git = await self._git.get(self._cwd)
         self._app = self._build_app(input=input, output=output)
@@ -1444,6 +1468,7 @@ class TuiApp:
         self._file_lister.prefetch()
         self._spinner_task = asyncio.ensure_future(self._spinner_loop())
         try:
+            _set_key_modes(_QUERY_XTERM_MODE, self._key_mode_stdout)
             _set_key_modes(_ENABLE_KEY_MODES, self._key_mode_stdout)
             with patch_stdout(raw=True):
                 try:
@@ -1457,7 +1482,7 @@ class TuiApp:
                     print(f"lecode: exiting on {type(e).__name__}", file=sys.stderr)
         finally:
             try:
-                _set_key_modes(_DISABLE_KEY_MODES, self._key_mode_stdout)
+                _set_key_modes(self._key_mode_restore, self._key_mode_stdout)
             finally:
                 await self._fire_hook(SESSION_END)
                 self._spinner_task.cancel()
