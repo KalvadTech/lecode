@@ -1370,7 +1370,8 @@ async def test_run_enables_and_restores_key_modification_modes(tmp_path, monkeyp
     assert out.index(_ENABLE_KEY_MODES) < out.index(_DISABLE_KEY_MODES)
 
 
-async def test_run_restores_dynamic_xterm_mode(tmp_path, monkeypatch):
+@pytest.mark.parametrize("level", [1, 3])
+async def test_run_restores_dynamic_xterm_mode(tmp_path, monkeypatch, level):
     from lecode.tui.app import _ENABLE_KEY_MODES
 
     class TtyStringIO(StringIO):
@@ -1384,14 +1385,15 @@ async def test_run_restores_dynamic_xterm_mode(tmp_path, monkeypatch):
     with create_pipe_input() as inp:
         task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
         await wait_for(lambda: _ENABLE_KEY_MODES in fake.getvalue())
-        inp.send_text("\x1b[>4;1m")  # response to the preceding xterm mode query
-        await wait_for(lambda: app._key_mode_restore == "\x1b[<u\x1b[>4;1m")
+        response = f"\x1b[>4;{level}m"
+        inp.send_text(response)  # response to the preceding xterm mode query
+        await wait_for(lambda: app._key_mode_restore == "\x1b[<u" + response)
         assert app._input_area.text == ""
         inp.send_text("/quit\r")
         assert await task == 0
     out = fake.getvalue()
     assert out.index("\x1b[?4m") < out.index(_ENABLE_KEY_MODES)
-    assert out.endswith("\x1b[<u\x1b[>4;1m")
+    assert out.endswith("\x1b[<u" + response)
 
 
 async def test_editor_suspends_key_modes_on_original_stdout(tmp_path, monkeypatch):
@@ -1483,14 +1485,17 @@ async def test_xterm_shift_character_inserts_character_not_escape_text(
             await task
 
 
-def test_xterm_alt_unicode_preserves_character(tmp_path, monkeypatch):
-    from prompt_toolkit.keys import Keys
-
+async def test_xterm_alt_unicode_preserves_character(tmp_path, monkeypatch):
     app, _, _ = make_app(tmp_path, monkeypatch, [])
     with create_pipe_input() as inp:
-        app._build_app(input=inp, output=DummyOutput())
-        inp.send_text("\x1b[27;3;233~")
-        assert tuple(press.key for press in inp.read_keys()) == (Keys.Escape, "é")
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        try:
+            inp.send_text("\x1b[27;3;233~")
+            await wait_for(lambda: app._input_area is not None and bool(app._input_area.text))
+            assert app._input_area.text == "é"
+        finally:
+            inp.send_text("\x03/quit\r")
+            await task
 
 
 async def test_pipe_draft_persisted_on_eof_exit(tmp_path, monkeypatch):

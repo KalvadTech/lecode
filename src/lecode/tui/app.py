@@ -193,7 +193,7 @@ def _register_key_sequences() -> None:
     ANSI_SEQUENCES["\x1b[27;2;13~"] = Keys.ControlJ
     ANSI_SEQUENCES.setdefault("\x1b[27u", Keys.Escape)
     ANSI_SEQUENCES.setdefault("\x1b[9;2u", Keys.BackTab)
-    for level in range(3):
+    for level in range(4):
         ANSI_SEQUENCES.setdefault(f"\x1b[>4;{level}m", Keys.Ignore)
 
     controls = {
@@ -1421,6 +1421,7 @@ class TuiApp:
             parser = app.input.vt100_parser
             get_match = parser._get_match
             feed_key = parser.feed_key_callback
+            xterm_alt = False
 
             def match_xterm_unicode(sequence: str):
                 match = get_match(sequence)
@@ -1435,9 +1436,16 @@ class TuiApp:
                 return None
 
             def normalize_xterm_shift(key: KeyPress) -> None:
+                nonlocal xterm_alt
                 if key.key == Keys.Ignore and key.data.startswith("\x1b[>4;"):
                     self._key_mode_restore = "\x1b[<u" + key.data
                     return
+                if xterm_alt:
+                    xterm_alt = False
+                    if len(key.key) == 1 and not key.data:
+                        key = KeyPress(key.key, key.key)
+                elif key.key == Keys.Escape and key.data.startswith(("\x1b[27;3;", "\x1b[27;4;")):
+                    xterm_alt = True
                 if key.data.startswith("\x1b[27;2;") and len(key.key) == 1:
                     key = KeyPress(key.key, key.key)
                 feed_key(key)
