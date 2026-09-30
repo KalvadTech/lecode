@@ -19,7 +19,7 @@ import sys
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TextIO
 
 from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
@@ -218,12 +218,14 @@ def _register_key_sequences() -> None:
     for code, key in controls.items():
         for modifier in (5, 6):
             ANSI_SEQUENCES.setdefault(f"\x1b[{code};{modifier}u", key)
+            ANSI_SEQUENCES.setdefault(f"\x1b[27;{modifier};{code}~", key)
         for modifier in (7, 8):
             ANSI_SEQUENCES.setdefault(f"\x1b[{code};{modifier}u", (Keys.Escape, key))
             ANSI_SEQUENCES.setdefault(f"\x1b[27;{modifier};{code}~", (Keys.Escape, key))
 
     for code in range(32, 127):
         char = chr(code)
+        ANSI_SEQUENCES.setdefault(f"\x1b[27;2;{code}~", char)
         for modifier in (3, 4):
             key = (Keys.Escape, char.upper() if modifier == 4 else char)
             ANSI_SEQUENCES.setdefault(f"\x1b[{code};{modifier}u", key)
@@ -240,25 +242,31 @@ def _register_key_sequences() -> None:
             ANSI_SEQUENCES.setdefault(f"\x1b[27;{modifier};{code}~", (Keys.Escape, key))
         for modifier in (5, 6):
             ANSI_SEQUENCES.setdefault(f"\x1b[{code};{modifier}u", key)
+            ANSI_SEQUENCES.setdefault(f"\x1b[27;{modifier};{code}~", key)
+    ANSI_SEQUENCES.setdefault("\x1b[27;2;9~", Keys.BackTab)
+    ANSI_SEQUENCES.setdefault("\x1b[27;2;127~", Keys.ControlH)
 
 
 #: Mode sequences that make Shift+Enter distinguishable from plain Enter:
 #: ``ESC [ > 1 u`` pushes the Kitty keyboard protocol's disambiguate flag
-#: (Kitty, Ghostty, WezTerm, foot, Contour) and ``ESC [ > 4 ; 1 m`` sets
-#: xterm's modifyOtherKeys level 1. Terminals without support ignore both;
+#: (Kitty, Ghostty, WezTerm, foot, Contour) and ``ESC [ > 4 ; 2 m`` sets
+#: xterm's modifyOtherKeys level 2. Terminals without support ignore both;
 #: _register_key_sequences maps their modified keys to the existing bindings.
-_ENABLE_KEY_MODES = "\x1b[>1u\x1b[>4;1m"
-_DISABLE_KEY_MODES = "\x1b[<u\x1b[>4;0m"
+_ENABLE_KEY_MODES = "\x1b[>1u\x1b[>4;2m"
+# ponytail: xterm has no mode stack; reset its configured default here.
+# Query and restore dynamic prior modes if nested xterm applications need it.
+_DISABLE_KEY_MODES = "\x1b[<u\x1b[>4m"
 
 
-def _set_key_modes(sequence: str) -> None:
+def _set_key_modes(sequence: str, stream: TextIO | None = None) -> None:
     """Write a terminal mode sequence to the real terminal, when there is one."""
     if sys.platform == "win32" or os.environ.get("TERM") == "dumb":
         return
-    if not sys.stdout.isatty():
+    stream = stream if stream is not None else sys.stdout
+    if not stream.isatty():
         return
-    sys.stdout.write(sequence)
-    sys.stdout.flush()
+    stream.write(sequence)
+    stream.flush()
 
 
 class TuiApp:
@@ -1120,10 +1128,15 @@ class TuiApp:
             buf = event.current_buffer
 
             async def _edit() -> None:
-                edited = await open_in_editor(buf.text)
+                if not os.environ.get("EDITOR"):
+                    self._feed.info("$EDITOR is not set")
+                    return
+                try:
+                    _set_key_modes(_DISABLE_KEY_MODES, self._key_mode_stdout)
+                    edited = await open_in_editor(buf.text)
+                finally:
+                    _set_key_modes(_ENABLE_KEY_MODES, self._key_mode_stdout)
                 if edited is None:
-                    if not os.environ.get("EDITOR"):
-                        self._feed.info("$EDITOR is not set")
                     return
                 buf.text = edited
                 buf.cursor_position = len(edited)
@@ -1403,6 +1416,7 @@ class TuiApp:
 
     async def run(self, *, input: Input | None = None, output: Output | None = None) -> int:
         """Run the interactive loop until quit; returns the exit code."""
+        self._key_mode_stdout = sys.stdout
         self._hydrate_workers()
         self._status.git = await self._git.get(self._cwd)
         self._app = self._build_app(input=input, output=output)
@@ -1419,7 +1433,7 @@ class TuiApp:
         self._file_lister.prefetch()
         self._spinner_task = asyncio.ensure_future(self._spinner_loop())
         try:
-            _set_key_modes(_ENABLE_KEY_MODES)
+            _set_key_modes(_ENABLE_KEY_MODES, self._key_mode_stdout)
             with patch_stdout(raw=True):
                 try:
                     await self._app.run_async()
@@ -1432,7 +1446,7 @@ class TuiApp:
                     print(f"lecode: exiting on {type(e).__name__}", file=sys.stderr)
         finally:
             try:
-                _set_key_modes(_DISABLE_KEY_MODES)
+                _set_key_modes(_DISABLE_KEY_MODES, self._key_mode_stdout)
             finally:
                 await self._fire_hook(SESSION_END)
                 self._spinner_task.cancel()

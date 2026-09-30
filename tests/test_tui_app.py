@@ -1316,9 +1316,10 @@ def test_enabled_key_modes_keep_existing_shortcuts():
     from prompt_toolkit.input.vt100_parser import Vt100Parser
     from prompt_toolkit.keys import Keys
 
-    from lecode.tui.app import _register_key_sequences
+    from lecode.tui.app import _ENABLE_KEY_MODES, _register_key_sequences
 
     _register_key_sequences()
+    assert "\x1b[>4;2m" in _ENABLE_KEY_MODES
     cases = (
         ("\x1b[13;2u", (Keys.ControlJ,)),  # Shift-Enter
         ("\x1b[99;5u", (Keys.ControlC,)),  # Ctrl-C
@@ -1330,6 +1331,11 @@ def test_enabled_key_modes_keep_existing_shortcuts():
         ("\x1b[98;3u", (Keys.Escape, "b")),  # Alt-B
         ("\x1b[27;3;13~", (Keys.Escape, Keys.ControlM)),  # xterm Alt-Enter
         ("\x1b[27;3;98~", (Keys.Escape, "b")),  # xterm Alt-B
+        ("\x1b[27;2;13~", (Keys.ControlJ,)),  # xterm Shift-Enter
+        ("\x1b[27;2;65~", ("A",)),  # xterm Shift-A
+        ("\x1b[27;2;9~", (Keys.BackTab,)),  # xterm Shift-Tab
+        ("\x1b[27;5;99~", (Keys.ControlC,)),  # xterm Ctrl-C
+        ("\x1b[27;6;99~", (Keys.ControlC,)),  # xterm Ctrl-Shift-C
     )
     for sequence, expected in cases:
         events = []
@@ -1343,6 +1349,8 @@ async def test_run_enables_and_restores_key_modification_modes(tmp_path, monkeyp
     """On a real terminal the TUI pushes the kitty/modifyOtherKeys modes that
     make Shift+Enter arrive as a distinct sequence, and restores on exit."""
     from lecode.tui.app import _DISABLE_KEY_MODES, _ENABLE_KEY_MODES
+
+    assert "\x1b[>4m" in _DISABLE_KEY_MODES  # configured xterm default, not hard-coded 0
 
     class TtyStringIO(StringIO):
         def isatty(self):
@@ -1360,6 +1368,38 @@ async def test_run_enables_and_restores_key_modification_modes(tmp_path, monkeyp
     out = fake.getvalue()
     assert _DISABLE_KEY_MODES in out
     assert out.index(_ENABLE_KEY_MODES) < out.index(_DISABLE_KEY_MODES)
+
+
+async def test_editor_suspends_key_modes_on_original_stdout(tmp_path, monkeypatch):
+    from lecode.tui.app import _DISABLE_KEY_MODES, _ENABLE_KEY_MODES
+
+    class TtyStringIO(StringIO):
+        def isatty(self):
+            return True
+
+    fake = TtyStringIO()
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    monkeypatch.setattr("sys.stdout", fake)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("EDITOR", "fake-editor")
+
+    async def fake_editor(text):
+        assert _DISABLE_KEY_MODES in fake.getvalue()
+        return text + " edited"
+
+    monkeypatch.setattr("lecode.tui.app.open_in_editor", fake_editor)
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        await wait_for(lambda: _ENABLE_KEY_MODES in fake.getvalue())
+        inp.send_text("draft\x1b[103;5u")  # Kitty Ctrl-G
+        await wait_for(
+            lambda: app._input_area is not None and app._input_area.text == "draft edited"
+        )
+        inp.send_text("\x03")
+        inp.send_text("/quit\r")
+        assert await task == 0
+    assert fake.getvalue().count(_ENABLE_KEY_MODES) == 2
+    assert fake.getvalue().count(_DISABLE_KEY_MODES) == 2
 
 
 async def test_key_mode_reset_failure_still_saves_draft(tmp_path, monkeypatch):
