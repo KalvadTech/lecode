@@ -9,6 +9,7 @@ part in the wire message (via the result's ``content_parts`` metadata).
 from __future__ import annotations
 
 import zlib
+from itertools import islice
 from pathlib import Path
 
 from lecode.agent.tools.base import Tool, ToolContext, ToolResult
@@ -97,12 +98,22 @@ class ReadTool(Tool):
         with_anchors = bool(args.get("with_anchors"))
 
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            with path.open(encoding="utf-8", errors="replace") as stream:
+                lines = (text for line in stream for text in line.splitlines())
+                page: list[str] = []
+                total = 0
+                for total, text in enumerate(lines, start=1):
+                    if offset <= total < offset + limit:
+                        page.append(text)
+                if limit < 0:
+                    # Preserve negative slice bounds without retaining the whole file.
+                    start, stop, _ = slice(offset - 1, offset - 1 + limit).indices(total)
+                    stream.seek(0)
+                    lines = (text for line in stream for text in line.splitlines())
+                    page = list(islice(lines, start, stop))
         except OSError as e:
             return ToolResult(f"error: {e}", is_error=True)
 
-        total = len(lines)
-        page = lines[offset - 1 : offset - 1 + limit]
         with_marks: list[str] = []
         for i, text in enumerate(page, start=offset):
             if with_anchors:

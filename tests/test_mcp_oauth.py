@@ -187,7 +187,6 @@ def fake_browser(monkeypatch):
 
 def _oauth_config(base: str) -> Config:
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["auth"] = McpServerConfig(
         transport="sse", url=f"{base}/sse", auth="oauth", timeout_s=5.0
     )

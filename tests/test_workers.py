@@ -511,8 +511,155 @@ async def test_load_interrupted_uses_child_usage_if_root_snapshot_lagged(setup):
         assert loaded.usage_incomplete
         assert loaded.usage_totals.input_tokens == 9
         assert provider.requests == []
+        ctx.extras["provider"] = FakeProvider(
+            [
+                {
+                    "text": "resumed",
+                    "usage": {"input_tokens": 3, "output_tokens": 1, "cost_usd": 0.25},
+                }
+            ]
+        )
+        await restored.resume(worker.id, "continue")
+        await restored.wait(worker.id)
+        stats = session_stats(store, session)
+        assert stats.input_tokens == 12
+        assert stats.output_tokens == 3
+        assert stats.cost_usd == 0.75
+        assert stats.usage_incomplete
     finally:
         await restored.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compact", [False, True])
+async def test_worker_retains_usage_when_assistant_transcript_write_fails(
+    setup, monkeypatch, compact
+):
+    manager, ctx, _, store, session = setup
+    if compact:
+        ctx.config.agent.context_window = 100000
+        ctx.config.compaction.buffer_tokens = 200
+        ctx.config.compaction.mid_turn_threshold = 1
+    ctx.extras["provider"] = FakeProvider(
+        (
+            [
+                {
+                    "tool_calls": [
+                        {"id": "read", "name": "read", "arguments": '{"file_path":"missing"}'}
+                    ],
+                    "usage": {"input_tokens": 900, "output_tokens": 3, "cost_usd": 0.25},
+                },
+                {
+                    "text": "summary",
+                    "usage": {"input_tokens": 100, "output_tokens": 20, "cost_usd": 0.75},
+                },
+            ]
+            if compact
+            else []
+        )
+        + [{"text": "done", "usage": {"input_tokens": 9, "output_tokens": 2, "cost_usd": 0.5}}]
+    )
+    append = store.append_message
+
+    def append_message(child, message, **kwargs):
+        if message["role"] == "assistant" and message.get("content") == "done":
+            raise OSError("transcript write failed")
+        return append(child, message, **kwargs)
+
+    monkeypatch.setattr(store, "append_message", append_message)
+    try:
+        worker = await manager.start(ctx, agent="explore", prompt="work")
+        if compact:
+            for number in range(5):
+                store.append_message(
+                    worker.session, {"role": "user", "content": f"earlier {number}"}
+                )
+                append(
+                    worker.session,
+                    {"role": "assistant", "content": "context " * 50},
+                    usage={"input_tokens": 0, "output_tokens": 0, "cost_usd": 0},
+                )
+        with pytest.raises(SubagentError, match="transcript write failed"):
+            await manager.wait(worker.id)
+        stats = session_stats(store, session)
+        assert stats.input_tokens == (1009 if compact else 9)
+        assert stats.output_tokens == (25 if compact else 2)
+        assert stats.cost_usd == (1.5 if compact else 0.5)
+        assert stats.usage_incomplete
+        checkpoint = store.load_events(worker.session, "worker_usage_checkpoint")[-1]
+        assert checkpoint["input_tokens"] == stats.input_tokens
+        assert checkpoint["cost_usd"] == stats.cost_usd
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_run", [False, True])
+async def test_worker_accounting_read_failure_terminates_wait(setup, monkeypatch, during_run):
+    manager, ctx, _, store, _ = setup
+    read_records = store.read_records
+    worker = await manager.start(ctx, agent="explore", prompt="work")
+
+    def unreadable(session):
+        if session.id == worker.session_id:
+            raise OSError("cannot read worker usage")
+        return read_records(session)
+
+    # For the final reconciliation case, fail reads after the completed response.
+    if during_run:
+
+        class Provider(FakeProvider):
+            async def stream_chat(self, *args, **kwargs):
+                async for event in super().stream_chat(*args, **kwargs):
+                    yield event
+                monkeypatch.setattr(store, "read_records", unreadable)
+
+        ctx.extras["provider"] = Provider([{"text": "done"}])
+    else:
+        monkeypatch.setattr(store, "read_records", unreadable)
+    try:
+        async with asyncio.timeout(2):
+            with pytest.raises(SubagentError, match="cannot read worker usage"):
+                await manager.wait(worker.id)
+        assert worker.state == "failed"
+        assert not worker.is_active
+        assert worker.usage_incomplete
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_worker_retry_usage_counts_each_attempt_once(setup, monkeypatch):
+    from lecode.providers.openai_compat import ProviderError
+    from lecode.providers.types import Usage
+
+    manager, ctx, _, store, session = setup
+    monkeypatch.setattr("lecode.providers.retry.uniform", lambda *args: 0)
+
+    class RetryingProvider(FakeProvider):
+        async def stream_chat(self, *args, **kwargs):
+            if not self.requests:
+                self.requests.append({})
+                yield Usage(usage={"input_tokens": 10, "output_tokens": 5, "cost_usd": 0.25})
+                raise ProviderError("retry", retryable=True)
+            async for event in super().stream_chat(*args, **kwargs):
+                yield event
+
+    ctx.extras["provider"] = RetryingProvider(
+        [{"text": "done", "usage": {"input_tokens": 20, "output_tokens": 10, "cost_usd": 0.5}}]
+    )
+    try:
+        worker = await manager.start(ctx, agent="explore", prompt="work")
+        result = await manager.wait(worker.id)
+        assert result.turns == 1
+        assert result.usage_totals.input_tokens == 30
+        stats = session_stats(store, session)
+        assert stats.input_tokens == 30
+        assert stats.output_tokens == 15
+        assert stats.cost_usd == 0.75
+        assert stats.usage_incomplete
+    finally:
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -735,6 +882,72 @@ async def test_usage_records_do_not_double_count_child_transcript(setup):
         await manager.shutdown()
 
 
+@pytest.mark.parametrize("failed", [False, True])
+async def test_worker_compaction_usage_survives_reload_and_resume(setup, failed):
+    manager, ctx, _, store, session = setup
+    ctx.config.agent.context_window = 100000
+    ctx.config.compaction.buffer_tokens = 200
+    ctx.config.compaction.mid_turn_threshold = 1
+    tool = {
+        "tool_calls": [{"id": "read", "name": "read", "arguments": '{"file_path":"missing"}'}],
+        "usage": {"input_tokens": 900, "output_tokens": 3, "cost_usd": 0.25},
+    }
+    ctx.extras["provider"] = FakeProvider(
+        [
+            tool,
+            {
+                "text": "summary",
+                "usage": {"input_tokens": 100, "output_tokens": 20, "cost_usd": 0.75},
+            },
+            {"error": RuntimeError("provider failed")}
+            if failed
+            else {
+                "text": "done",
+                "usage": {"input_tokens": 10, "output_tokens": 1, "cost_usd": 0.5},
+            },
+        ]
+    )
+    try:
+        worker = await manager.start(ctx, agent="explore", prompt="work")
+        for number in range(5):
+            store.append_message(worker.session, {"role": "user", "content": f"earlier {number}"})
+            store.append_message(
+                worker.session,
+                {"role": "assistant", "content": "context " * 50},
+                usage={"input_tokens": 0, "output_tokens": 0, "cost_usd": 0},
+            )
+        if failed:
+            with pytest.raises(SubagentError, match="provider failed"):
+                await manager.wait(worker.id)
+        else:
+            await manager.wait(worker.id)
+        stats = session_stats(store, session)
+        expected_cost, expected_input, expected_output = (
+            (1.0, 1000, 23) if failed else (1.5, 1010, 24)
+        )
+        assert stats.cost_usd == expected_cost
+        assert stats.input_tokens == expected_input
+        assert stats.output_tokens == expected_output
+        assert stats.usage_incomplete is failed
+    finally:
+        await manager.shutdown()
+
+    restored = WorkerManager(ctx.config, cwd=ctx.cwd, root_ctx=ctx, store=store, session=session)
+    try:
+        restored.load()
+        assert session_stats(store, session).cost_usd == expected_cost
+        ctx.config.compaction.enabled = False
+        ctx.extras["provider"] = FakeProvider(
+            [{"text": "done", "usage": {"input_tokens": 10, "output_tokens": 1, "cost_usd": 0.5}}]
+        )
+        await restored.resume(worker.id, "continue")
+        await restored.wait(worker.id)
+        assert session_stats(store, session).cost_usd == expected_cost + 0.5
+        assert session_stats(store, session).input_tokens == expected_input + 10
+    finally:
+        await restored.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_stopped_worker_does_not_return_a_stale_result(setup):
     manager, ctx, _, _, _ = setup
@@ -879,7 +1092,6 @@ async def test_non_success_worker_stop_preserves_result_and_allows_resume(setup,
     else:
         ctx.config.agent.context_window = 3300
         ctx.config.compaction.buffer_tokens = 200
-        ctx.config.compaction.on_overflow = "pause"
         script = [tool, tool, {"text": "summary"}, tool]
     provider = FakeProvider(script)
     ctx.extras["provider"] = provider

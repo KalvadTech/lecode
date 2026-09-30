@@ -1259,9 +1259,8 @@ TUTOR_TOPICS: dict[str, str] = {
     ),
     "chain": "/chain <topic> runs brainstorm → plan → code → review as one turn.",
     "mcp": (
-        "MCP servers are configured under [mcp.servers] (stdio, http, or sse); "
-        "Exa web search is auto-configured when EXA_API_KEY is set, context7 "
-        "with enable_context7 = true. /mcp shows state; /mcp "
+        "MCP servers are configured under [mcp.servers] (stdio, http, or sse). "
+        "/mcp shows state; /mcp "
         "tools|reconnect|auth|login|logout <name>. Remote servers with "
         'auth = "oauth" log in via /mcp auth (opens your browser once; '
         "credentials are reused afterwards; /mcp login forces a fresh login). "

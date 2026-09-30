@@ -26,7 +26,7 @@ project cwd, with a default 10s timeout each.
 | `PermissionRequest` | an Ask verdict goes to the interactive approval prompt | `tool` |
 | `PermissionResult` | a permission Ask resolves: `decision` is `allow_once` / `allow_always` / `deny` / `auto` (auto-approved) | `tool`, `decision` |
 | `UserPromptSubmit` | a prompt is submitted (TUI and `-p`) — **enforced**: deny blocks the prompt | `prompt` |
-| `Stop` | an agent run finishes | `reason` (stop reason: `done`, `empty`, `max_turns`, `context_overflow`) |
+| `Stop` | an agent run finishes | `reason` (stop reason: `done`, `empty`, `max_turns`, `context_overflow`, `cost_limit`, `timeout`) |
 | `SessionStart` / `SessionEnd` | session lifecycle (chat open/quit, `-p`/`--loop`/`--chain` runs, session switch) | — |
 | `SubagentStart` / `SubagentEnd` | subagent (task/@mention) lifecycle | `agent` |
 | `PreCompact` / `PostCompact` | around context compaction (`/compact` and automatic) | — |

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -106,6 +107,46 @@ async def test_run_refreshes_system_prompt_in_place(tool_ctx):
     messages = provider.requests[0]["messages"]
     assert [m["role"] for m in messages] == ["system", "user"]  # replaced, not appended
     assert messages[0]["content"] == "REFRESHED PROMPT"
+
+
+async def test_startup_replay_is_released_before_model_request(tool_ctx, tmp_path, monkeypatch):
+    store = SessionStore(tmp_path / "cfg")
+    session = store.create("resume", tool_ctx.cwd)
+    store.append_message(session, {"role": "user", "content": "prior request"})
+    history = store.load_for_model(session)
+    load = store.load_for_model
+    replay_ref = None
+
+    class Replay(list):
+        pass
+
+    def tracked_replay(session):
+        nonlocal replay_ref
+        replay = Replay(load(session))
+        if replay_ref is None:
+            replay_ref = weakref.ref(replay)
+        return replay
+
+    monkeypatch.setattr(store, "load_for_model", tracked_replay)
+    runner, provider = make_runner(
+        tool_ctx,
+        [{"text": "done"}],
+        session=session,
+        store=store,
+        refresh_prompt=lambda: "base instructions",
+    )
+
+    async def check_released(event):
+        if isinstance(event, LlmCall):
+            assert replay_ref is not None and replay_ref() is None
+
+    result = await runner.run(history, check_released)
+    assert result.final_text == "done"
+    assert provider.requests[0]["messages"][:2] == [
+        {"role": "system", "content": "base instructions"},
+        *history,
+    ]
+    store.close()
 
 
 async def test_memory_write_refreshes_next_request_preserving_turn_overlay(tool_ctx):
@@ -262,14 +303,13 @@ async def test_run_rebuilds_stale_summary_from_visible_raw_sources(tool_ctx, tmp
 
 
 @pytest.mark.parametrize("oversize", ["system", "tools", "user"])
-async def test_current_catalog_model_limits_preflight_even_with_continue(tool_ctx, oversize):
+async def test_current_catalog_model_limits_preflight(tool_ctx, oversize):
     catalog = sample_catalog()
     small = catalog.get(tool_ctx.config.llm.model).model_copy(
         update={"context_window": 1000, "max_output": 100}
     )
     catalog = catalog.merge([small])
     tool_ctx.config.agent.context_window = 1000000  # not the current model's limit
-    tool_ctx.config.compaction.on_overflow = "continue"
     tool = EchoTool()
     if oversize == "tools":
         tool.description = "large tool schema " * 1000
@@ -1142,7 +1182,6 @@ async def test_pause_on_overflow_stops_run(tool_ctx, tmp_path):
     store, session = _compaction_setup(tool_ctx, tmp_path)
     tool_ctx.config.agent.context_window = 1000
     tool_ctx.config.compaction.buffer_tokens = 200
-    tool_ctx.config.compaction.on_overflow = "pause"
     script = [
         {
             "tool_calls": [{"id": "c1", "name": "echo", "arguments": "{}"}],
@@ -1429,11 +1468,12 @@ async def test_cached_raw_runner_history_respects_working_visibility(tool_ctx, t
         ("missing/model", {"input_tokens": 7, "output_tokens": 2}, True),
         ("missing/model", {"input_tokens": 0, "output_tokens": 0}, True),
         ("missing/model", {"input_tokens": 7, "output_tokens": 2, "cost_usd": 0}, False),
-        ("missing/model", {"cost_usd": 0}, False),
+        ("missing/model", {"cost_usd": 0}, True),
         ("openai/gpt-5-", {"input_tokens": 7}, True),
-        ("openai/gpt-5-", {"cost_usd": 0}, False),
+        ("openai/gpt-5-", {"cost_usd": 0}, True),
         ("free/model", {"input_tokens": 7, "output_tokens": 2}, False),
         ("free/model", {"input_tokens": 0, "output_tokens": 0}, False),
+        ("unpriced/model", {"input_tokens": 7, "output_tokens": 2}, True),
         ("free/model", None, True),
         ("free/model", {"cost_usd": 0, "incomplete": True}, True),
     ],
@@ -1450,7 +1490,10 @@ async def test_usage_completeness_reaches_events_totals_and_storage(
     free = catalog.all()[0].model_copy(
         update={"id": "free/model", "pricing": Pricing(prompt=0, completion=0)}
     )
-    tool_ctx.catalog = catalog.merge([free])
+    unpriced = free.model_copy(
+        update={"id": "unpriced/model", "pricing": Pricing(prompt=0, completion=0, known=False)}
+    )
+    tool_ctx.catalog = catalog.merge([free, unpriced])
     store = SessionStore(config_dir=tmp_path / "cfg")
     session = store.create("usage-completeness", tmp_path, model=model)
     runner, _ = make_runner(
@@ -1504,7 +1547,16 @@ async def test_cancel_preserves_known_usage_or_unknown_marker(
     recorded = store.load_messages(session)
     assert len(recorded) == 1
     assert recorded[0].usage == (
-        usage or {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0, "incomplete": True}
+        usage
+        or {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0,
+            "incomplete": True,
+            "input_tokens_known": False,
+            "output_tokens_known": False,
+            "cost_usd_known": False,
+        }
     )
     stats = session_stats(store, session)
     assert stats.usage_incomplete is (usage is None)
@@ -1530,7 +1582,7 @@ async def test_pierre_usage_completeness_is_persisted(
         session=session,
     )
     result = await runner.run([{"role": "user", "content": "hi"}])
-    incomplete = review_usage != {"cost_usd": 0}
+    incomplete = True
     assert result.review == "review"
     assert result.usage_totals.usage_incomplete is incomplete
     assert store.load_events(session, "pierre")[0]["usage"]["incomplete"] is incomplete

@@ -1,6 +1,7 @@
 """Source-linked recall through public stores and tool dispatch."""
 
 import json
+import tracemalloc
 
 import pytest
 
@@ -59,6 +60,45 @@ def test_source_snapshot_covers_messages_across_event_gaps(tmp_path):
         store.validate_source(snapshot.ref, project_root=tmp_path).messages[1]["content"]
         == "exact output"
     )
+
+
+def test_source_snapshot_memory_depends_on_selected_range(tmp_path):
+    sessions = SessionStore(tmp_path / "cfg")
+    session = sessions.create("source", tmp_path)
+    sessions.append_message(session, {"role": "user", "content": "selected evidence"})
+    for _ in range(128):
+        sessions.append_message(session, {"role": "assistant", "content": "x" * 65536})
+
+    tracemalloc.start()
+    try:
+        snapshot = sessions.source_snapshot(session.id, 1, 1, project_root=tmp_path)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert snapshot.status == "valid"
+    assert snapshot.messages == ({"role": "user", "content": "selected evidence"},)
+    # Reading an 8 MiB archive must not retain its unrelated message payloads.
+    assert peak < 2 * 1024 * 1024
+
+
+@pytest.mark.parametrize("change", ["corrupt", "duplicate", "out_of_order", "coerced_seq"])
+def test_source_snapshot_validates_records_outside_selected_range(tmp_path, change):
+    sessions = SessionStore(tmp_path / "cfg")
+    session = sessions.create("source", tmp_path)
+    for _ in range(3):
+        sessions.append_message(session, {"role": "user", "content": "evidence"})
+    records = [json.loads(line) for line in session.path.read_text().splitlines()]
+    if change == "duplicate":
+        records[-1]["seq"] = 2
+    elif change == "out_of_order":
+        records[-2:] = records[-2:][::-1]
+    elif change == "coerced_seq":
+        records[-1]["seq"] = "3"
+    session.path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    if change == "corrupt":
+        with session.path.open("a") as stream:
+            stream.write("broken record\n")
+    assert sessions.source_snapshot(session.id, 1, 1, project_root=tmp_path).status == "stale"
 
 
 def test_fact_source_attachment_persists_and_search_is_bounded(tmp_path):

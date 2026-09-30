@@ -1,5 +1,6 @@
 """Phase 6 acceptance through compaction, runtime and provider seams; no network."""
 
+import asyncio
 import json
 
 import pytest
@@ -903,3 +904,38 @@ async def test_optional_learning_preparation_failure_cannot_fail_a_working_summa
     assert len(provider.requests) == 1
     ctx = runtime.ctx
     assert ctx.session_store.load_for_model(ctx.session)[0]["content"] == "working summary"
+
+
+@pytest.mark.parametrize("failed_call", [1, 2])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_failed_compaction_or_learning_preserves_usage(runtime, failed_call, cancelled):
+    from lecode.providers.openai_compat import ProviderError
+    from lecode.providers.types import Usage
+    from lecode.session.stats import session_stats
+
+    class FailedAuxiliary(FakeProvider):
+        calls = 0
+
+        async def stream_chat(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == failed_call:
+                yield Usage({"input_tokens": 20, "output_tokens": 3, "cost_usd": 0.5})
+                if cancelled:
+                    raise asyncio.CancelledError()
+                raise ProviderError("auxiliary call failed after usage", status=503)
+            async for event in super().stream_chat(*args, **kwargs):
+                yield event
+
+    provider = FailedAuxiliary(
+        [{"text": "summary", "usage": {"input_tokens": 10, "output_tokens": 2, "cost_usd": 0.1}}]
+    )
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await compact(runtime, provider)
+    else:
+        assert await compact(runtime, provider) == (None if failed_call == 1 else "summary")
+    stats = session_stats(runtime.ctx.session_store, runtime.ctx.session)
+    assert stats.input_tokens == (20 if failed_call == 1 else 30)
+    assert stats.output_tokens == (3 if failed_call == 1 else 5)
+    assert stats.cost_usd == pytest.approx(0.5 if failed_call == 1 else 0.6)
+    assert stats.usage_incomplete

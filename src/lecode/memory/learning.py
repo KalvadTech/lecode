@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections import Counter
@@ -322,10 +323,13 @@ async def learn(provider, store, session, model, prefix, *, ctx, config, catalog
                 expected_version=version,
             )
             status = "learned"
-    except Exception:
+    except (Exception, asyncio.CancelledError) as exc:
         # Learning is optional: a successful working summary remains usable.
+        usage = usage or priced_usage(getattr(exc, "usage", None), model, catalog)
         status = "failed"
         reason_counts["extraction_error"] += 1
+        if isinstance(exc, asyncio.CancelledError):
+            raise
     finally:
         if on_usage is not None:
             on_usage(usage)

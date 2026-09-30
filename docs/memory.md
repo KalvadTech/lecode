@@ -162,8 +162,8 @@ estimate with framing/media allowance and per-model calibration from reported
 usage, **not an exact tokenizer**. Catalog limits take precedence; unknown models
 use `[agent] context_window`. `[compaction] buffer_tokens` reserves output
 headroom, and `mid_turn_threshold` can trigger earlier compaction. If compaction
-fails but the request fits, the run continues. An unsafe request pauses even
-with `on_overflow="continue"`; chain phases stop on this pause too. Manual
+fails but the request fits, the run continues. An unsafe request pauses;
+chain phases stop on this pause too. Manual
 `/compact` refuses an active turn.
 
 Reported compaction usage contributes once to session/run totals, including

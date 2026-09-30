@@ -1,22 +1,15 @@
-"""The MCP client: connects configured + auto servers and exposes their tools.
+"""The MCP client: connects configured servers and exposes their tools.
 
 Uses the official ``mcp`` SDK over stdio, streamable-HTTP, and SSE. Each
 server is connected lazily at session start with a ~10s budget; failures are
 isolated per server (one bad server never blocks the others or startup).
 Discovered tools are registered as lecode tools named ``mcp:<server>:<tool>``
-— the permission system already treats exa/context7/grep-app as
+— the permission system treats servers named exa/context7/grep-app as
 read-equivalent, every other MCP tool falls back to the mode default (Allow
 in yolo, Deny in readonly).
 
-Auto-configured servers (``[mcp] enable_exa`` / ``enable_context7``):
-
-- **Exa** (default on, needs ``EXA_API_KEY``): the hosted streamable-HTTP
-  endpoint ``https://mcp.exa.ai/mcp``. Auth assumption: the key goes as the
-  documented ``?exaApiKey=`` query param *and* an ``Authorization: Bearer``
-  header — Exa's exact header scheme is not pinned down in their docs.
-- **context7** (default off): ``https://mcp.context7.com/mcp``, no auth.
-
-OAuth 2.1 for remote servers (``transport = "http"`` or ``"sse"``;
+Servers come from ``[mcp.servers]`` in the config; there are no built-in
+servers. OAuth 2.1 for remote servers (``transport = "http"`` or ``"sse"``;
 ``[mcp.servers.<name>] auth = "oauth"``) rides on the SDK's
 ``OAuthClientProvider`` (see ``lecode.extras.mcp_auth``): automatic
 connections reuse cached credentials and refresh them silently; interactive
@@ -54,43 +47,12 @@ log = logging.getLogger(__name__)
 #: ``ctx.extras`` key under which the connected manager is installed.
 MCP_EXTRA = "mcp"
 
-EXA_URL = "https://mcp.exa.ai/mcp"
-CONTEXT7_URL = "https://mcp.context7.com/mcp"
-
 #: Per-server startup budget.
 CONNECT_TIMEOUT_S = 10.0
 
 #: Budget for one interactive ``/mcp auth`` login: the loopback callback
 #: timeout plus a margin for discovery, registration, and token exchange.
 INTERACTIVE_AUTH_BUDGET_S = CALLBACK_TIMEOUT_S + 30.0
-
-
-def auto_servers(config: Config, env: dict[str, str] | None = None) -> dict[str, McpServerConfig]:
-    """The auto-configured servers implied by the ``[mcp]`` flags."""
-    env = os.environ if env is None else env
-    servers: dict[str, McpServerConfig] = {}
-    if config.mcp.enable_exa:
-        key = env.get("EXA_API_KEY", "").strip()
-        if key:
-            servers["exa"] = McpServerConfig(
-                transport="http",
-                url=f"{EXA_URL}?exaApiKey={key}",
-                headers={"Authorization": f"Bearer {key}"},
-            )
-        else:
-            log.debug("mcp: exa enabled but EXA_API_KEY is not set — skipping")
-    if config.mcp.enable_context7:
-        servers["context7"] = McpServerConfig(transport="http", url=CONTEXT7_URL)
-    return servers
-
-
-def all_server_configs(
-    config: Config, env: dict[str, str] | None = None
-) -> dict[str, McpServerConfig]:
-    """Auto servers merged with ``[mcp.servers]`` (user config wins)."""
-    merged = auto_servers(config, env)
-    merged.update(config.mcp.servers)
-    return merged
 
 
 @dataclass(frozen=True)
@@ -220,8 +182,8 @@ class McpManager:
     # -- connection ------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Connect every configured + auto server; failures stay per-server."""
-        for name, server_config in all_server_configs(self._config).items():
+        """Connect every configured server; failures stay per-server."""
+        for name, server_config in self._config.mcp.servers.items():
             server = _Server(name, server_config)
             self._servers[name] = server
             if server_config.enabled:

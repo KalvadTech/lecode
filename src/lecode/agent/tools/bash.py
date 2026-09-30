@@ -3,7 +3,8 @@
 Commands are first passed through ``rtk rewrite``, which swaps supported
 commands for their token-optimized rtk proxies (``git status`` → ``rtk git
 status``); the original command runs unchanged when rtk has no equivalent
-(fail-open). Runs via ``/bin/sh -c`` with stderr merged into stdout. Output
+(fail-open). Runs via the user's shell (``$SHELL``, falling back to
+``/bin/sh``) with ``-c``, stderr merged into stdout. Output
 over the cap is truncated head/tail and the full text is saved to
 ``<config_dir>/overflow/<uuid>.log`` with a pointer line.
 """
@@ -11,16 +12,19 @@ over the cap is truncated head/tail and the full text is saved to
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
+import tempfile
 import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from lecode.agent.tools.base import Tool, ToolContext, ToolResult
 from lecode.extras.proc import ProcResult
 from lecode.extras.rtk import rewrite_command
+from lecode.extras.shell import user_shell
 
 DEFAULT_TIMEOUT_S = 120.0
 MAX_TIMEOUT_S = 600.0
@@ -28,7 +32,7 @@ MAX_OUTPUT_BYTES = 60_000
 
 
 def _kill_tree(proc: asyncio.subprocess.Process) -> None:
-    """Kill the process *group* — ``sh -c`` children must not survive."""
+    """Kill the process *group* — shell children must not survive."""
     import os
     import signal
 
@@ -46,18 +50,21 @@ async def _run_shell(
     idle_timeout: float,
     max_bytes: int,
     *,
+    shell: str | None = None,
     on_chunk: Callable[[bytes], None] | None = None,
     proc_slot: dict[str, Any] | None = None,
 ) -> tuple[bytes, int, bool, bool]:
     """Run a shell command; returns (output, exit_code, timed_out, idle_killed).
 
-    ``on_chunk`` (background tasks) receives each chunk as it arrives; the
-    retained buffer is then capped at ``max_bytes`` (the tail), since the
-    caller streams the full output elsewhere. ``proc_slot`` receives the
-    spawned process under ``"proc"`` so the caller can signal it.
+    ``shell`` overrides the executable; the default is the user's shell
+    (:func:`lecode.extras.shell.user_shell`). ``on_chunk`` (background tasks)
+    receives each chunk as it arrives; the retained buffer is then capped at
+    ``max_bytes`` (the tail), since the caller streams the full output
+    elsewhere. ``proc_slot`` receives the spawned process under ``"proc"`` so
+    the caller can signal it.
     """
     proc = await asyncio.create_subprocess_exec(
-        "/bin/sh",
+        shell or user_shell(),
         "-c",
         command,
         cwd=cwd,
@@ -71,7 +78,7 @@ async def _run_shell(
     buffer = bytearray()
     deadline = time.monotonic() + timeout
     idle_deadline = time.monotonic() + idle_timeout
-    timed_out = idle_killed = False
+    timed_out = idle_killed = aborted = False
 
     try:
         while True:
@@ -79,14 +86,12 @@ async def _run_shell(
             if wait <= 0:
                 timed_out = time.monotonic() >= deadline
                 idle_killed = not timed_out
-                _kill_tree(proc)
                 break
             try:
                 chunk = await asyncio.wait_for(proc.stdout.read(65536), timeout=wait)
             except TimeoutError:
                 timed_out = time.monotonic() >= deadline
                 idle_killed = not timed_out
-                _kill_tree(proc)
                 break
             if not chunk:  # EOF: process exited and pipes drained
                 break
@@ -96,12 +101,22 @@ async def _run_shell(
                 if len(buffer) > max_bytes:
                     del buffer[: len(buffer) - max_bytes]
             idle_deadline = time.monotonic() + idle_timeout
-    except asyncio.CancelledError:
-        # Turn aborted (Ctrl-C): never leave the child running.
-        _kill_tree(proc)
-        with contextlib.suppress(TimeoutError, asyncio.CancelledError):
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
+    except BaseException:
+        aborted = True
         raise
+    finally:
+        if aborted or timed_out or idle_killed:
+            _kill_tree(proc)
+            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                async with asyncio.timeout(5.0):
+                    # wait() can wait on pipes held by children missed during a fork.
+                    while proc.returncode is None:
+                        await asyncio.sleep(0.01)
+                    # Catch children spawned while the first signal killed the shell.
+                    _kill_tree(proc)
+                    while await proc.stdout.read(65536):
+                        pass
+                    await proc.wait()
 
     with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(proc.wait(), timeout=5.0)
@@ -109,22 +124,30 @@ async def _run_shell(
     return bytes(buffer), exit_code, timed_out, idle_killed
 
 
-def _save_overflow(text: str) -> Path:
+def _save_overflow(output: BinaryIO) -> tuple[Path, str, str]:
     from lecode.config.loader import config_dir
 
     overflow_dir = config_dir() / "overflow"
     overflow_dir.mkdir(parents=True, exist_ok=True)
     path = overflow_dir / f"{uuid.uuid4().hex}.log"
-    path.write_text(text, encoding="utf-8")
-    return path
+    head = tail = ""
+    half = MAX_OUTPUT_BYTES // 2
+    chunks = iter(lambda: output.read(65536), b"")
+    with path.open("w", encoding="utf-8") as destination:
+        for text in codecs.iterdecode(chunks, "utf-8", errors="replace"):
+            destination.write(text)
+            head += text[: half - len(head)]
+            tail = (tail + text)[-half:]
+    return path, head, tail
 
 
 class BashTool(Tool):
-    def __init__(self) -> None:
+    def __init__(self, *, shell: str | None = None) -> None:
+        self._shell = shell or user_shell()
         super().__init__(
             name="bash",
             description=(
-                "Run a shell command (/bin/sh -c). Supported commands are "
+                f"Run a shell command ({self._shell} -c). Supported commands are "
                 "rewritten to token-optimized rtk proxies when available; "
                 "output is truncated head/tail (full output saved to a file)."
             ),
@@ -185,21 +208,29 @@ class BashTool(Tool):
                 return ToolResult(f"error: {e}", is_error=True)
             return ToolResult(f"background task {record.id} started: {command}")
         try:
-            output, exit_code, timed_out, idle_killed = await _run_shell(
-                command, ctx.cwd, timeout, idle, MAX_OUTPUT_BYTES
-            )
+            with tempfile.SpooledTemporaryFile(max_size=MAX_OUTPUT_BYTES) as output:
+                _, exit_code, timed_out, idle_killed = await _run_shell(
+                    command,
+                    ctx.cwd,
+                    timeout,
+                    idle,
+                    MAX_OUTPUT_BYTES,
+                    shell=self._shell,
+                    on_chunk=output.write,
+                )
+                truncated = output.tell() > MAX_OUTPUT_BYTES
+                output.seek(0)
+                if truncated:
+                    full_path, head, tail = _save_overflow(output)
+                    text = (
+                        head
+                        + f"\n… [output truncated; full output saved to {full_path}] …\n"
+                        + tail
+                    )
+                else:
+                    text = output.read().decode("utf-8", errors="replace")
         except OSError as e:
             return ToolResult(f"error: {e}", is_error=True)
-
-        text = output.decode("utf-8", errors="replace")
-        if len(output) > MAX_OUTPUT_BYTES:
-            full_path = _save_overflow(text)
-            half = MAX_OUTPUT_BYTES // 2
-            text = (
-                text[:half]
-                + f"\n… [output truncated; full output saved to {full_path}] …\n"
-                + text[-half:]
-            )
 
         notes: list[str] = []
         if timed_out:
@@ -218,7 +249,7 @@ class BashTool(Tool):
                     stdout=text,
                     stderr="",  # The shell merges stderr into stdout.
                     timed_out=timed_out or idle_killed,
-                    truncated=len(output) > MAX_OUTPUT_BYTES,
+                    truncated=truncated,
                 )
             },
         )

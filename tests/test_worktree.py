@@ -1051,13 +1051,13 @@ def cli_env(tmp_path, monkeypatch):
     monkeypatch.setattr("lecode.cli.check_dependencies", lambda: None)
     monkeypatch.setattr("lecode.cli.build_provider", lambda config, api_key=None: object())
     FakeTui.instances = []
-    monkeypatch.setattr("lecode.cli.TuiApp", FakeTui)
+    monkeypatch.setattr("lecode.tui.app.TuiApp", FakeTui)
     return tmp_path
 
 
 def test_cli_worktree_flag_switches_cwd(cli_env, monkeypatch):
     make_repo_sync(cli_env)
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("wt-session"))
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _name_prompt("wt-session"))
     result = runner.invoke(cli_app, ["--worktree", "feat"])
     assert result.exit_code == 0, result.output
     expected = cli_env / ".lecode" / "worktrees" / "feat"
@@ -1072,7 +1072,7 @@ def test_cli_worktree_flag_switches_cwd(cli_env, monkeypatch):
 
 
 def test_cli_worktree_flag_not_a_repo(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("x"))
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _name_prompt("x"))
     result = runner.invoke(cli_app, ["--worktree", "feat"])
     assert result.exit_code == 2
     assert "not a git repository" in result.output

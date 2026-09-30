@@ -24,7 +24,7 @@ import os
 import re
 import sqlite3
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -91,6 +91,9 @@ def _bounded_agent_run(run: dict[str, Any]) -> dict[str, Any]:
     for key in ("turns", "input_tokens", "output_tokens"):
         data[key] = int(run.get(key) or 0)
     data["cost_usd"] = float(run.get("cost_usd") or 0.0)
+    data["usage_incomplete"] = bool(run.get("usage_incomplete", run.get("status") != "ok"))
+    for key in ("input_tokens", "output_tokens", "cost_usd"):
+        data[f"{key}_known"] = bool(run.get(f"{key}_known", True))
     data["duration_s"] = float(run.get("duration_s") or 0.0)
     data["truncated"] = truncated
     return data
@@ -273,14 +276,22 @@ class SessionStore:
             raise ValueError("session symlinks are not allowed")
         if not path.is_file():
             raise SessionNotFoundError(session_id)
-        records = self._read_records_at(path)
-        meta = next((r for r in records if isinstance(r, MetaRecord)), None)
+        meta: MetaRecord | None = None
+        new_name = None
+        max_seq: int | None = None
+        for record in self._iter_records_at(path):
+            if isinstance(record, MetaRecord):
+                if meta is None:
+                    meta = record
+            else:
+                max_seq = record.seq if max_seq is None else max(max_seq, record.seq)
+                if isinstance(record, EventRecord) and record.kind == "rename":
+                    new_name = record.data.get("name")
         if meta is None:
             raise SessionNotFoundError(f"{session_id} (no meta record)")
-        renames = [r for r in records if isinstance(r, EventRecord) and r.kind == "rename"]
-        if renames and (new_name := renames[-1].data.get("name")):
+        if new_name:
             meta = meta.model_copy(update={"name": str(new_name)})
-        return Session(meta=meta, path=path, next_seq=_next_seq(records))
+        return Session(meta=meta, path=path, next_seq=1 + (max_seq if max_seq is not None else 0))
 
     def acquire_lock(self, session: Session) -> SessionLock | None:
         """Lock the session against a second live lecode process.
@@ -466,24 +477,33 @@ class SessionStore:
             raise ValueError("session symlinks are not allowed")
         if not path.is_file():
             return SourceSnapshot("missing")
+        records: list[Record] = []
+        exact: list[dict[str, Any]] = []
         try:
-            raw = [
-                json.loads(line)
-                for line in path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-            parsed = [parse_record(json.dumps(record)) for record in raw]
+            with path.open(encoding="utf-8") as source:
+                lines = (line for chunk in source for line in chunk.splitlines())
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    raw = json.loads(line)
+                    record = parse_record(line)
+                    if record is None or (records and type(raw.get("seq")) is not int):
+                        return SourceSnapshot("stale")
+                    if isinstance(record, MessageRecord):
+                        if start_seq <= record.seq <= end_seq:
+                            exact.append(raw)
+                        else:
+                            # Visibility needs metadata, not unrelated message payloads.
+                            record.message = {}
+                    records.append(record)
         except (ValueError, UnicodeError, OSError):
             return SourceSnapshot("stale")
-        if not parsed or any(record is None for record in parsed):
+        if not records:
             return SourceSnapshot("stale")
-        records = [record for record in parsed if record is not None]
         meta = records[0]
         if not isinstance(meta, MetaRecord) or meta.id != session_id:
             return SourceSnapshot("stale")
         if any(isinstance(record, MetaRecord) for record in records[1:]):
-            return SourceSnapshot("stale")
-        if any(type(record.get("seq")) is not int for record in raw[1:]):
             return SourceSnapshot("stale")
         if resolve_project_root(meta.cwd) != resolve_project_root(project_root):
             raise ValueError("source belongs to another project")
@@ -504,7 +524,6 @@ class SessionStore:
         }
         if any(r.seq not in visible or r.seq in excluded for r in selected):
             return SourceSnapshot("hidden")
-        exact = [r for r in raw if r.get("type") == "message" and start_seq <= r["seq"] <= end_seq]
         digest = hashlib.sha256(
             json.dumps(exact, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
         ).hexdigest()
@@ -543,8 +562,7 @@ class SessionStore:
             return SourceSnapshot("stale")
         return snapshot
 
-    def _read_records_at(self, path: Path) -> list[Record]:
-        records: list[Record] = []
+    def _iter_records_at(self, path: Path) -> Iterator[Record]:
         with path.open(encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
@@ -553,8 +571,14 @@ class SessionStore:
                 if record is None:
                     self.corrupt_lines += 1
                 else:
-                    records.append(record)
-        return records
+                    yield record
+
+    def _read_records_at(self, path: Path) -> list[Record]:
+        return list(self._iter_records_at(path))
+
+    def iter_records(self, session: Session) -> Iterator[Record]:
+        """Stream records in file order without retaining the transcript."""
+        return self._iter_records_at(session.path)
 
     def read_records(self, session: Session) -> list[Record]:
         """All records in file order; corrupt lines are skipped and counted."""
@@ -799,7 +823,10 @@ class SessionStore:
         records = [
             r
             for r in self.read_records(session)
-            if not (isinstance(r, EventRecord) and r.kind in {"memory_usage", "forget"})
+            if not (
+                isinstance(r, EventRecord)
+                and r.kind in {"memory_usage", "provider_usage", "forget"}
+            )
         ]
         if not records or not isinstance(records[-1], TombstoneRecord):
             return False
@@ -842,6 +869,8 @@ class SessionStore:
                 for line in source:
                     record = parse_record(line.decode("utf-8"))
                     if isinstance(record, EventRecord):
+                        if record.kind == "provider_usage":
+                            continue  # Billing metadata cannot change the model's context.
                         if not include_derivations and record.kind in {"compact", "memory_usage"}:
                             continue
                         if not include_worker_events and record.kind in {
@@ -1038,6 +1067,6 @@ class SessionStore:
         """All persisted (tool, pattern) permission grants."""
         return [
             (str(r.data.get("tool", "")), str(r.data.get("pattern", "")))
-            for r in self.read_records(session)
+            for r in self._iter_records_at(session.path)
             if isinstance(r, EventRecord) and r.kind == "permission_grant"
         ]

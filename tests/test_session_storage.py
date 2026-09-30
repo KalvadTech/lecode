@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tracemalloc
 
 import pytest
 
@@ -205,9 +206,46 @@ def test_open_round_trip(store, session):
     assert reopened.next_seq == session.next_seq == 5
 
 
+@pytest.mark.parametrize("name", ["renamed", "", None])
+def test_open_preserves_latest_rename_max_sequence_and_corrupt_count(store, session, name):
+    store.append_event(session, "rename", {"name": "earlier rename"})
+    store.append_event(session, "rename", {"name": name})
+    with session.path.open("a") as stream:
+        stream.write("broken record\n")
+        for seq in (42, 2):
+            stream.write(
+                MessageRecord(
+                    seq=seq, ts="timestamp", role="user", message={"role": "user", "content": "x"}
+                ).model_dump_json()
+                + "\n"
+            )
+    reopened = store.open(session.id)
+    assert reopened.meta.name == (name or "demo")
+    assert reopened.next_seq == 43
+    assert store.corrupt_lines == 1
+
+
 def test_open_missing_raises(store):
     with pytest.raises(SessionNotFoundError):
         store.open("nope")
+
+
+def test_load_grants_streams_unrelated_messages(store, session):
+    store.grant_permission(session, "read", "*.py")
+    for _ in range(128):
+        store.append_message(session, {"role": "assistant", "content": "x" * 65536})
+    store.grant_permission(session, "bash", "git *")
+    with session.path.open("a") as stream:
+        stream.write("broken record\n")
+    tracemalloc.start()
+    try:
+        grants = store.load_grants(session)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert grants == [("read", "*.py"), ("bash", "git *")]
+    assert store.corrupt_lines == 1
+    assert peak < 2 * 1024 * 1024
 
 
 def test_append_assigns_increasing_seq(store, session):
@@ -667,9 +705,10 @@ def test_lock_holder_reports_pid_while_held(store):
     assert store.lock_holder(s.id) is None
 
 
-def test_worker_inbox_does_not_invalidate_model_sources(store, session):
+@pytest.mark.parametrize("kind", ["worker_inbox", "provider_usage"])
+def test_worker_inbox_does_not_invalidate_model_sources(store, session, kind):
     version = store.source_version(session, include_worker_events=False)
-    store.append_event(session, "worker_inbox", {"id": "queued", "text": "next turn"})
+    store.append_event(session, kind, {"id": "queued", "text": "next turn"})
     assert store.source_version(session, include_worker_events=False) == version
     assert store.source_version(session) != version
 

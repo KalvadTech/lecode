@@ -196,7 +196,6 @@ async def test_make_oauth_provider_attaches_handlers(cfg_env):
 
 async def test_oauth_conflicts_with_static_authorization_header(cfg_env):
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["x"] = McpServerConfig(
         transport="http",
         url="https://auth.example/mcp",
@@ -222,7 +221,6 @@ async def test_mcp_auth_and_logout_commands(tmp_path, monkeypatch):
 
     app, _, out = make_app(tmp_path, monkeypatch, [])
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["test"] = mock_server_config()
     manager = McpManager(config)
     await manager.connect()
@@ -257,7 +255,6 @@ async def test_mcp_status_lists_auth_required(tmp_path, monkeypatch):
 
     app, _, out = make_app(tmp_path, monkeypatch, [])
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["oauth"] = McpServerConfig(
         transport="http", url="https://auth.example/mcp", auth="oauth"
     )
@@ -462,7 +459,6 @@ async def test_oauth_end_to_end(tmp_path, monkeypatch, fake_oauth_server):
     base, authz = fake_oauth_server
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "lecode-config"))
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["oauth"] = McpServerConfig(
         transport="http", url=f"{base}/mcp", auth="oauth", timeout_s=5.0
     )
@@ -547,7 +543,6 @@ async def test_oauth_restart_with_expired_token_refreshes_silently(
     base, authz = fake_oauth_server
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "lecode-config"))
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["oauth"] = McpServerConfig(
         transport="http", url=f"{base}/mcp", auth="oauth", timeout_s=5.0
     )
@@ -590,7 +585,6 @@ async def test_oauth_restart_with_rejected_refresh_stays_noninteractive(
     authz.reject_refresh = True
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "lecode-config"))
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["oauth"] = McpServerConfig(
         transport="http", url=f"{base}/mcp", auth="oauth", timeout_s=5.0
     )
@@ -623,7 +617,6 @@ async def test_oauth_denied_consent(tmp_path, monkeypatch, fake_oauth_server):
     authz.deny = True
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "lecode-config"))
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["oauth"] = McpServerConfig(
         transport="http", url=f"{base}/mcp", auth="oauth", timeout_s=5.0
     )
@@ -647,7 +640,6 @@ async def test_oauth_no_browser_available(tmp_path, monkeypatch, fake_oauth_serv
     base, _ = fake_oauth_server
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "lecode-config"))
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["oauth"] = McpServerConfig(
         transport="http", url=f"{base}/mcp", auth="oauth", timeout_s=5.0
     )
@@ -670,7 +662,6 @@ async def test_oauth_auth_announces_authorization_url(tmp_path, monkeypatch, fak
     base, _ = fake_oauth_server
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "lecode-config"))
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["oauth"] = McpServerConfig(
         transport="http", url=f"{base}/mcp", auth="oauth", timeout_s=5.0
     )
@@ -702,7 +693,6 @@ async def test_automatic_connect_does_not_splash_oauth_flow_traceback(
     base, _ = fake_oauth_server
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "lecode-config"))
     config = Config()
-    config.mcp.enable_exa = False
     config.mcp.servers["oauth"] = McpServerConfig(
         transport="http", url=f"{base}/mcp", auth="oauth", timeout_s=5.0
     )

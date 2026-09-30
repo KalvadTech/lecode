@@ -67,3 +67,4 @@ async def test_openai_shaped_models_endpoint_still_yields_entries():
     entry = loaded.catalog.get("local-model")
     assert entry.context_window == 128_000
     assert entry.pricing.prompt == 0.0
+    assert not entry.pricing.known

@@ -25,8 +25,10 @@ from lecode.extras.subagents import (
     child_registry,
     run_subagent,
 )
+from lecode.providers.openai_compat import ProviderError
 from lecode.providers.types import Done, TokenDelta, ToolCallDelta
 from lecode.session import SessionStore
+from lecode.session.stats import session_stats
 
 
 def make_runtime(tmp_path, monkeypatch, provider, config=None):
@@ -341,6 +343,103 @@ async def test_usage_totals_propagate(tmp_path, monkeypatch):
     assert outcome.input_tokens == 10
     assert outcome.output_tokens == 5
     assert outcome.cost_usd == pytest.approx(0.001)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+async def test_subagent_usage_is_counted_in_parent_session(tmp_path, monkeypatch, failed):
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "skills"))
+    monkeypatch.chdir(tmp_path)
+    store = SessionStore()
+    session = store.create("root", tmp_path)
+    config = Config()
+    config.memory.enabled = config.lsp.enabled = False
+    runtime = build_runtime(config, tmp_path, store=store, session=session)
+    runtime.ctx.extras["provider"] = FakeProvider(
+        [
+            {
+                "tool_calls": [{"id": "list", "name": "list_dir", "arguments": "{}"}],
+                "usage": {"input_tokens": 10, "output_tokens": 5, "cost_usd": 0.125},
+            },
+            {"error": ProviderError("unavailable", status=401)}
+            if failed
+            else {
+                "text": "done",
+                "usage": {"input_tokens": 20, "output_tokens": 10, "cost_usd": 0.25},
+            },
+        ]
+    )
+    try:
+        if failed:
+            with pytest.raises(SubagentError, match="unavailable"):
+                await run_subagent(
+                    runtime.ctx, runtime.registry, runtime.agents, name="explore", prompt="work"
+                )
+        else:
+            await run_subagent(
+                runtime.ctx, runtime.registry, runtime.agents, name="explore", prompt="work"
+            )
+        stats = session_stats(store, session)
+        assert stats.input_tokens == (10 if failed else 30)
+        assert stats.output_tokens == (5 if failed else 15)
+        assert stats.cost_usd == (0.125 if failed else 0.375)
+        assert stats.usage_incomplete is failed
+        assert len(store.load_agent_runs(session)) == 1
+    finally:
+        runtime.close()
+
+
+async def test_failed_subagent_usage_write_marks_parent_incomplete(tmp_path, monkeypatch):
+    runtime = make_runtime(
+        tmp_path,
+        monkeypatch,
+        FakeProvider([{"text": "done", "usage": {"input_tokens": 10, "cost_usd": 0.25}}]),
+    )
+    store = SessionStore(tmp_path / "cfg")
+    session = store.create("root", tmp_path)
+    runtime.ctx.session_store, runtime.ctx.session = store, session
+
+    def fail_record(*args, **kwargs):
+        raise OSError("accounting write failed")
+
+    monkeypatch.setattr(store, "record_agent_run", fail_record)
+    try:
+        with pytest.raises(OSError, match="accounting write failed"):
+            await run_subagent(
+                runtime.ctx, runtime.registry, runtime.agents, name="explore", prompt="work"
+            )
+        assert runtime.ctx.extras["usage_incomplete"] is True
+        assert session_stats(store, session).usage_incomplete
+        assert len(store.load_events(session, "usage_incomplete")) == 1
+    finally:
+        runtime.close()
+
+
+async def test_failed_subagent_retains_partial_stream_usage(tmp_path, monkeypatch):
+    from lecode.providers.types import Usage
+
+    class PartialProvider(FakeProvider):
+        async def stream_chat(self, *args, **kwargs):
+            yield Usage(usage={"input_tokens": 10, "output_tokens": 5, "cost_usd": 0.25})
+            raise ProviderError("stream failed", status=401)
+
+    runtime = make_runtime(tmp_path, monkeypatch, PartialProvider([]))
+    store = SessionStore(tmp_path / "cfg")
+    session = store.create("root", tmp_path)
+    runtime.ctx.session_store, runtime.ctx.session = store, session
+    try:
+        with pytest.raises(SubagentError, match="stream failed"):
+            await run_subagent(
+                runtime.ctx, runtime.registry, runtime.agents, name="explore", prompt="work"
+            )
+        stats = session_stats(store, session)
+        assert stats.input_tokens == 10
+        assert stats.output_tokens == 5
+        assert stats.cost_usd == 0.25
+        assert stats.usage_incomplete
+        assert store.load_agent_runs(session)[0]["turns"] == 0
+    finally:
+        runtime.close()
 
 
 async def test_unknown_agent_lists_available(tmp_path, monkeypatch):

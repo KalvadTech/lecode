@@ -1010,6 +1010,14 @@ async def test_bang_runs_shell_without_llm(tmp_path, monkeypatch):
     assert provider.requests == []
 
 
+async def test_bang_uses_the_detected_user_shell(tmp_path, monkeypatch):
+    """!cmd runs through $SHELL -c — here /bin/echo, which prints its argv."""
+    monkeypatch.setenv("SHELL", "/bin/echo")
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    await app._submit("!echo-marker")
+    assert "-c echo-marker" in out.getvalue()
+
+
 async def test_double_bang_feeds_output_to_llm(tmp_path, monkeypatch):
     app, provider, out = make_app(tmp_path, monkeypatch, [{"text": "noted"}])
     await app._submit("!!echo from-shell")
@@ -1371,7 +1379,7 @@ def cli_env(tmp_path, monkeypatch):
     monkeypatch.setattr("lecode.cli.check_dependencies", lambda: None)
     monkeypatch.setattr("lecode.cli.build_provider", lambda config, api_key=None: object())
     FakeTui.instances = []
-    monkeypatch.setattr("lecode.cli.TuiApp", FakeTui)
+    monkeypatch.setattr("lecode.tui.app.TuiApp", FakeTui)
     return tmp_path
 
 
@@ -1383,7 +1391,7 @@ def _name_prompt(value):
 
 
 def test_cli_abort_exits_zero_without_session(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt(None))
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _name_prompt(None))
     result = runner.invoke(cli_app, [])
     assert result.exit_code == 0
     assert FakeTui.instances == []
@@ -1391,7 +1399,7 @@ def test_cli_abort_exits_zero_without_session(cli_env, monkeypatch):
 
 
 def test_cli_interactive_creates_named_session(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("chatty"))
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _name_prompt("chatty"))
     result = runner.invoke(cli_app, [])
     assert result.exit_code == 0
     assert len(FakeTui.instances) == 1
@@ -1400,21 +1408,21 @@ def test_cli_interactive_creates_named_session(cli_env, monkeypatch):
 
 
 def test_cli_default_mode_is_yolo(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("s"))
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _name_prompt("s"))
     result = runner.invoke(cli_app, [])
     assert result.exit_code == 0
     assert FakeTui.instances[0].runtime.ctx.permission_checker.mode == "yolo"
 
 
 def test_cli_safe_flag_forces_readonly(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("s"))
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _name_prompt("s"))
     result = runner.invoke(cli_app, ["--safe"])
     assert result.exit_code == 0
     assert FakeTui.instances[0].runtime.ctx.permission_checker.mode == "readonly"
 
 
 def test_cli_read_only_alias_still_works(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("s"))
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _name_prompt("s"))
     result = runner.invoke(cli_app, ["--read-only"])
     assert result.exit_code == 0
     assert FakeTui.instances[0].runtime.ctx.permission_checker.mode == "readonly"
@@ -1426,7 +1434,7 @@ def test_cli_resume_keeps_name_without_prompt(cli_env, monkeypatch):
     async def _boom(store, **kwargs):
         raise AssertionError("name prompt must not run on --resume")
 
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _boom)
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _boom)
     result = runner.invoke(cli_app, ["-r", "old-session"])
     assert result.exit_code == 0
     assert FakeTui.instances[0].session.name == "old-session"
@@ -1436,14 +1444,14 @@ def test_cli_continue_picks_latest(cli_env, monkeypatch):
     store = SessionStore()
     store.create("first", cli_env)
     store.create("second", cli_env)
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt(None))
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _name_prompt(None))
     result = runner.invoke(cli_app, ["-c"])
     assert result.exit_code == 0
     assert FakeTui.instances[0].session.name == "second"
 
 
 def test_cli_resume_unknown_ref_fails(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt(None))
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _name_prompt(None))
     result = runner.invoke(cli_app, ["-r", "nope"])
     assert result.exit_code == 2
     assert "nope" in result.output
@@ -1475,7 +1483,7 @@ def test_cli_bare_resume_abort_exits_zero(cli_env, monkeypatch):
 
 
 def test_cli_no_color_lands_in_config(cli_env, monkeypatch):
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt("x"))
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _name_prompt("x"))
     result = runner.invoke(cli_app, ["--no-color"])
     assert result.exit_code == 0
     assert FakeTui.instances[0].config.ui.no_color is True
@@ -1596,7 +1604,7 @@ def test_cli_resume_locked_session_fails(cli_env, monkeypatch):
     session = store.create("busy", cli_env)
     lock = store.acquire_lock(session)
     assert lock is not None
-    monkeypatch.setattr("lecode.cli.prompt_session_name", _name_prompt(None))
+    monkeypatch.setattr("lecode.tui.name_prompt.prompt_session_name", _name_prompt(None))
     result = runner.invoke(cli_app, ["-r", "busy"])
     assert result.exit_code == 2
     assert "already open in another lecode process" in result.output
