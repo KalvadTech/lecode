@@ -151,8 +151,10 @@ async def _run_pty_app_once(
     screen = pyte.HistoryScreen(COLS, ROWS, history=500)
     stream = pyte.Stream(screen)
     stop_reading = False
+    pending = ""
 
     def reader_thread() -> None:
+        nonlocal pending
         while not stop_reading:
             try:
                 chunk = os.read(master, 65536)
@@ -160,7 +162,19 @@ async def _run_pty_app_once(
                 return
             if not chunk:
                 return
-            stream.feed(chunk.decode("utf-8", errors="replace"))
+            data = pending + chunk.decode("utf-8", errors="replace")
+            pending = ""
+            query = "\x1b[?4m"
+            while query in data:
+                before, data = data.split(query, 1)
+                stream.feed(before)
+                # pyte does not handle xterm's modifier query; emulate its response.
+                os.write(master, b"\x1b[>4;0m")
+            for size in range(len(query) - 1, 0, -1):
+                if data.endswith(query[:size]):
+                    pending, data = data[-size:], data[:-size]
+                    break
+            stream.feed(data)
             # Answer cursor-position requests with the real cursor position.
             for _ in range(chunk.count(b"\x1b[6n")):
                 os.write(
