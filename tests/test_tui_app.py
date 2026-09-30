@@ -1312,6 +1312,33 @@ def test_set_key_modes_skips_dumb_terminal(tmp_path, monkeypatch):
     assert fake.getvalue() == ""
 
 
+def test_enabled_key_modes_keep_existing_shortcuts():
+    from prompt_toolkit.input.vt100_parser import Vt100Parser
+    from prompt_toolkit.keys import Keys
+
+    from lecode.tui.app import _register_key_sequences
+
+    _register_key_sequences()
+    cases = (
+        ("\x1b[13;2u", (Keys.ControlJ,)),  # Shift-Enter
+        ("\x1b[99;5u", (Keys.ControlC,)),  # Ctrl-C
+        ("\x1b[100;5u", (Keys.ControlD,)),  # Ctrl-D
+        ("\x1b[106;5u", (Keys.ControlJ,)),  # Ctrl-J
+        ("\x1b[103;5u", (Keys.ControlG,)),  # Ctrl-G (editor)
+        ("\x1b[27u", (Keys.Escape,)),
+        ("\x1b[13;3u", (Keys.Escape, Keys.ControlM)),  # Alt-Enter
+        ("\x1b[98;3u", (Keys.Escape, "b")),  # Alt-B
+        ("\x1b[27;3;13~", (Keys.Escape, Keys.ControlM)),  # xterm Alt-Enter
+        ("\x1b[27;3;98~", (Keys.Escape, "b")),  # xterm Alt-B
+    )
+    for sequence, expected in cases:
+        events = []
+        parser = Vt100Parser(events.append)
+        parser.feed(sequence)
+        parser.flush()
+        assert tuple(press.key for press in events) == expected, repr(sequence)
+
+
 async def test_run_enables_and_restores_key_modification_modes(tmp_path, monkeypatch):
     """On a real terminal the TUI pushes the kitty/modifyOtherKeys modes that
     make Shift+Enter arrive as a distinct sequence, and restores on exit."""
@@ -1333,6 +1360,44 @@ async def test_run_enables_and_restores_key_modification_modes(tmp_path, monkeyp
     out = fake.getvalue()
     assert _DISABLE_KEY_MODES in out
     assert out.index(_ENABLE_KEY_MODES) < out.index(_DISABLE_KEY_MODES)
+
+
+async def test_key_mode_reset_failure_still_saves_draft(tmp_path, monkeypatch):
+    from lecode.tui.app import _DISABLE_KEY_MODES
+    from lecode.tui.input import SessionHistory
+
+    class FailingTty(StringIO):
+        def isatty(self):
+            return True
+
+        def write(self, value):
+            if value == _DISABLE_KEY_MODES:
+                raise OSError("terminal reset failed")
+            return super().write(value)
+
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    monkeypatch.setattr("sys.stdout", FailingTty())
+    monkeypatch.setenv("TERM", "xterm-256color")
+    with create_pipe_input() as inp:
+        inp.send_text("unsubmitted draft")
+        inp.close()
+        with pytest.raises(OSError, match="terminal reset failed"):
+            await app.run(input=inp, output=DummyOutput())
+    assert SessionHistory(app._store, app.session).load_draft() == "unsubmitted draft"
+
+
+async def test_kitty_ctrl_c_clears_draft_without_inserting_escape_text(tmp_path, monkeypatch):
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        try:
+            inp.send_text("draft\x1b[99;5uafter")
+            await wait_for(lambda: app._input_area is not None and "after" in app._input_area.text)
+            assert app._input_area.text == "after"
+        finally:
+            inp.send_text("\x03")
+            inp.send_text("/quit\r")
+            await task
 
 
 async def test_pipe_draft_persisted_on_eof_exit(tmp_path, monkeypatch):

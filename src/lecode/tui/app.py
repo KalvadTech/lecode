@@ -180,25 +180,73 @@ class _PromptBlocked(Exception):
     """Stop a generated sequence after its submission hook denies a prompt."""
 
 
-def _register_shift_enter() -> None:
-    """Map the Shift+Enter escape sequences to Ctrl-J (newline).
+def _register_key_sequences() -> None:
+    """Map modified keys emitted by the enabled terminal modes.
 
-    prompt_toolkit 3.0.53 has no ShiftEnter key: the Kitty sequence
-    ``ESC [ 13 ; 2 u`` is unmapped and the modifyOtherKeys sequence
-    ``ESC [ 27 ; 2 ; 13 ~`` maps to c-m — i.e. it would *submit*. Both are
-    (re)mapped to c-j, which the chatbox binds to "insert newline". The
-    vt100 parser reads ``ANSI_SEQUENCES`` live, so runtime registration is
-    enough. Idempotent; the dependency is pinned, so this stays in sync.
+    prompt_toolkit 3.0.53 does not parse Kitty's CSI-u controls. Enabling
+    disambiguation changes every Ctrl/Alt key and Escape, not just Shift+Enter.
+    The vt100 parser reads ``ANSI_SEQUENCES`` live; registration is idempotent.
     """
     ANSI_SEQUENCES.setdefault("\x1b[13;2u", Keys.ControlJ)
     ANSI_SEQUENCES["\x1b[27;2;13~"] = Keys.ControlJ
+    ANSI_SEQUENCES.setdefault("\x1b[27u", Keys.Escape)
+    ANSI_SEQUENCES.setdefault("\x1b[9;2u", Keys.BackTab)
+
+    controls = {
+        ord(char): Keys(f"c-{char.lower()}")
+        for char in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    }
+    controls.update(
+        {
+            32: Keys.ControlAt,
+            50: Keys.ControlAt,
+            51: Keys.Escape,
+            52: Keys.ControlBackslash,
+            53: Keys.ControlSquareClose,
+            54: Keys.ControlCircumflex,
+            55: Keys.ControlUnderscore,
+            56: Keys.ControlH,
+            63: Keys.ControlH,
+            64: Keys.ControlAt,
+            91: Keys.Escape,
+            92: Keys.ControlBackslash,
+            93: Keys.ControlSquareClose,
+            94: Keys.ControlCircumflex,
+            95: Keys.ControlUnderscore,
+        }
+    )
+    for code, key in controls.items():
+        for modifier in (5, 6):
+            ANSI_SEQUENCES.setdefault(f"\x1b[{code};{modifier}u", key)
+        for modifier in (7, 8):
+            ANSI_SEQUENCES.setdefault(f"\x1b[{code};{modifier}u", (Keys.Escape, key))
+            ANSI_SEQUENCES.setdefault(f"\x1b[27;{modifier};{code}~", (Keys.Escape, key))
+
+    for code in range(32, 127):
+        char = chr(code)
+        for modifier in (3, 4):
+            key = (Keys.Escape, char.upper() if modifier == 4 else char)
+            ANSI_SEQUENCES.setdefault(f"\x1b[{code};{modifier}u", key)
+            ANSI_SEQUENCES.setdefault(f"\x1b[27;{modifier};{code}~", key)
+
+    for code, key in (
+        (9, Keys.ControlI),
+        (13, Keys.ControlM),
+        (27, Keys.Escape),
+        (127, Keys.ControlH),
+    ):
+        for modifier in (3, 4):
+            ANSI_SEQUENCES.setdefault(f"\x1b[{code};{modifier}u", (Keys.Escape, key))
+            ANSI_SEQUENCES.setdefault(f"\x1b[27;{modifier};{code}~", (Keys.Escape, key))
+        for modifier in (5, 6):
+            ANSI_SEQUENCES.setdefault(f"\x1b[{code};{modifier}u", key)
 
 
 #: Mode sequences that make Shift+Enter distinguishable from plain Enter:
 #: ``ESC [ > 1 u`` pushes the Kitty keyboard protocol's disambiguate flag
 #: (Kitty, Ghostty, WezTerm, foot, Contour) and ``ESC [ > 4 ; 1 m`` sets
 #: xterm's modifyOtherKeys level 1. Terminals without support ignore both;
-#: the sequences they unlock are mapped to c-j by _register_shift_enter.
+#: _register_key_sequences maps their modified keys to the existing bindings.
 _ENABLE_KEY_MODES = "\x1b[>1u\x1b[>4;1m"
 _DISABLE_KEY_MODES = "\x1b[<u\x1b[>4;0m"
 
@@ -990,7 +1038,7 @@ class TuiApp:
         def _newline(event: Any) -> None:
             # Ctrl-J — and Shift-Enter on terminals that report it (the
             # kitty/modifyOtherKeys sequences are mapped to c-j in
-            # _register_shift_enter): insert a newline, never submit.
+            # _register_key_sequences): insert a newline, never submit.
             event.current_buffer.insert_text("\n")
 
         @kb.add("c-c")
@@ -1176,7 +1224,7 @@ class TuiApp:
         return command, "no matching options"
 
     def _build_app(self, input: Input | None = None, output: Output | None = None) -> Application:
-        _register_shift_enter()
+        _register_key_sequences()
         draft = self._input_history.load_draft()
         self._input_area = TextArea(
             prompt="> ",
@@ -1383,40 +1431,42 @@ class TuiApp:
                     self._quit = True
                     print(f"lecode: exiting on {type(e).__name__}", file=sys.stderr)
         finally:
-            _set_key_modes(_DISABLE_KEY_MODES)
-            await self._fire_hook(SESSION_END)
-            self._spinner_task.cancel()
-            self._approval.cancel()
-            self._runtime.ctx.approval_callback = None
-            if self._worker_manager is not None:
-                self._worker_manager.confirm = None
-            self._question.cancel()
-            self._runtime.ctx.question_callback = None
-            self.cancel_turn()
-            if self._turn_task is not None:
-                await asyncio.gather(self._turn_task, return_exceptions=True)
-            if self._mcp_task is not None:
-                await asyncio.gather(self._mcp_task, return_exceptions=True)
-                self._mcp_task = None
-            lsp = self._runtime.ctx.extras.get("lsp")
-            if lsp is not None:
-                await lsp.shutdown()
-            background = self._runtime.ctx.extras.get(BACKGROUND_EXTRA)
-            if background is not None:
-                await background.shutdown()
-            if self._worker_manager is not None:
-                await self._worker_manager.shutdown()
-            mcp = self._runtime.ctx.extras.get(MCP_EXTRA)
-            if mcp is not None:
-                await mcp.shutdown()
-            self._runtime.close()
-            if self._input_area is not None and self._input_area.text.strip():
-                self._input_history.save_draft(self._input_area.text)
-            self._app = None
-            if self._session_lock is not None:
-                self._session_lock.release()
-                self._session_lock = None
-            herdr.release()
+            try:
+                _set_key_modes(_DISABLE_KEY_MODES)
+            finally:
+                await self._fire_hook(SESSION_END)
+                self._spinner_task.cancel()
+                self._approval.cancel()
+                self._runtime.ctx.approval_callback = None
+                if self._worker_manager is not None:
+                    self._worker_manager.confirm = None
+                self._question.cancel()
+                self._runtime.ctx.question_callback = None
+                self.cancel_turn()
+                if self._turn_task is not None:
+                    await asyncio.gather(self._turn_task, return_exceptions=True)
+                if self._mcp_task is not None:
+                    await asyncio.gather(self._mcp_task, return_exceptions=True)
+                    self._mcp_task = None
+                lsp = self._runtime.ctx.extras.get("lsp")
+                if lsp is not None:
+                    await lsp.shutdown()
+                background = self._runtime.ctx.extras.get(BACKGROUND_EXTRA)
+                if background is not None:
+                    await background.shutdown()
+                if self._worker_manager is not None:
+                    await self._worker_manager.shutdown()
+                mcp = self._runtime.ctx.extras.get(MCP_EXTRA)
+                if mcp is not None:
+                    await mcp.shutdown()
+                self._runtime.close()
+                if self._input_area is not None and self._input_area.text.strip():
+                    self._input_history.save_draft(self._input_area.text)
+                self._app = None
+                if self._session_lock is not None:
+                    self._session_lock.release()
+                    self._session_lock = None
+                herdr.release()
         try:
             self.print_totals()
         finally:
