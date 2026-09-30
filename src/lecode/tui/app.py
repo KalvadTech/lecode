@@ -29,7 +29,8 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.input import Input
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
-from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.input.vt100 import Vt100Input
+from prompt_toolkit.key_binding import KeyBindings, KeyPress
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
@@ -1393,7 +1394,7 @@ class TuiApp:
             ),
             picker_menu_visible,
         )
-        return Application(
+        app = Application(
             layout=Layout(HSplit([live_area, roster_area, self._chatbox, picker_panel, toolbar])),
             style=Style.from_dict(
                 {
@@ -1411,6 +1412,16 @@ class TuiApp:
             input=input,
             output=output,
         )
+        if isinstance(app.input, Vt100Input):
+            feed_key = app.input.vt100_parser.feed_key_callback
+
+            def normalize_xterm_shift(key: KeyPress) -> None:
+                if key.data.startswith("\x1b[27;2;") and len(key.key) == 1:
+                    key = KeyPress(key.key, key.key)
+                feed_key(key)
+
+            app.input.vt100_parser.feed_key_callback = normalize_xterm_shift
+        return app
 
     # -- the driver -----------------------------------------------------------
 

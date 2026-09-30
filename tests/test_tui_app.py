@@ -1440,6 +1440,19 @@ async def test_kitty_ctrl_c_clears_draft_without_inserting_escape_text(tmp_path,
             await task
 
 
+async def test_xterm_shift_character_inserts_character_not_escape_text(tmp_path, monkeypatch):
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        try:
+            inp.send_text("\x1b[27;2;65~")  # xterm level-2 Shift-A
+            await wait_for(lambda: app._input_area is not None and bool(app._input_area.text))
+            assert app._input_area.text == "A"
+        finally:
+            inp.send_text("\x03/quit\r")
+            await task
+
+
 async def test_pipe_draft_persisted_on_eof_exit(tmp_path, monkeypatch):
     """Unsubmitted buffer text survives a restart as a draft."""
     app, _, _ = make_app(tmp_path, monkeypatch, [])
