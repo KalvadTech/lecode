@@ -44,8 +44,8 @@
   The shared `tool_ctx` fixture is not autouse and isolates only the config directory.
 - Reuse `tests/fakes.py` for providers/catalogs. MCP tests launch mock subprocesses
   and localhost servers, configured explicitly via `tests/test_mcp.py:mcp_config`.
-  Keep the SSE shutdown reset in
-  `tests/conftest.py`; it prevents order-dependent failures across server tests.
+  sse-starlette 3.5.0 fixed its process-global shutdown flag (no per-test
+  reset needed anymore); older pins carried that reset in tests/conftest.py.
 - `docs/build-plan.md` is historical, not the current spec: permissions now have
   two modes, config is TOML-only, and the catalog is live with an empty fallback.
   For config or hook changes, consult `docs/configuration.md` or `docs/hooks.md`
