@@ -1239,6 +1239,42 @@ async def test_pipe_ctrl_c_exits_cleanly(tmp_path, monkeypatch):
     assert code == 0
 
 
+@pytest.mark.parametrize("root_running", [False, True])
+async def test_ctrl_c_completed_worker_view(tmp_path, monkeypatch, root_running):
+    app, provider, _ = make_blocking_app(tmp_path, monkeypatch)
+    app.runtime.ctx.extras["provider"] = provider
+    provider.blocked = False
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        try:
+            await wait_for(lambda: app._input_area is not None)
+            inp.send_text("@explore inspect\r")
+            await wait_for(lambda: bool(app.worker_manager.list()))
+            worker = app.worker_manager.list()[0]
+            await wait_for(lambda: worker.state == "completed")
+            if root_running:
+                app.focus_worker(None)
+                provider.blocked = True
+                inp.send_text("root work\r")
+                await wait_for(lambda: len(provider.requests) == 2)
+            assert app.focus_worker(worker.id)
+            inp.send_text("\x03")
+            if root_running:
+                inp.send_text("draft after interrupt")
+                await wait_for(lambda: app._input_area.text == "draft after interrupt")
+                assert not task.done()
+                assert not app._turn_task.done()
+                assert not app._turn_task.cancelling()
+            else:
+                await asyncio.wait({task}, timeout=1)
+                assert task.done(), "Ctrl+C did not exit the idle completed-worker view"
+                assert await task == 0
+        finally:
+            provider.release.set()
+            inp.send_text("\x15/quit\r")
+            await task
+
+
 async def test_pipe_ctrl_d_exits_cleanly(tmp_path, monkeypatch):
     app, _, _ = make_app(tmp_path, monkeypatch, [])
     with create_pipe_input() as inp:
