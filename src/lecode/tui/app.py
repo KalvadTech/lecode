@@ -1063,7 +1063,7 @@ class TuiApp:
             if self._question.is_pending:
                 self._question.dismiss()
                 return
-            if self._focused_worker_id is not None:
+            if self._focused_worker_id is not None and self.turn_busy():
                 worker = self.resolve_worker(self._focused_worker_id)
                 if worker is not None and worker.is_active:
                     self._spawn(self._stop_viewed_worker(worker.id))
