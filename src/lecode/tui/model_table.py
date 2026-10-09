@@ -1,10 +1,10 @@
 """The model-catalog table shared by ``/models`` and the setup wizard.
 
 Cost cells run green (cheapest) through yellow and orange to red (priciest);
-context cells run light blue (smallest window) to dark blue (largest). Both
-ramps are computed dynamically from the rows shown: red is the most expensive
-*in this table*. Prices and windows span orders of magnitude, so both ramps
-are log-scaled.
+context cells run light violet (smallest window) to logo deep purple
+(largest). Both ramps are computed dynamically from the rows shown: red is
+the most expensive *in this table*. Prices and windows span orders of
+magnitude, so both ramps are log-scaled.
 """
 
 from __future__ import annotations
@@ -28,10 +28,12 @@ _COST_STOPS = (
     (0xE6 / 255, 0x22 / 255, 0x22 / 255),
 )
 
-#: Context ramp stops: light blue (smallest) to dark blue (largest).
+#: Context ramp stops: light violet to logo deep purple, from the brand
+#: palette (THEME.tool, THEME.accent, and the splash logo's #7c3aed).
 _CTX_STOPS = (
-    (0xA6 / 255, 0xD8 / 255, 0xFF / 255),
-    (0x1E / 255, 0x3A / 255, 0x8A / 255),
+    (0xC4 / 255, 0xB5 / 255, 0xFD / 255),
+    (0xA7 / 255, 0x8B / 255, 0xFA / 255),
+    (0x7C / 255, 0x3A / 255, 0xED / 255),
 )
 
 
@@ -62,7 +64,7 @@ def cost_style(value: float, lo: float, hi: float) -> str:
 
 
 def context_style(window: int, lo: float, hi: float) -> str:
-    """Light blue (``lo``) to dark blue (``hi``) on a log scale."""
+    """Light violet (``lo``) to logo deep purple (``hi``) on a log scale."""
     return _ramp(_t(math.log(window), lo, hi), _CTX_STOPS)
 
 

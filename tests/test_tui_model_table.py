@@ -49,10 +49,10 @@ def test_cost_ramp_is_relative_to_the_prices_shown():
     assert cost_style(5.0, 0.0, 50.0) != "#22e622"
 
 
-def test_context_ramp_runs_light_to_dark_blue():
+def test_context_ramp_runs_light_violet_to_logo_purple():
     lo, hi = math.log(32_000), math.log(2_000_000)
-    assert context_style(32_000, lo, hi) == "#a6d8ff"  # smallest: light blue
-    assert context_style(2_000_000, lo, hi) == "#1e3a8a"  # largest: dark blue
+    assert context_style(32_000, lo, hi) == "#c4b5fd"  # smallest: light violet
+    assert context_style(2_000_000, lo, hi) == "#7c3aed"  # largest: logo purple
 
 
 def test_context_ramp_is_logarithmic():
