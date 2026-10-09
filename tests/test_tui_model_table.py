@@ -35,11 +35,18 @@ def render(table) -> str:
     return out.getvalue()
 
 
-def test_cost_ramp_runs_green_to_red():
-    assert cost_style(0.0, 0.0, 15.0) == "#22e622"  # cheapest: green
-    assert cost_style(15.0, 0.0, 15.0) == "#e62222"  # priciest: red
-    r, g, b = (int(cost_style(7.5, 0.0, 15.0)[i : i + 2], 16) for i in (1, 3, 5))
-    assert r == g > b  # the midpoint is yellow
+def test_cost_ramp_runs_green_yellow_orange_red():
+    # log1p scaling: each 10x step from the floor lands on the next stop
+    assert cost_style(1.0, 1.0, 1000.0) == "#22e622"  # cheapest: green
+    assert cost_style(10.0, 1.0, 1000.0) == "#e6e622"  # yellow
+    assert cost_style(100.0, 1.0, 1000.0) == "#e68a22"  # orange
+    assert cost_style(1000.0, 1.0, 1000.0) == "#e62222"  # priciest: red
+
+
+def test_cost_ramp_is_relative_to_the_prices_shown():
+    """The same price is green when it is the floor, mid-ramp otherwise."""
+    assert cost_style(5.0, 5.0, 50.0) == "#22e622"
+    assert cost_style(5.0, 0.0, 50.0) != "#22e622"
 
 
 def test_context_ramp_runs_light_to_dark_blue():

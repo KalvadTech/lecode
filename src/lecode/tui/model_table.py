@@ -1,14 +1,14 @@
 """The model-catalog table shared by ``/models`` and the setup wizard.
 
-Cost cells run green (cheapest) → red (priciest); context cells run light
-blue (smallest window) → dark blue (largest). Both ramps are relative to the
-rows shown — red is the most expensive *in this table*. Context windows span
-orders of magnitude, so that ramp is logarithmic; price is linear.
+Cost cells run green (cheapest) through yellow and orange to red (priciest);
+context cells run light blue (smallest window) to dark blue (largest). Both
+ramps are computed dynamically from the rows shown: red is the most expensive
+*in this table*. Prices and windows span orders of magnitude, so both ramps
+are log-scaled.
 """
 
 from __future__ import annotations
 
-import colorsys
 import math
 from collections.abc import Iterable
 
@@ -20,9 +20,19 @@ from lecode.providers.catalog import ModelInfo
 from lecode.tui.statusline import human_tokens
 from lecode.tui.themes import THEME, Theme
 
-#: Context ramp endpoints: light blue (smallest) → dark blue (largest).
-_CTX_LIGHT = (0xA6 / 255, 0xD8 / 255, 0xFF / 255)
-_CTX_DARK = (0x1E / 255, 0x3A / 255, 0x8A / 255)
+#: Cost ramp stops: green, yellow, orange, red (cheapest to priciest).
+_COST_STOPS = (
+    (0x22 / 255, 0xE6 / 255, 0x22 / 255),
+    (0xE6 / 255, 0xE6 / 255, 0x22 / 255),
+    (0xE6 / 255, 0x8A / 255, 0x22 / 255),
+    (0xE6 / 255, 0x22 / 255, 0x22 / 255),
+)
+
+#: Context ramp stops: light blue (smallest) to dark blue (largest).
+_CTX_STOPS = (
+    (0xA6 / 255, 0xD8 / 255, 0xFF / 255),
+    (0x1E / 255, 0x3A / 255, 0x8A / 255),
+)
 
 
 def _hex(rgb: tuple[float, ...]) -> str:
@@ -36,17 +46,24 @@ def _t(value: float, lo: float, hi: float) -> float:
     return min(max((value - lo) / (hi - lo), 0.0), 1.0)
 
 
+def _ramp(t: float, stops: tuple[tuple[float, ...], ...]) -> str:
+    """Piecewise RGB interpolation across ``stops``; ``t`` clamps to [0, 1]."""
+    pos = min(max(t, 0.0), 1.0) * (len(stops) - 1)
+    i = min(int(pos), len(stops) - 2)
+    frac = pos - i
+    a, b = stops[i], stops[i + 1]
+    return _hex(tuple(x + (y - x) * frac for x, y in zip(a, b, strict=True)))
+
+
 def cost_style(value: float, lo: float, hi: float) -> str:
-    """Green (``lo``) → yellow → red (``hi``), as a Rich hex style."""
-    hue = (1 / 3) * (1 - _t(value, lo, hi))  # 120° green → 0° red
-    return _hex(colorsys.hsv_to_rgb(hue, 0.85, 0.9))
+    """Green (``lo``) through yellow and orange to red (``hi``), log-scaled."""
+    t = _t(math.log1p(value - lo), 0.0, math.log1p(hi - lo))
+    return _ramp(t, _COST_STOPS)
 
 
 def context_style(window: int, lo: float, hi: float) -> str:
-    """Light blue (``lo``) → dark blue (``hi``) on a log scale."""
-    t = _t(math.log(window), lo, hi)
-    channels = (lo_c + (hi_c - lo_c) * t for lo_c, hi_c in zip(_CTX_LIGHT, _CTX_DARK, strict=True))
-    return _hex(tuple(channels))
+    """Light blue (``lo``) to dark blue (``hi``) on a log scale."""
+    return _ramp(_t(math.log(window), lo, hi), _CTX_STOPS)
 
 
 def build_model_table(
