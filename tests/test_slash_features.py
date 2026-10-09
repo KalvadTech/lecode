@@ -381,8 +381,10 @@ async def test_editsys_saves_session_override(tmp_path, monkeypatch):
     app, _, out = make_app(tmp_path, monkeypatch, [])
     await app.handle_command("/editsys")
     assert app.config.llm.system_prompt.custom == "CUSTOM SYSTEM PROMPT"
-    assert app.runtime.system_prompt == "CUSTOM SYSTEM PROMPT"
-    assert app._history[0]["content"] == "CUSTOM SYSTEM PROMPT"
+    # the custom base replaces only the base; the environment note stays
+    assert app.runtime.system_prompt.startswith("CUSTOM SYSTEM PROMPT")
+    assert "## Environment" in app.runtime.system_prompt
+    assert app._history[0]["content"] == app.runtime.system_prompt
     assert "overridden for this session" in out.getvalue()
 
 

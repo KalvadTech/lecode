@@ -3,8 +3,9 @@
 The base prompt is the embedded ``prompts/minimal.md`` (default) or
 ``prompts/rich.md`` (``llm.system_prompt.style = "rich"``), optionally layered
 with a named persona snippet. ``llm.system_prompt.custom`` replaces the base
-entirely. Project context (the AGENTS.md walk) is appended after the base,
-then the memory and skills seams (Phases 7 and 6).
+entirely. An environment note (the working directory — commands already run
+there) follows the base, then project context (the AGENTS.md walk), then the
+memory and skills seams (Phases 7 and 6).
 """
 
 from __future__ import annotations
@@ -34,8 +35,14 @@ def build_system_prompt(
     memory_text: str | None = None,
     extra: str | None = None,
 ) -> str:
-    """Assemble the system prompt: base + AGENTS.md walk + memory + extras."""
+    """Assemble the system prompt: base + environment + AGENTS.md walk + memory + extras."""
     sections = [base_prompt(config, cwd).strip()]
+
+    # Anchors the working directory so models don't defensively `cd` first.
+    sections.append(
+        f"## Environment\n\n"
+        f"- Working directory: {cwd} — commands already run there; do not `cd` first."
+    )
 
     context = agents_md.render(agents_md.collect(cwd))
     if context:

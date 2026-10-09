@@ -71,4 +71,18 @@ def test_memory_and_extra_seams(repo):
 
 def test_no_context_files_omits_section(repo):
     prompt = build_system_prompt(Config(), repo)
-    assert "##" not in prompt
+    assert "## Environment" in prompt
+    assert prompt.count("## ") == 1  # no context-file headers besides it
+
+
+def test_environment_names_the_working_directory(repo):
+    prompt = build_system_prompt(Config(), repo)
+    assert f"Working directory: {repo}" in prompt
+    assert "do not `cd` first" in prompt
+
+
+def test_environment_survives_a_custom_base(repo):
+    config = Config()
+    config.llm.system_prompt.custom = "CUSTOM PROMPT"
+    prompt = build_system_prompt(config, repo)
+    assert f"Working directory: {repo}" in prompt

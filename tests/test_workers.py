@@ -1090,7 +1090,9 @@ async def test_non_success_worker_stop_preserves_result_and_allows_resume(setup,
     elif reason == "empty":
         script = [{"usage": {"input_tokens": 7, "cost_usd": 0.25}}] * 4
     else:
-        ctx.config.agent.context_window = 3300
+        # Sized to overflow mid-script: the first call must fit (and record
+        # usage), the budget must run out before the script does.
+        ctx.config.agent.context_window = 3350
         ctx.config.compaction.buffer_tokens = 200
         script = [tool, tool, {"text": "summary"}, tool]
     provider = FakeProvider(script)
