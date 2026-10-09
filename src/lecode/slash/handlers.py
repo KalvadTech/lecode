@@ -416,17 +416,9 @@ def _is_hidden(model_id: str, hidden: list[str]) -> bool:
 
 
 async def cmd_models(app: TuiApp, args: list[str]) -> None:
-    """``/models``: the catalog, minus ``ui.hidden_models`` entries."""
-    lines = []
-    for entry in app.catalog.all():
-        if _is_hidden(entry.id, app.config.ui.hidden_models):
-            continue
-        marker = " (current)" if entry.id == app.config.llm.model else ""
-        lines.append(
-            f"{entry.id}{marker} — ctx {human_tokens(entry.context_window)} · "
-            f"${entry.pricing.prompt}/M in · ${entry.pricing.completion}/M out"
-        )
-    app.feed.info("\n".join(lines) or "(no models)")
+    """``/models``: the catalog table, minus ``ui.hidden_models`` entries."""
+    entries = [e for e in app.catalog.all() if not _is_hidden(e.id, app.config.ui.hidden_models)]
+    app.feed.models(entries, marked_id=app.config.llm.model, marker="(current)")
 
 
 async def cmd_model_subagent(app: TuiApp, args: list[str]) -> None:
@@ -458,20 +450,11 @@ async def cmd_model_subagent(app: TuiApp, args: list[str]) -> None:
 
 
 async def cmd_models_subagent(app: TuiApp, args: list[str]) -> None:
-    """``/models-subagent``: the catalog, marking the effective subagent model."""
+    """``/models-subagent``: the catalog table, marking the effective subagent model."""
     effective = app.config.agent.subagent_model or app.config.llm.model
-    lines = []
-    for entry in app.catalog.all():
-        if _is_hidden(entry.id, app.config.ui.hidden_models):
-            continue
-        marker = " (subagent)" if entry.id == effective else ""
-        lines.append(
-            f"{entry.id}{marker} — ctx {human_tokens(entry.context_window)} · "
-            f"${entry.pricing.prompt}/M in · ${entry.pricing.completion}/M out"
-        )
-    lines.append("")
-    lines.append("set: /model-subagent <model> · reset: /model-subagent default")
-    app.feed.info("\n".join(lines))
+    entries = [e for e in app.catalog.all() if not _is_hidden(e.id, app.config.ui.hidden_models)]
+    app.feed.models(entries, marked_id=effective, marker="(subagent)")
+    app.feed.info("set: /model-subagent <model> · reset: /model-subagent default")
 
 
 async def cmd_thinking(app: TuiApp, args: list[str]) -> None:

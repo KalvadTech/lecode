@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from tests.test_tui_app import make_app, make_blocking_app, wait_for
 
 from lecode.config.models import Config
@@ -55,8 +57,10 @@ async def test_models_lists_catalog_and_marks_current(tmp_path, monkeypatch):
     rendered = out.getvalue()
     assert "deepseek/deepseek-v4-flash (current)" in rendered
     assert "anthropic/claude-sonnet-4" in rendered
-    # context size humanized and per-million pricing shown next to each model
-    assert "deepseek/deepseek-v4-flash (current) — ctx 1.0M · $0.09/M in · $0.18/M out" in rendered
+    # context size and per-million pricing shown as table columns per model
+    assert re.search(r"Model\s+Context\s+In \$/M\s+Out \$/M", rendered)
+    row = r"deepseek/deepseek-v4-flash \(current\)\s+1\.0M\s+\$0\.09\s+\$0\.18"
+    assert re.search(row, rendered)
 
 
 async def test_models_respects_hidden_models(tmp_path, monkeypatch):

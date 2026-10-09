@@ -35,10 +35,12 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from lecode.tui.model_table import build_model_table
 from lecode.tui.statusline import context_meter, format_cost, human_tokens
 from lecode.tui.themes import Theme
 
 if TYPE_CHECKING:
+    from lecode.providers.catalog import ModelInfo
     from lecode.tui.agents import AgentRun
 
 #: Max length of a rendered tool-call line.
@@ -296,6 +298,18 @@ class Feed:
         """Pierre-mode feedback: a labelled block after the stats line."""
         self._console.print(Text(f"[{self._stamp()}] ◆ pierre ({model})", style=self._theme.accent))
         self._console.print(Text(feedback, style=self._theme.text))
+
+    def models(self, entries: list[ModelInfo], *, marked_id: str, marker: str) -> None:
+        """Render the catalog as a table; cost/context cells are gradient-colored."""
+        if not entries:
+            self.info("(no models)")
+            return
+        self._console.print(
+            Text(f"[{self._stamp()}] models ({len(entries)})", style=self._theme.muted)
+        )
+        self._console.print(
+            build_model_table(entries, marked_id=marked_id, marker=marker, theme=self._theme)
+        )
 
     def error(self, msg: str) -> None:
         """Render an error one-liner."""

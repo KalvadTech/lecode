@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import stat
 import tomllib
 
@@ -175,8 +176,10 @@ async def test_model_menu_shows_context_and_price(cfg_dir, clean_home, capsys):
     session = FakeSession(["1", "sk-or-key", "2", "", "n"])
     answers = await gather_answers(session, home=clean_home)
     menu = capsys.readouterr().out
-    assert "1) deepseek/deepseek-v4-flash-0731 — ctx 1.3M · $0.065/M in · $0.18/M out" in menu
-    assert "3) z-ai/glm-5.2 — ctx 1.0M · $0.966/M in · $3.036/M out" in menu
+    # a numbered table with context and per-million price columns
+    assert re.search(r"#\s+Model\s+Context\s+In \$/M\s+Out \$/M", menu)
+    assert re.search(r"1\s+deepseek/deepseek-v4-flash-0731\s+1\.3M\s+\$0\.065\s+\$0\.18", menu)
+    assert re.search(r"3\s+z-ai/glm-5\.2\s+1\.0M\s+\$0\.966\s+\$3\.036", menu)
     assert answers["model"] == "openai/gpt-5-mini"  # pick 2, bare id returned
 
 

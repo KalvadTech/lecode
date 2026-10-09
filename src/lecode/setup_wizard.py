@@ -23,10 +23,11 @@ from pathlib import Path
 from typing import Any
 
 from prompt_toolkit import PromptSession
+from rich.console import Console
 
 from lecode.config.loader import config_dir
-from lecode.providers.catalog import ModelInfo
-from lecode.tui.statusline import human_tokens
+from lecode.providers.catalog import Modalities, ModelInfo, Pricing
+from lecode.tui.model_table import build_model_table
 
 #: Providers offered by the wizard: OpenRouter, or any custom
 #: OpenRouter-compatible endpoint reached via a base URL.
@@ -268,14 +269,32 @@ def _recent_models(details: dict[str, ModelInfo]) -> dict[str, ModelInfo]:
     return recent or details
 
 
-def _model_detail(model_id: str, details: dict[str, ModelInfo]) -> str:
-    """Menu annotation for a model pick: context size and per-million pricing."""
-    info = details.get(model_id)
-    if info is None:
-        return ""
-    return (
-        f"ctx {human_tokens(info.context_window)} · "
-        f"${info.pricing.prompt}/M in · ${info.pricing.completion}/M out"
+def _model_table_printer(
+    details: dict[str, ModelInfo], default: str | None
+) -> Callable[[list[str]], None]:
+    """Render the model menu as a numbered, gradient-colored table.
+
+    Choices missing from ``details`` (e.g. an imported default the provider
+    no longer lists) still get a row, with ``?`` for their unknown cells.
+    """
+
+    def render(choices: list[str]) -> None:
+        entries = [details.get(c) or _unknown_entry(c) for c in choices]
+        Console().print(
+            build_model_table(entries, numbered=True, marked_id=default, marker="(imported)")
+        )
+
+    return render
+
+
+def _unknown_entry(model_id: str) -> ModelInfo:
+    """A catalog stand-in for a menu choice the provider did not list."""
+    return ModelInfo(
+        id=model_id,
+        name=model_id,
+        context_window=0,
+        pricing=Pricing(prompt=0.0, completion=0.0, known=False),
+        modalities=Modalities(input=["text"], output=["text"]),
     )
 
 
@@ -315,22 +334,23 @@ async def _ask_choice(
     session: PromptSession,
     message: str,
     choices: tuple[str, ...] | list[str],
-    describe: Callable[[str], str] | None = None,
     default: str | None = None,
+    table: Callable[[list[str]], None] | None = None,
 ) -> str:
     """A numbered menu; empty answer picks ``default`` (or 1). Loops until valid.
 
-    ``describe`` adds a " — <detail>" suffix to each menu line (the return
-    value is still the bare choice). Accepts a number, an exact choice, or a
-    unique case-insensitive substring — handy when the menu is a provider's
-    full model list.
+    ``table`` replaces the plain per-line menu with a rendered table of the
+    choices, numbered 1..N to match the accepted numeric answers. Accepts a
+    number, an exact choice, or a unique case-insensitive substring — handy
+    when the menu is a provider's full model list.
     """
     print(message)
-    for i, choice in enumerate(choices, start=1):
-        detail = describe(choice) if describe else ""
-        suffix = f" — {detail}" if detail else ""
-        marker = " (imported)" if choice == default else ""
-        print(f"  {i}) {choice}{suffix}{marker}")
+    if table is not None:
+        table(list(choices))
+    else:
+        for i, choice in enumerate(choices, start=1):
+            marker = " (imported)" if choice == default else ""
+            print(f"  {i}) {choice}{marker}")
     fallback = default or choices[0]
     while True:
         answer = (await session.prompt_async(f"Choose [{fallback}]: ")).strip() or fallback
@@ -458,7 +478,7 @@ async def gather_answers(session: PromptSession, home: Path | None = None) -> di
     model_default = imported.get("model")
     details = await _live_model_details(provider, base_url, api_key)
     if details:
-        # The provider list, sorted, annotated with ctx size and pricing.
+        # The provider list, sorted, as a numbered ctx/pricing table.
         recent = _recent_models(details)
         if len(recent) < len(details):
             print(
@@ -472,8 +492,8 @@ async def gather_answers(session: PromptSession, home: Path | None = None) -> di
             session,
             f"Default model ({len(recent)} from the provider):",
             model_choices,
-            describe=lambda m: _model_detail(m, details),
             default=model_default,
+            table=_model_table_printer(details, model_default),
         )
     else:
         # Fetch failed (offline, keyless non-listing endpoint): free text.
