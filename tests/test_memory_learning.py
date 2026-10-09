@@ -458,7 +458,7 @@ async def test_project_fact_requires_exact_paired_read_corroboration_not_tool_in
     ctx = runtime.ctx
     store, session = ctx.session_store, ctx.session
     store.append_event(session, "clear")
-    quote = 'requires-python = ">=3.12"'
+    quote = 'requires-python = ">=3.13"'
     fact_text = "pyproject.toml contains " + json.dumps(quote)
     messages = [
         {"role": "user", "content": "Check the Python requirement."},

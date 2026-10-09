@@ -139,7 +139,7 @@ class TriggerCompleter(Completer):
 
     async def get_completions_async(
         self, document: Document, complete_event: CompleteEvent
-    ) -> AsyncGenerator[Completion, None]:
+    ) -> AsyncGenerator[Completion]:
         trigger = trigger_token(document)
         if trigger is None:
             return
@@ -250,7 +250,7 @@ class CommandArgCompleter(Completer):
 
     async def get_completions_async(
         self, document: Document, complete_event: CompleteEvent
-    ) -> AsyncGenerator[Completion, None]:
+    ) -> AsyncGenerator[Completion]:
         result = self._app.arg_completion_rows(document)
         if result is None:
             async for completion in self._fallback.get_completions_async(document, complete_event):

@@ -60,7 +60,7 @@ hooks, LSP, MCP — before the chat opens.
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.13+
 - Three external binaries on `PATH` (verified at startup; no auto-download,
   no fallback):
 

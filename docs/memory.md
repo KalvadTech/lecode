@@ -306,7 +306,7 @@ The evidence contract separates model classification from source verification:
   a matching local `read` tool call. `text` is exactly
   `path contains "JSON-escaped exact line"`, also present as a complete user or
   assistant message in that exchange. For example,
-  `pyproject.toml contains "requires-python = \">=3.12\""`.
+  `pyproject.toml contains "requires-python = \">=3.13\""`.
   A relative path, matching read arguments/call ID/result, and the confirming
   message must all occur in the supplied range. This verifies **recorded observed
   content**, not a semantic conclusion, current file state, or an instruction to

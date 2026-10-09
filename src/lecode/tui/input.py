@@ -300,7 +300,7 @@ class PathCompleter(Completer):
 
     async def get_completions_async(
         self, document: Document, complete_event: CompleteEvent
-    ) -> AsyncGenerator[Completion, None]:
+    ) -> AsyncGenerator[Completion]:
         token = _path_token_before_cursor(document)
         if token is None:
             return

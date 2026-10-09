@@ -3,13 +3,13 @@ name = "lecode"
 version = "0.2.0"
 description = "A minimalist terminal AI coding agent (OpenRouter / OpenAI-compatible)"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 license = { text = "MIT" }
 dependencies = [
     "prompt_toolkit==3.0.53",
     "rich==15.0.0",
     "httpx==0.28.1",
-    "pydantic==2.13.5",
+    "pydantic==2.14.0",
     "PyYAML==6.0.3",
     "mcp==2.3.0",
     "typer==0.27.3",
@@ -51,7 +51,7 @@ markers = [
 ]
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py313"
 line-length = 100
 src = ["src", "tests"]
 
