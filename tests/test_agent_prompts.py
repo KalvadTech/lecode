@@ -72,7 +72,7 @@ def test_memory_and_extra_seams(repo):
 def test_no_context_files_omits_section(repo):
     prompt = build_system_prompt(Config(), repo)
     assert "## Environment" in prompt
-    assert prompt.count("## ") == 1  # no context-file headers besides it
+    assert "## /" not in prompt  # no context-file headers (## <abs path>)
 
 
 def test_environment_names_the_working_directory(repo):

@@ -1092,7 +1092,7 @@ async def test_non_success_worker_stop_preserves_result_and_allows_resume(setup,
     else:
         # Sized to overflow mid-script: the first call must fit (and record
         # usage), the budget must run out before the script does.
-        ctx.config.agent.context_window = 3350
+        ctx.config.agent.context_window = 3900
         ctx.config.compaction.buffer_tokens = 200
         script = [tool, tool, {"text": "summary"}, tool]
     provider = FakeProvider(script)
