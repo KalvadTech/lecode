@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.3.0](https://github.com/KalvadTech/lecode/compare/v0.2.0...v0.3.0) (2026-10-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove the built-in exa and context7 MCP servers; configure servers under [mcp.servers] instead ([898c835](https://github.com/KalvadTech/lecode/commit/898c835))
+* remove the --version flag and the version from the welcome screen ([eebd654](https://github.com/KalvadTech/lecode/commit/eebd654))
+
+### Features
+
+* persistent worker subagents with supervision ([248bb2a](https://github.com/KalvadTech/lecode/commit/248bb2a))
+* source-linked hybrid memory with safe forgetting ([c204c02](https://github.com/KalvadTech/lecode/commit/c204c02))
+* live agent roster and /runs detail panel ([49036f0](https://github.com/KalvadTech/lecode/commit/49036f0))
+* argument pickers for slash commands (/model, /resume, …) ([20cb421](https://github.com/KalvadTech/lecode/commit/20cb421))
+* pick ask_user answers with the arrow-key picker ([0fb73ad](https://github.com/KalvadTech/lecode/commit/0fb73ad))
+* render assistant messages as markdown at stream end ([068cc98](https://github.com/KalvadTech/lecode/commit/068cc98))
+* integrate with herdr ([5c1a958](https://github.com/KalvadTech/lecode/commit/5c1a958))
+* show average token speed in the statusline ([aade96e](https://github.com/KalvadTech/lecode/commit/aade96e))
+* import MCP servers from opencode in the setup wizard ([d3222df](https://github.com/KalvadTech/lecode/commit/d3222df))
+* gradient block welcome logo by Kalvad ([0761dc3](https://github.com/KalvadTech/lecode/commit/0761dc3))
+* Shift+Enter inserts a newline via terminal key modes ([90506f0](https://github.com/KalvadTech/lecode/commit/90506f0))
+* run shell commands through the detected user shell ([d2a0f2b](https://github.com/KalvadTech/lecode/commit/d2a0f2b))
+* bound headless runs by cost and execution time ([76c9ac6](https://github.com/KalvadTech/lecode/commit/76c9ac6))
+* JSON output for noninteractive runs ([97a6968](https://github.com/KalvadTech/lecode/commit/97a6968))
+* per-run reasoning effort and HTTP headers ([1aca671](https://github.com/KalvadTech/lecode/commit/1aca671))
+* distinguish provider failures in scripted runs ([ca1774a](https://github.com/KalvadTech/lecode/commit/ca1774a))
+* gradient-colored model table for /models and onboarding ([67a69b5](https://github.com/KalvadTech/lecode/commit/67a69b5))
+* four-stop log-scaled cost ramp in the model table ([b68769c](https://github.com/KalvadTech/lecode/commit/b68769c))
+* purple context ramp in the model table ([5b79fbd](https://github.com/KalvadTech/lecode/commit/5b79fbd))
+* anchor the working directory in the system prompt ([24264a9](https://github.com/KalvadTech/lecode/commit/24264a9))
+* dependency pinning, writing style, and commit rules in the base prompts ([33575cf](https://github.com/KalvadTech/lecode/commit/33575cf))
+* /mcp enable|disable to toggle servers in-session ([8b3fbf2](https://github.com/KalvadTech/lecode/commit/8b3fbf2))
+
+### Bug Fixes
+
+* name EOF/KI exits on stderr ([ea8eb73](https://github.com/KalvadTech/lecode/commit/ea8eb73))
+* fix the setup wizard with custom providers ([c851e7c](https://github.com/KalvadTech/lecode/commit/c851e7c))
+* make compaction omission-free and refresh the live system prompt ([5c6912e](https://github.com/KalvadTech/lecode/commit/5c6912e))
+* make worker submission idempotent ([6b5ca03](https://github.com/KalvadTech/lecode/commit/6b5ca03))
+* close worker review gaps ([9de3559](https://github.com/KalvadTech/lecode/commit/9de3559))
+* preserve model calls across worker updates ([4739ae6](https://github.com/KalvadTech/lecode/commit/4739ae6))
+* retry concurrent WAL initialization for facts ([9810693](https://github.com/KalvadTech/lecode/commit/9810693))
+* classify malformed response encodings as stream failures ([5e0067d](https://github.com/KalvadTech/lecode/commit/5e0067d))
+* reap the shell before killing surviving process group members ([be7c2ea](https://github.com/KalvadTech/lecode/commit/be7c2ea))
+* bound capture even with a one-byte output cap ([732804f](https://github.com/KalvadTech/lecode/commit/732804f))
+* xterm input: preserve shifted characters, Unicode, and shortcuts across key modes ([094ab96](https://github.com/KalvadTech/lecode/commit/094ab96))
+* allow idle Ctrl+C to exit completed worker views ([7231b94](https://github.com/KalvadTech/lecode/commit/7231b94))
+* capitalize Pierre in the reviewer prompt ([d03cc5f](https://github.com/KalvadTech/lecode/commit/d03cc5f))
+
+### Performance Improvements
+
+* reduce headless memory usage ([a3edc37](https://github.com/KalvadTech/lecode/commit/a3edc37))
+
+### Documentation
+
+* add AGENTS.md repository guidance ([57060c2](https://github.com/KalvadTech/lecode/commit/57060c2))
+* focus memory documentation on lecode ([5a9ab8d](https://github.com/KalvadTech/lecode/commit/5a9ab8d))
+* README covers the /models table and /mcp enable|disable ([77bb3bc](https://github.com/KalvadTech/lecode/commit/77bb3bc))
+
+### Continuous Integration
+
+* remove the release-please automation ([f9c7e42](https://github.com/KalvadTech/lecode/commit/f9c7e42))
+* bump actions/checkout, setup-uv, and the pinned uv version ([3f83fb1](https://github.com/KalvadTech/lecode/commit/3f83fb1))
+
+
 ## [0.2.0](https://github.com/KalvadTech/lecode/compare/v0.1.0...v0.2.0) (2026-09-08)
 
 
