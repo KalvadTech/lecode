@@ -103,6 +103,49 @@ async def test_disabled_server_skipped():
         await mgr.shutdown()
 
 
+async def test_set_enabled_disable_disconnects_and_refuses_calls(manager):
+    status = await manager.set_enabled("test", False)
+    assert status is not None
+    assert status.state == "disabled"
+    assert manager.tool_wrappers() == []
+    result = await manager.call("test", "echo", {"text": "hi"})
+    assert result.is_error
+    assert "disabled" in result.content
+
+
+async def test_set_enabled_enable_reconnects(manager):
+    await manager.set_enabled("test", False)
+    status = await manager.set_enabled("test", True)
+    assert status is not None
+    assert status.state == "connected"
+    assert status.tools == 4
+    result = await manager.call("test", "echo", {"text": "back"})
+    assert result.content == "echo: back"
+
+
+async def test_set_enabled_connects_a_config_disabled_server():
+    mgr = McpManager(mcp_config(enabled=False))
+    try:
+        await mgr.connect()
+        assert mgr.status()[0].state == "disabled"
+        status = await mgr.set_enabled("test", True)
+        assert status is not None
+        assert status.state == "connected"
+        assert {tool.name for tool in mgr.tool_wrappers()} == {
+            "mcp:test:echo",
+            "mcp:test:boom",
+            "mcp:test:crash",
+            "mcp:test:flaky",
+        }
+    finally:
+        await mgr.shutdown()
+
+
+async def test_set_enabled_unknown_server(manager):
+    assert await manager.set_enabled("nope", False) is None
+    assert await manager.set_enabled("nope", True) is None
+
+
 async def test_bad_command_isolated(tmp_path):
     config = mcp_config()
     config.mcp.servers["broken"] = McpServerConfig(
@@ -177,6 +220,14 @@ async def test_attach_registers_tools(runtime_with_mcp):
     runtime, manager = runtime_with_mcp
     assert "mcp:test:echo" in runtime.registry.names()
     assert runtime.ctx.extras[MCP_EXTRA] is manager
+
+
+async def test_set_enabled_syncs_the_registry(runtime_with_mcp):
+    runtime, manager = runtime_with_mcp
+    await manager.set_enabled("test", False)
+    assert not any(n.startswith("mcp:test:") for n in runtime.registry.names())
+    await manager.set_enabled("test", True)
+    assert "mcp:test:echo" in runtime.registry.names()
 
 
 async def test_dispatch_round_trip(runtime_with_mcp):
@@ -406,6 +457,25 @@ async def test_mcp_reconnect_command(app_with_mcp):
     assert "test reconnected (4 tools)" in out.getvalue()
     # tools are registered into the registry after a reconnect
     assert "mcp:test:echo" in app.runtime.registry.names()
+
+
+async def test_mcp_disable_enable_commands(app_with_mcp):
+    app, _, out = app_with_mcp
+    await app.handle_command("/mcp disable test")
+    assert "test disabled (its tools left the model's context)" in out.getvalue()
+    assert not any(n.startswith("mcp:test:") for n in app.runtime.registry.names())
+    await app.handle_command("/mcp")
+    assert "test: disabled" in out.getvalue()
+    await app.handle_command("/mcp enable test")
+    assert "test enabled (4 tools)" in out.getvalue()
+    assert "mcp:test:echo" in app.runtime.registry.names()
+
+
+async def test_mcp_enable_disable_unknown_server(app_with_mcp):
+    app, _, out = app_with_mcp
+    await app.handle_command("/mcp enable nope")
+    await app.handle_command("/mcp disable nope")
+    assert out.getvalue().count("unknown MCP server: nope") == 2
 
 
 async def test_mcp_unknown_server(app_with_mcp):

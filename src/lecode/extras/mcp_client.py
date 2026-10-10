@@ -468,6 +468,29 @@ class McpManager:
         self._sync_tools(name)
         return server.status
 
+    async def set_enabled(self, name: str, enabled: bool) -> ServerStatus | None:
+        """Enable or disable one server for this session.
+
+        Disabling closes the session, so the server's tools leave the
+        registry (and the model's context on the next turn); enabling
+        connects fresh. Session-scoped: ``enabled = false`` in
+        ``[mcp.servers.<name>]`` stays the persistent path.
+        """
+        server = self._servers.get(name)
+        if server is None:
+            return None
+        if server.config.enabled == enabled:
+            return server.status
+        server.config.enabled = enabled
+        if enabled:
+            await self._connect_one(server)
+        else:
+            await self._close_server(server)
+            server.error = None
+            server.auth_required = False
+        self._sync_tools(name)
+        return server.status
+
     async def authenticate(
         self, name: str, announce: Callable[[str], Any] | None = None
     ) -> ServerStatus | None:

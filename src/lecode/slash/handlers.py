@@ -1090,10 +1090,25 @@ async def cmd_chain(app: TuiApp, args: list[str]) -> None:
 
 
 async def cmd_mcp(app: TuiApp, args: list[str]) -> None:
-    """``/mcp`` — states; ``tools|reconnect|auth|login|logout <name>``."""
+    """``/mcp`` — states; ``enable|disable|tools|reconnect|auth|login|logout <name>``."""
     manager = app.runtime.ctx.extras.get("mcp")
     if manager is None or not manager.status():
         app.feed.info("no MCP servers configured")
+        return
+    if args and args[0] in ("enable", "disable"):
+        if len(args) < 2:
+            app.feed.error(f"usage: /mcp {args[0]} <name>")
+            return
+        status = await manager.set_enabled(args[1], args[0] == "enable")
+        if status is None:
+            app.feed.error(f"unknown MCP server: {args[1]}")
+            return
+        if args[0] == "disable":
+            app.feed.info(f"mcp: {status.name} disabled (its tools left the model's context)")
+        elif status.state == "connected":
+            app.feed.info(f"mcp: {status.name} enabled ({status.tools} tools)")
+        else:
+            app.feed.error(f"mcp: {status.name} enable failed: {status.error}")
         return
     if args and args[0] == "reconnect":
         if len(args) < 2:
@@ -1243,11 +1258,12 @@ TUTOR_TOPICS: dict[str, str] = {
     "chain": "/chain <topic> runs brainstorm → plan → code → review as one turn.",
     "mcp": (
         "MCP servers are configured under [mcp.servers] (stdio, http, or sse). "
-        "/mcp shows state; /mcp "
-        "tools|reconnect|auth|login|logout <name>. Remote servers with "
-        'auth = "oauth" log in via /mcp auth (opens your browser once; '
-        "credentials are reused afterwards; /mcp login forces a fresh login). "
-        "Tools appear as mcp:<server>:<tool>."
+        "/mcp shows state; /mcp enable|disable <name> adds or drops a server's "
+        "tools for this session (session-scoped; enabled = false in the config "
+        "is the persistent path); /mcp tools|reconnect|auth|login|logout "
+        '<name>. Remote servers with auth = "oauth" log in via /mcp auth '
+        "(opens your browser once; credentials are reused afterwards; "
+        "/mcp login forces a fresh login). Tools appear as mcp:<server>:<tool>."
     ),
     "memory": (
         "Persistent markdown memory: MEMORY.md (auto-injected), daily logs, "
@@ -1574,13 +1590,23 @@ def _complete_mcp(app: TuiApp, args: list[str]) -> list[CompletionRow]:
         return []  # nothing configured: the inert hint renders instead
     if not args:
         return [
+            ("enable", "enable", "connect a server and add its tools to the context"),
+            ("disable", "disable", "disconnect a server and drop its tools from the context"),
             ("tools", "tools", "list a server's tools"),
             ("reconnect", "reconnect", "reconnect a server"),
             ("auth", "auth", "OAuth login to a server (reuses credentials)"),
             ("login", "login", "fresh OAuth login to a server"),
             ("logout", "logout", "log out of a server"),
         ]
-    if len(args) == 1 and args[0] in ("tools", "reconnect", "auth", "login", "logout"):
+    if len(args) == 1 and args[0] in (
+        "enable",
+        "disable",
+        "tools",
+        "reconnect",
+        "auth",
+        "login",
+        "logout",
+    ):
         return [(s.name, s.name, "MCP server") for s in statuses]
     return []
 
@@ -1765,7 +1791,7 @@ ARG_HINTS = {
     "wt-exit": "[--delete] [--force]",
     "loop": "<plan-file> [max-iterations]",
     "chain": "<topic>",
-    "mcp": "[tools|reconnect|auth|login|logout <name>]",
+    "mcp": "[enable|disable|tools|reconnect|auth|login|logout <name>]",
     "tutor": "<topic>",
     "review": "[file…]",
     "notifications": "[on|off]",

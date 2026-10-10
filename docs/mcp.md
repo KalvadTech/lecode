@@ -109,6 +109,8 @@ Rule targets for MCP tools are the canonical `mcp:<server>:<tool>` name.
 ```
 /mcp                  per-server state: connected (n tools) / failed / disabled
                       / authentication required
+/mcp enable <name>    connect a server and add its tools to the model's context
+/mcp disable <name>   disconnect a server and drop its tools from the context
 /mcp tools <name>     list one server's tools
 /mcp reconnect <name> drop and re-establish a server session
 /mcp auth <name>      interactive OAuth login (opens the browser; reuses
@@ -116,3 +118,8 @@ Rule targets for MCP tools are the canonical `mcp:<server>:<tool>` name.
 /mcp login <name>     like auth, but drops cached credentials first
 /mcp logout <name>    drop a server session and its stored credentials
 ```
+
+`enable`/`disable` are session-scoped: they flip the in-memory flag so a
+noisy or rarely used server's tool specs stop riding every request, without
+editing the config. Set `enabled = false` under `[mcp.servers.<name>]` to
+disable a server permanently.
