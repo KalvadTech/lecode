@@ -47,7 +47,9 @@ hooks, LSP, MCP — before the chat opens.
   `--base-url` flag or a `[custom_providers]` entry. Keyless local endpoints
   supported. The model catalog is fetched live from the provider at startup
   (when the fetch fails the catalog is simply empty — models lose their
-  pricing/modality annotations; nothing cached on disk).
+  pricing/modality annotations; nothing cached on disk). `/models` renders
+  the catalog as a table: prices shaded green to red (red is the priciest),
+  context sizes light violet to logo purple, both relative to the rows shown.
 - **Real permissions, not vibes.** Two modes (`yolo` by default, `readonly`
   via `--safe` when you want a look-but-don't-touch agent), glob + regex
   rules, last-match-wins, unbypassable denies, doom-loop detection, and
@@ -238,6 +240,8 @@ output; JSON is unavailable for interactive, setup, and hooks-test modes.
 - **MCP** — stdio, streamable-HTTP, and SSE servers, with optional OAuth 2.1
   (`auth = "oauth"`, browser flow, tokens under `<config_dir>/mcp-auth/`;
   `/mcp auth` to authorize, `/mcp login|logout` to manage).
+  `/mcp enable|disable <name>` toggles a server's tools in-session, so rarely
+  used servers stop spending context on every request.
 - **LSP** — diagnostics from real language servers appended to `write`/`edit`
   results; fail-open, never blocks.
 - **Worktrees** — `--worktree <name>` or `/worktree` for isolated branches,
