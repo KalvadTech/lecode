@@ -26,6 +26,7 @@ from lecode.extras.workers import WORKER_CURRENT_EXTRA, WorkerManager
 from lecode.extras.worktree import WorktreeError, WorktreeManager
 from lecode.hooks import dispatcher_from_config
 from lecode.permission.checker import AgentOverlay
+from lecode.session.compaction import estimate_request
 from lecode.session.stats import session_stats
 from lecode.session.storage import SessionInUseError, SessionStore
 
@@ -48,6 +49,30 @@ class GatedProvider(FakeProvider):
                 yield event
         finally:
             self.active -= 1
+
+
+class _OverflowSizingProvider(FakeProvider):
+    """Shrink the context window to exactly fit the first request it sees.
+
+    The next turn adds an assistant message and a tool result, so it always
+    crosses the budget no matter the platform's system prompt size or temp
+    path length. A fixed window would couple the test to both.
+    """
+
+    def __init__(self, script, config):
+        super().__init__(script)
+        self._config = config
+        self._sized = False
+
+    async def stream_chat(self, messages, **kwargs):
+        if not self._sized:
+            self._sized = True
+            self._config.agent.context_window = (
+                estimate_request(messages, kwargs.get("tools"))
+                + self._config.compaction.buffer_tokens
+            )
+        async for event in super().stream_chat(messages, **kwargs):
+            yield event
 
 
 @pytest.fixture
@@ -1086,16 +1111,15 @@ async def test_non_success_worker_stop_preserves_result_and_allows_resume(setup,
     }
     if reason == "max_turns":
         ctx.config.agent.max_turns = 1
-        script = [tool]
+        provider = FakeProvider([tool])
     elif reason == "empty":
-        script = [{"usage": {"input_tokens": 7, "cost_usd": 0.25}}] * 4
+        provider = FakeProvider([{"usage": {"input_tokens": 7, "cost_usd": 0.25}}] * 4)
     else:
         # Sized to overflow mid-script: the first call must fit (and record
         # usage), the budget must run out before the script does.
-        ctx.config.agent.context_window = 3900
+        ctx.config.agent.context_window = 1_000_000
         ctx.config.compaction.buffer_tokens = 200
-        script = [tool, tool, {"text": "summary"}, tool]
-    provider = FakeProvider(script)
+        provider = _OverflowSizingProvider([tool, tool, {"text": "summary"}, tool], ctx.config)
     ctx.extras["provider"] = provider
     try:
         worker = await manager.start(ctx, agent="explore", prompt="work")
