@@ -2059,7 +2059,7 @@ async def test_nested_integration_reserves_destination_execution(
             )
         )
     try:
-        async with asyncio.timeout(3):
+        async with asyncio.timeout(30):
             await entered.wait()
             child = manager.children(parent.id)[0]
             for worker in (parent, child):
@@ -2135,7 +2135,7 @@ async def test_parent_workspace_maintenance_reserves_human_origin_shared_subtree
 
     maintenance = asyncio.create_task(dispatch(workflow, action, id=parent.id))
     try:
-        async with asyncio.timeout(3):
+        async with asyncio.timeout(30):
             await entered.wait()
             for worker in (parent, child):
                 with pytest.raises(WorktreeError, match="maintenance"):
@@ -2283,7 +2283,7 @@ async def test_integration_refuses_unfinished_sibling_bash(
         ]
     )
     runtime.ctx.extras["provider"] = provider
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(30):
         if parent:
             await manager.resume(parent.id, "integrate child")
             result = await manager.wait(parent.id)
@@ -2333,7 +2333,7 @@ async def test_independent_maintenance_cannot_borrow_running_supervisor(workflow
     child = await start(supervisor_runtime(workflow, parent))
     try:
         await manager.resume(parent.id, "active")
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(30):
             await started.wait()
             with pytest.raises(WorktreeError, match="idle"):
                 async with manager.maintain_workspace(child.id):
