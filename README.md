@@ -4,7 +4,6 @@
 just your terminal, an OpenAI-compatible model, and a sharp set of tools.
 
 [![ci](https://github.com/KalvadTech/lecode/actions/workflows/ci.yml/badge.svg)](https://github.com/KalvadTech/lecode/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/KalvadTech/lecode)](https://github.com/KalvadTech/lecode/releases)
 [![license](https://img.shields.io/github/license/KalvadTech/lecode)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.15%2B-7c3aed)](#install)
 
