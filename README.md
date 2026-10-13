@@ -61,6 +61,18 @@ behind your back.
   sessions are always named; every session is resumable, undoable,
   rewindable, exportable.
 
+## How lecode compares
+
+- **IDE-integrated agents** — lecode stays in the terminal: no Electron, no
+  extension host, and your scrollback stays intact.
+- **Other terminal agents** — the defaults differ: a <300-token system
+  prompt instead of a manifest, append-only JSONL sessions you can grep,
+  two hard permission modes with unbypassable denies, and live cost in the
+  statusline. Provider-agnostic by design — any OpenAI-compatible endpoint,
+  including keyless local models; `--setup` imports pi/opencode configs.
+- **What you give up** — no editor integration, a smaller ecosystem,
+  macOS/Linux first (Windows is best-effort), and no PyPI package.
+
 ## Install
 
 ```sh
@@ -224,7 +236,7 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 - [docs/memory.md](docs/memory.md) — the memory store
 - [docs/agents-and-skills.md](docs/agents-and-skills.md) — custom agents and skills
 - [docs/mcp.md](docs/mcp.md) — MCP servers
-- [docs/build-plan.md](docs/build-plan.md) — the full product definition
+- [docs/build-plan.md](docs/build-plan.md) — historical product definition (not the current spec)
 
 ## Development
 

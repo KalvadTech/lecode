@@ -1,0 +1,40 @@
+name: Bug report
+description: Something in lecode is broken
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: lecode version
+      description: GitHub release tag or commit (there is no --version flag).
+      placeholder: v0.3.0 or 7115caf
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Python version, terminal.
+      placeholder: macOS 26.0 · Python 3.15.0 · Ghostty
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and model
+      placeholder: openrouter · deepseek/deepseek-v4-flash
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and output
+      description: >
+        Relevant terminal output, or an excerpt of the session JSONL.
+        Redact API keys and anything private.
+      render: text
