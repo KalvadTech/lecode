@@ -75,7 +75,7 @@ class ReadTool(Tool):
             note = f"image file: {path.name} ({path.suffix[1:]}, {size} bytes)"
             try:
                 attachment = load_attachment(path)
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 attachment = None  # e.g. over the 20 MB cap
             if (
                 attachment is not None

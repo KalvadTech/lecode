@@ -79,7 +79,7 @@ class RecallContext:
                 status = self._sessions.validate_source(
                     ref, project_root=self._project_root, purpose="durable"
                 ).status
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 status = "stale"
             if status != "valid":
                 return {**data, "status": status}
@@ -145,7 +145,7 @@ class RecallContext:
                                 == "valid"
                             ):
                                 proposals.append(proposal)
-                        except (KeyError, ValueError, TypeError):
+                        except KeyError, ValueError, TypeError:
                             continue
                 data["learning"] = {"status": latest.get("status"), "proposals": proposals}
                 counts = latest.get("reason_counts")

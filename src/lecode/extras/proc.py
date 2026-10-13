@@ -22,7 +22,7 @@ def _kill(proc: asyncio.subprocess.Process) -> None:
     """Kill the whole process group — ``sh -c`` children must not survive."""
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    except ProcessLookupError, PermissionError, OSError:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
 
@@ -83,7 +83,7 @@ async def run_proc(
             try:
                 proc.stdin.write(input.encode())
                 await proc.stdin.drain()
-            except (BrokenPipeError, ConnectionResetError):
+            except BrokenPipeError, ConnectionResetError:
                 pass  # Match communicate(): a child may close stdin early.
             finally:
                 proc.stdin.close()

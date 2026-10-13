@@ -184,7 +184,7 @@ def check_modalities(attachments: list[Attachment], model: str, catalog: Catalog
 
     try:
         info = catalog.get(model)
-    except (ModelNotFoundError, AmbiguousModelError):
+    except ModelNotFoundError, AmbiguousModelError:
         return None  # fail open: unknown model, let the provider decide
     supported = set(info.modalities.input)
     missing = sorted({a.media_kind for a in attachments} - supported)
@@ -268,7 +268,7 @@ def extract_attachment_refs(text: str, cwd: Path, store: AttachmentStore) -> str
                     store.add(load_attachment(candidate))
                     skip_space = True
                     continue
-                except (OSError, ValueError):
+                except OSError, ValueError:
                     pass  # leave the token as plain text
         kept.append(word)
     return "".join(kept).strip(" \t")  # trim edges left by removed tokens

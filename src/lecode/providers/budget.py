@@ -40,7 +40,7 @@ class BudgetedProvider:
             raise self.error
         try:
             pricing = self.catalog.get(model).pricing
-        except (ModelNotFoundError, AmbiguousModelError):
+        except ModelNotFoundError, AmbiguousModelError:
             pricing = None
         if (
             pricing is None
@@ -85,7 +85,7 @@ class BudgetedProvider:
     def _settle(self, model: str, usage: dict[str, Any] | None) -> bool:
         try:
             input_tokens, output_tokens, cost = self.usage_totals(model, usage)
-        except (TypeError, ValueError, OverflowError):
+        except TypeError, ValueError, OverflowError:
             self.usage_incomplete = True
             self.error = self.error or CostLimitError("cost limit: request spend is unknown")
             return False

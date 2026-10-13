@@ -290,7 +290,7 @@ class WorktreeManager:
                     or isinstance(data.get("integrated_head"), str)
                 )
             )
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             valid = False
         if not valid:
             raise WorktreeError(f"invalid sidecar for '{name}': unsafe worker destination")

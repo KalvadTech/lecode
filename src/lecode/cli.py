@@ -275,7 +275,7 @@ def fetch_catalog(config: Config, api_key: str | None = None) -> LoadedCatalog:
 
     try:
         return asyncio.run(_fetch())
-    except (AuthError, ValueError):  # same build errors the caller already handles
+    except AuthError, ValueError:  # same build errors the caller already handles
         return LoadedCatalog(Catalog.default(), "empty")
 
 
@@ -1152,7 +1152,7 @@ def run_setup() -> int:
 
     try:
         path = asyncio.run(run_wizard())
-    except (KeyboardInterrupt, EOFError):
+    except KeyboardInterrupt, EOFError:
         typer.echo("error: setup cancelled", err=True)
         return EXIT_ERROR
     typer.echo(f"setup complete — edit {path} for anything else")

@@ -6,7 +6,7 @@ just your terminal, an OpenAI-compatible model, and a sharp set of tools.
 [![ci](https://github.com/KalvadTech/lecode/actions/workflows/ci.yml/badge.svg)](https://github.com/KalvadTech/lecode/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/KalvadTech/lecode)](https://github.com/KalvadTech/lecode/releases)
 [![license](https://img.shields.io/github/license/KalvadTech/lecode)](LICENSE)
-[![python](https://img.shields.io/badge/python-3.13%2B-7c3aed)](#install)
+[![python](https://img.shields.io/badge/python-3.15%2B-7c3aed)](#install)
 
 ![lecode — a cyberpunk viking in glowing purple armor, a neon longship and wireframe mountains behind](docs/assets/lecode-hero.jpg)
 
@@ -70,7 +70,7 @@ uv tool install --force git+https://github.com/KalvadTech/lecode
 
 lecode is distributed from this repository only — it is not on PyPI.
 
-Requires Python 3.13+ and three external binaries on `PATH` (verified at
+Requires Python 3.15+ and three external binaries on `PATH` (verified at
 startup; no auto-download, no fallback):
 
 | binary | powers | install |

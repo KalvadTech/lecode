@@ -58,7 +58,7 @@ def _per_million(pricing: dict[str, Any], key: str) -> float | None:
             return None
         value = float(pricing[key]) * 1_000_000
         return value if math.isfinite(value) and value >= 0 else None
-    except (KeyError, TypeError, ValueError, OverflowError):
+    except KeyError, TypeError, ValueError, OverflowError:
         return None
 
 
@@ -78,7 +78,7 @@ def map_remote_model(item: dict[str, Any]) -> ModelInfo | None:
     top_provider = item.get("top_provider") or {}
     try:
         created = int(item["created"]) if item.get("created") else None
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         created = None
     pricing = item.get("pricing")
     pricing = pricing if isinstance(pricing, dict) else {}

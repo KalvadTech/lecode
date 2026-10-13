@@ -81,7 +81,7 @@ def _load_json(path: Path) -> dict[str, Any]:
                 out.append(c)
                 i += 1
         data = json.loads("".join(out), strict=False)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -537,12 +537,12 @@ async def offer_first_run_setup() -> bool:
     prompt = PromptSession()
     try:
         answer = await prompt.prompt_async("First run — no config found. Run setup? [Y/n] ")
-    except (KeyboardInterrupt, EOFError):
+    except KeyboardInterrupt, EOFError:
         return False
     if answer.strip().lower() in ("n", "no"):
         return False
     try:
         await run_wizard(prompt)
-    except (KeyboardInterrupt, EOFError):
+    except KeyboardInterrupt, EOFError:
         print("\nsetup cancelled — continuing with defaults")
     return True

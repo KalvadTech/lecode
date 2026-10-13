@@ -366,7 +366,7 @@ class WorkerManager:
             return
         try:
             stats = session_stats(self.store, worker.session, catalog=self.root_ctx.catalog)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             worker.usage_incomplete = True
             stats = None
         known = {

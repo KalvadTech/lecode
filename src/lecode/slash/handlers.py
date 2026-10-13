@@ -642,7 +642,7 @@ async def cmd_doctor(app: TuiApp, args: list[str]) -> None:
     model = config.llm.model
     try:
         info = app.catalog.get(model)
-    except (ModelNotFoundError, AmbiguousModelError):
+    except ModelNotFoundError, AmbiguousModelError:
         report("warn", f"model: {model} — not in the catalog (pricing/ctx unknown)")
     else:
         report(

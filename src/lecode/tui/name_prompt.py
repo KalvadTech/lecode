@@ -36,7 +36,7 @@ async def prompt_session_name(
     while True:
         try:
             text = await prompt.prompt_async(prompt_text)
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt, EOFError:
             return None
         error = validate_name(text)
         if error is not None:
@@ -78,7 +78,7 @@ async def pick_session(
     while True:
         try:
             text = await prompt.prompt_async(prompt_text)
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt, EOFError:
             return None
         text = text.strip()
         chosen: MetaRecord | None = None

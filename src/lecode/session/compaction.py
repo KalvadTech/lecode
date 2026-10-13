@@ -48,7 +48,7 @@ def context_limits(model: str, config: Config, catalog: Catalog | None) -> tuple
     if catalog is not None:
         try:
             info = catalog.get(model)
-        except (ModelNotFoundError, AmbiguousModelError):
+        except ModelNotFoundError, AmbiguousModelError:
             pass
         else:
             window = info.context_window
@@ -68,7 +68,7 @@ def priced_usage(usage: dict | None, model: str, catalog: Catalog | None) -> dic
         return usage
     try:
         pricing = catalog.get(model).pricing
-    except (ModelNotFoundError, AmbiguousModelError):
+    except ModelNotFoundError, AmbiguousModelError:
         return usage
     cost = (
         (usage.get("input_tokens") or usage.get("prompt_tokens") or 0) * pricing.prompt
@@ -231,7 +231,7 @@ async def compact_session(
     prefix, tail = messages[:covered], messages[covered:]
     try:
         sources = store.capture_sources(session, prefix)
-    except (ValueError, OSError):
+    except ValueError, OSError:
         return None
     if previous is not None:
         sources = previous.data["source_refs"] + sources

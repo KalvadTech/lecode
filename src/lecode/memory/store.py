@@ -73,7 +73,7 @@ def resolve_project_root(cwd: Path | str) -> Path:
         if common.name == ".git" and common.is_dir():
             return common.parent
         return common
-    except (OSError, UnicodeError, ValueError):
+    except OSError, UnicodeError, ValueError:
         pass
     return root
 

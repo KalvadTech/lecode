@@ -38,7 +38,7 @@ def _kill_tree(proc: asyncio.subprocess.Process) -> None:
 
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    except ProcessLookupError, PermissionError, OSError:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
 

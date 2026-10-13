@@ -161,7 +161,7 @@ class FileTokenStorage:
             return None
         try:
             return acquired + int(expires_in)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
 
     # -- internals -----------------------------------------------------------
@@ -261,7 +261,7 @@ class LoopbackAuthCallback:
             try:
                 try:
                     line = await asyncio.wait_for(reader.readline(), timeout=60)
-                except (TimeoutError, ValueError, EOFError):  # slow, overlong, or broken client
+                except TimeoutError, ValueError, EOFError:  # slow, overlong, or broken client
                     line = b""
                 # "GET /callback?... HTTP/1.1" — one request per login; junk 404s
                 parts = line.decode(errors="replace").split(" ")

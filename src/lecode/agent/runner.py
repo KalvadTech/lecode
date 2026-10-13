@@ -535,7 +535,7 @@ class AgentRunner:
             stop_reason = "cost_limit"
             final_text = ""
             await self._emit(on_event, Error(message=str(exc)))
-        except (asyncio.CancelledError, ProviderError):
+        except asyncio.CancelledError, ProviderError:
             self._persist_partial(history)
             raise
 
@@ -1063,7 +1063,7 @@ class AgentRunner:
                     incomplete=bool(usage and usage.get("incomplete")),
                     cost_known=True,
                 )
-            except (TypeError, ValueError, OverflowError):
+            except TypeError, ValueError, OverflowError:
                 return _CallUsage(0, 0, 0.0, incomplete=True, cost_known=False)
         if not usage:
             return _CallUsage(0, 0, 0.0, incomplete=True, cost_known=False)
@@ -1080,7 +1080,7 @@ class AgentRunner:
             self._catalog = self.ctx.catalog or Catalog.default()
         try:
             pricing = self._catalog.get(model).pricing
-        except (ModelNotFoundError, AmbiguousModelError):
+        except ModelNotFoundError, AmbiguousModelError:
             return _CallUsage(in_tok, out_tok, 0.0, incomplete=True, cost_known=False)
         cost = (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
         return _CallUsage(

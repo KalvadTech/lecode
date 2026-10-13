@@ -336,7 +336,7 @@ class SessionStore:
             lock = self.acquire_lock(
                 session if isinstance(session, Session) else self.open(session_id)
             )
-        except (SessionInUseError, SessionNotFoundError, OSError, ValueError):
+        except SessionInUseError, SessionNotFoundError, OSError, ValueError:
             pass  # Missing/locked sessions keep their pending IDs; no aliases or scans.
         finally:
             if lock is not None:
@@ -363,7 +363,7 @@ class SessionStore:
                     with session.path.open("rb") as stream:
                         os.fsync(stream.fileno())
                 facts.acknowledge_forget(fact_id, session.id)
-        except (OSError, ValueError, sqlite3.Error, SessionNotFoundError):
+        except OSError, ValueError, sqlite3.Error, SessionNotFoundError:
             # A failed fsync may follow a complete append. Keep the attached writer's
             # sequence in sync even though acknowledgement must wait for a retry.
             with contextlib.suppress(OSError):
@@ -496,7 +496,7 @@ class SessionStore:
                             # Visibility needs metadata, not unrelated message payloads.
                             record.message = {}
                     records.append(record)
-        except (ValueError, UnicodeError, OSError):
+        except ValueError, UnicodeError, OSError:
             return SourceSnapshot("stale")
         if not records:
             return SourceSnapshot("stale")
@@ -969,7 +969,7 @@ class SessionStore:
             ]
             if not seqs or seqs != expected:
                 return None
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             return None
         return latest
 

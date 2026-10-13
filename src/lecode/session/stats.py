@@ -110,7 +110,7 @@ def session_stats(
                 catalog = Catalog.default()
             try:
                 pricing = catalog.get(session.meta.model).pricing
-            except (ModelNotFoundError, AmbiguousModelError):
+            except ModelNotFoundError, AmbiguousModelError:
                 usage_incomplete = True
                 continue
             cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1_000_000
@@ -150,7 +150,7 @@ def session_stats(
                 catalog = Catalog.default()
             try:
                 pricing = catalog.get(record.data["model"]).pricing
-            except (ModelNotFoundError, AmbiguousModelError):
+            except ModelNotFoundError, AmbiguousModelError:
                 usage_incomplete = True
                 continue
             cost_usd += (in_tok * pricing.prompt + out_tok * pricing.completion) / 1e6
