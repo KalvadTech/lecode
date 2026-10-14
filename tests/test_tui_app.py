@@ -1521,6 +1521,51 @@ async def test_xterm_shift_character_inserts_character_not_escape_text(
             await task
 
 
+async def test_num_lock_modifier_is_ignored_in_kitty_keys(tmp_path, monkeypatch):
+    """Num Lock adds 128 to Kitty's modifier field: Left, Shift+Enter, Ctrl+Backspace."""
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        try:
+            await wait_for(lambda: app._input_area is not None)
+            inp.send_text("ab\x1b[1;129DX\x1b[13;130uY\x1b[127;133u")
+            await wait_for(lambda: app._input_area.text.startswith("aX"))
+            await wait_for(lambda: app._input_area.text == "aX\nb")
+        finally:
+            inp.send_text("\x03/quit\r")
+            await task
+
+
+@pytest.mark.parametrize(
+    ("sequence", "expected"),
+    [
+        ("\x1b[127;2u", "aX"),  # Shift+Backspace
+        ("\x1b[127;130u", "aX"),  # Shift+Backspace, Num Lock
+        ("\x1b[127;194u", "aX"),  # Shift+Backspace, Caps+Num Lock
+        ("\x1b[27;2;127~", "aX"),  # xterm Shift+Backspace
+        ("\x1b[32;2u", "ab X"),  # Shift+Space
+        ("\x1b[27;2u", "abX"),  # Shift+Esc
+        ("\x1b[49;5u", "abX"),  # Ctrl+1: unbound, swallowed not typed
+        ("\x1b[120;9u", "abX"),  # Super+x
+        ("\x1b[15;3~", "abX"),  # Alt+F5
+    ],
+)
+async def test_unbound_modified_keys_never_leak_escape_text(
+    tmp_path, monkeypatch, sequence, expected
+):
+    app, _, _ = make_app(tmp_path, monkeypatch, [])
+    with create_pipe_input() as inp:
+        task = asyncio.create_task(app.run(input=inp, output=DummyOutput()))
+        try:
+            await wait_for(lambda: app._input_area is not None)
+            inp.send_text(f"ab{sequence}X")
+            await wait_for(lambda: app._input_area.text.endswith("X"))
+            assert app._input_area.text == expected
+        finally:
+            inp.send_text("\x03/quit\r")
+            await task
+
+
 async def test_xterm_alt_unicode_preserves_character(tmp_path, monkeypatch):
     app, _, _ = make_app(tmp_path, monkeypatch, [])
     with create_pipe_input() as inp:

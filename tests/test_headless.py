@@ -461,7 +461,8 @@ async def test_timeout_during_mcp_attachment_cleans_every_resource(monkeypatch):
     assert closed == ["workers", "provider", "background", "mcp", "runtime"]
 
 
-def test_headless_timeout_kills_foreground_shell(headless):
+def test_headless_timeout_kills_foreground_shell(headless, monkeypatch):
+    monkeypatch.setenv("SHELL", "/bin/sh")  # the command uses POSIX `$$`, invalid in fish
     tmp_path, use_script = headless
     pid_file = tmp_path / "shell.pid"
     use_script(

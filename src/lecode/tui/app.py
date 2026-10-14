@@ -251,6 +251,34 @@ def _register_key_sequences() -> None:
     ANSI_SEQUENCES.setdefault("\x1b[27;2;127~", Keys.ControlH)
 
 
+_LOCK_BITS = 0xC0  # Kitty reports Caps Lock (64) and Num Lock (128) as modifiers
+_SHIFT_BIT, _ALT_BIT = 0x01, 0x02
+_CSI_KEY_RE = re.compile(r"\x1b\[(?:27;(\d+);(\d+)~|(\d+);(\d+)([A-Za-z~u]))")
+
+
+def _drop_modifiers(sequence: str, mask: int) -> str | None:
+    """Rewrite a CSI key sequence without the ``mask`` modifier bits.
+
+    None if it is not a modified CSI key or has none of those bits. Num Lock
+    alone turns Left into ``ESC[1;129D``, Ctrl+Backspace into ``ESC[127;133u``.
+    A fully plain key comes back as its bare character (``\x7f``, ``a``).
+    """
+    m = _CSI_KEY_RE.fullmatch(sequence)
+    if m is None:
+        return None
+    xterm = m[1] is not None  # modifyOtherKeys: ESC[27;mod;code~
+    num, mod, final = (m[2], m[1], "~") if xterm else (m[3], m[4], m[5])
+    bits = int(mod) - 1
+    if not bits & mask:
+        return None
+    mod = str((bits & ~mask) + 1)
+    if mod != "1":
+        return f"\x1b[27;{mod};{num}~" if xterm else f"\x1b[{num};{mod}{final}"
+    if xterm or final == "u":
+        return chr(int(num))
+    return f"\x1b[{'' if num == '1' and final.isalpha() else num}{final}"
+
+
 #: Mode sequences that make Shift+Enter distinguishable from plain Enter:
 #: ``ESC [ > 1 u`` pushes the Kitty keyboard protocol's disambiguate flag
 #: (Kitty, Ghostty, WezTerm, foot, Contour) and ``ESC [ > 4 ; 2 m`` sets
@@ -1433,7 +1461,24 @@ class TuiApp:
                     if 127 < code <= 0x10FFFF and chr(code).isprintable():
                         char = chr(code)
                         return char if modified[1] == "2" else (Keys.Escape, char)
-                return None
+                # Num/Caps Lock never matters; Shift only changes keys we do not
+                # bind (Shift+Backspace acts as Backspace). Alt+F-key is Esc then F-key.
+                for mask in (_LOCK_BITS, _SHIFT_BIT, _ALT_BIT):
+                    stripped = _drop_modifiers(sequence, mask)
+                    if stripped is None:
+                        continue
+                    if len(stripped) == 1:
+                        base = get_match(stripped) or stripped
+                    else:
+                        base = match_xterm_unicode(stripped)
+                    if base is None:
+                        return None
+                    if mask != _ALT_BIT:
+                        return base
+                    ok = isinstance(base, str) or (isinstance(base, Keys) and base != Keys.Ignore)
+                    return (Keys.Escape, base) if ok else Keys.Ignore
+                # Any other chord (Ctrl+1, Super+x...) is unbound: swallow it, not as text.
+                return Keys.Ignore if _CSI_KEY_RE.fullmatch(sequence) else None
 
             def normalize_xterm_shift(key: KeyPress) -> None:
                 nonlocal xterm_alt
@@ -1446,7 +1491,7 @@ class TuiApp:
                         key = KeyPress(key.key, key.key)
                 elif key.key == Keys.Escape and key.data.startswith(("\x1b[27;3;", "\x1b[27;4;")):
                     xterm_alt = True
-                if key.data.startswith("\x1b[27;2;") and len(key.key) == 1:
+                if key.data.startswith("\x1b[") and len(key.key) == 1:
                     key = KeyPress(key.key, key.key)
                 feed_key(key)
 
