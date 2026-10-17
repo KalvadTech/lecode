@@ -40,8 +40,9 @@ provides free web search using Fast mode and page fetching for light use,
 with rate limits.
 
 Restart lecode after saving the config. Run `/mcp` to check that `parallel`
-is connected, then `/mcp tools parallel` to see
-`mcp:parallel:web_search` and `mcp:parallel:web_fetch`. Try a prompt like:
+is connected, then `/mcp tools parallel` to see `web_search` and `web_fetch`.
+lecode exposes them to the model as `mcp:parallel:web_search` and
+`mcp:parallel:web_fetch`. Try a prompt like:
 
 ```text
 Use Parallel to find the current Python asyncio TaskGroup documentation.
