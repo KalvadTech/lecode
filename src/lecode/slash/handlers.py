@@ -509,9 +509,15 @@ async def cmd_permissions(app: TuiApp, args: list[str]) -> None:
 
 def _switch_permission_mode(app: TuiApp, mode: PermissionMode) -> None:
     app.set_permission_mode(mode)
-    effective = app.runtime.ctx.permission_checker.mode
-    note = " (kept read-only by --safe or the active agent)" if effective != mode else ""
-    app.feed.info(f"permission mode: {effective}{note}")
+    checker = app.runtime.ctx.permission_checker
+    if checker.hard_read_only:
+        app.feed.info("permission mode: readonly (kept read-only by --safe)")
+    elif checker.mode != mode:
+        app.feed.info(
+            f"permission mode: {mode} (the {app.runtime.agent_name} agent stays read-only)"
+        )
+    else:
+        app.feed.info(f"permission mode: {mode}")
 
 
 async def cmd_toggle(app: TuiApp, args: list[str]) -> None:

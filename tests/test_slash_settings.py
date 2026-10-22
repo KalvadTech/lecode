@@ -228,6 +228,16 @@ async def test_safe_session_workers_stay_in_the_shared_checkout(tmp_path, monkey
         await manager.shutdown()
 
 
+async def test_read_only_agent_switch_reports_both_modes(tmp_path, monkeypatch):
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    assert app.cycle_agent() == "plan"
+    await app.handle_command("/permissions yolo")
+    assert app.runtime.ctx.permission_checker.mode == "readonly"
+    rendered = out.getvalue()
+    assert "permission mode: yolo (the plan agent stays read-only)" in rendered
+    assert "--safe" not in rendered
+
+
 @pytest.mark.parametrize(
     ("command", "why"),
     [
