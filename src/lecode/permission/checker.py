@@ -221,6 +221,17 @@ class PermissionChecker:
             for name in ("memory_write", "memory_correct")
         )
 
+    def for_cwd(self, cwd: Path) -> PermissionChecker:
+        """This policy at another cwd (worktree enter/exit), with a fresh doom tracker.
+
+        Grants, mode, overlay, ancestors and hard read-only all carry over.
+        """
+        moved = PermissionChecker(
+            self._config, self._session, self._mode, cwd, self._overlay, read_only=self._read_only
+        )
+        moved._parent = self._parent
+        return moved
+
     def for_agent(self, overlay: AgentOverlay, *, read_only: bool = False) -> PermissionChecker:
         """Narrow this policy for an agent, sharing session grants and doom tracking."""
         derived = self.for_child(overlay, session_perms=self._session, read_only=read_only)
