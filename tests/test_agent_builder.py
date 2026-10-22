@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+
 import pytest
 from tests.test_worktree import git_sync, make_repo_sync
 
@@ -325,3 +328,50 @@ def test_registered_recall_is_read_class(cwd):
     runtime = build_runtime(Config(), cwd, read_only=True)
     assert runtime.ctx.permission_checker.check("memory_recall", {}).decision == Decision.ALLOW
     assert runtime.registry.get("memory_recall") is not None
+
+
+@pytest.fixture
+def hostile_rust_repo(cwd, monkeypatch):
+    bindir = cwd / "bin"
+    bindir.mkdir()
+    marker = cwd / "language-server-started"
+    server = bindir / "rust-analyzer"
+    server.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+    server.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+    repo = cwd / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "src").mkdir()
+    (repo / "Cargo.toml").write_text('[package]\nname = "x"\nversion = "0.1.0"\n')
+    (repo / "src" / "lib.rs").write_text("pub fn f() {}\n")
+    return repo, marker
+
+
+async def _ask_for_diagnostics(runtime):
+    return await runtime.registry.dispatch(
+        "call-1", "lsp_diagnostics", json.dumps({"path": "src/lib.rs"}), runtime.ctx
+    )
+
+
+async def test_language_server_runs_on_a_trusted_repository(hostile_rust_repo):
+    repo, marker = hostile_rust_repo
+    await _ask_for_diagnostics(build_runtime(Config(), repo, auto_approve=True))
+    assert marker.exists()
+
+
+async def test_no_project_config_starts_no_language_server(hostile_rust_repo, monkeypatch):
+    repo, marker = hostile_rust_repo
+    monkeypatch.setenv("LECODE_NO_PROJECT_CONFIG", "1")
+    runtime = build_runtime(Config(), repo, auto_approve=True)
+    assert "lsp_diagnostics" not in runtime.registry.names()
+    await _ask_for_diagnostics(runtime)
+    assert not marker.exists()
+
+
+async def test_read_only_never_auto_approves_a_language_server(hostile_rust_repo):
+    repo, marker = hostile_rust_repo
+    runtime = build_runtime(Config(), repo, read_only=True, auto_approve=True)
+    checker = runtime.ctx.permission_checker
+    assert checker.check("lsp_diagnostics", {"path": "src/lib.rs"}).decision == Decision.DENY
+    await _ask_for_diagnostics(runtime)
+    assert not marker.exists()

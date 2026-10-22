@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from lecode.agent.prompts import build_system_prompt
 from lecode.agent.tools import ToolContext, ToolRegistry, core_tools
+from lecode.config.loader import project_config_enabled
 from lecode.config.models import Config
 from lecode.context.agents import AgentRegistry, load_agents
 from lecode.context.skills import SkillRegistry, load_skills
@@ -182,7 +183,7 @@ def build_runtime(
         if store is not None:
             store.bind_facts(effective_root, ctx.extras["facts"])
         tools += memory_tools()
-    if config.lsp.enabled:
+    if config.lsp.enabled and project_config_enabled():
         from lecode.lsp.manager import LspManager
         from lecode.lsp.tool import LSP_EXTRA
         from lecode.lsp.tool import make_tool as lsp_tool

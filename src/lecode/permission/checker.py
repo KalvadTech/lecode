@@ -89,6 +89,10 @@ READ_TOOLS = frozenset(
     }
 )
 
+#: Read tools that start a language server, which can run repository code
+#: (build scripts, workspace interpreters), so hard read-only denies them.
+RUNS_REPOSITORY_CODE = frozenset({"lsp_diagnostics"})
+
 #: Doom-loop thresholds (consecutive identical calls).
 DOOM_ASK_AT = 3
 DOOM_DENY_AT = 4
@@ -303,6 +307,8 @@ class PermissionChecker:
         # rules, session grants, or the mode fallback.
         if self._read_only and not self._is_read_class(tool_name, args):
             return CheckResult(Decision.DENY, f"read-only: {tool_name} is not a read-class tool")
+        if self._read_only and tool_name in RUNS_REPOSITORY_CODE:
+            return CheckResult(Decision.DENY, f"read-only: {tool_name} can run repository code")
 
         # Overlay extra allow/ask rules first (last match wins within them).
         if overlay is not None:

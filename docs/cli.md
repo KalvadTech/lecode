@@ -89,9 +89,12 @@ LECODE_NO_PROJECT_CONFIG=1 lecode -p "review this change"   # same as the flag
   flag also sets the variable, so nested lecode processes inherit it.
   `AGENTS.md` and `CLAUDE.md` still enter the prompt as project context;
   they can steer the model but cannot change permissions, run hooks, start
-  servers or choose the endpoint.
+  servers or choose the endpoint. No language server starts either, because
+  a language server can run repository code (rust-analyzer runs build
+  scripts and proc macros, pyright can start a workspace interpreter).
 - `--safe` is hard read-only: no allow rule, session grant, agent or
-  `/permissions` switch can widen it.
+  `/permissions` switch can widen it. It also denies `lsp_diagnostics`, for
+  the same reason.
 - `--allowed-tools` limits every tool, including MCP tools
   (`mcp:<server>:<tool>`) registered after their servers connect.
 
