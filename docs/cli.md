@@ -94,7 +94,12 @@ LECODE_NO_PROJECT_CONFIG=1 lecode -p "review this change"   # same as the flag
   scripts and proc macros, pyright can start a workspace interpreter).
 - `--safe` is hard read-only: no allow rule, session grant, agent or
   `/permissions` switch can widen it. It also denies `lsp_diagnostics`, for
-  the same reason.
+  the same reason. It refuses the commands that write to the repository
+  themselves: `--worktree`, `/worktree` (git worktree add), `/wt-merge`
+  (git merge) and `/init` (writes `AGENTS.md`). It binds the agent, not
+  you: a shell escape (`!cmd`) or `/export <path>` you type still runs.
+  `--safe` alone still loads the repository's configuration, so pair it
+  with `--no-project-config` on a repository you do not trust.
 - `--allowed-tools` limits every tool, including MCP tools
   (`mcp:<server>:<tool>`) registered after their servers connect.
 

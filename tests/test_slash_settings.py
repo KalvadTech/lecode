@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 
+import pytest
 from tests.test_tui_app import make_app, make_blocking_app, wait_for
 
 from lecode.config.models import Config
@@ -225,6 +226,29 @@ async def test_safe_session_workers_stay_in_the_shared_checkout(tmp_path, monkey
         assert not list(tmp_path.rglob("new.txt"))
     finally:
         await manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("command", "why"),
+    [
+        ("/worktree feat", "git worktree add"),
+        ("/wt-merge", "git merge"),
+        ("/init", "writes AGENTS.md"),
+    ],
+)
+async def test_safe_session_refuses_commands_that_write(tmp_path, monkeypatch, command, why):
+    from tests.test_worktree import git_sync, make_repo
+
+    await make_repo(tmp_path)
+    worktrees = git_sync(tmp_path, "worktree", "list")
+    app, _, out = make_app(tmp_path, monkeypatch, [], read_only=True)
+    await app.handle_command(command)
+    rendered = out.getvalue()
+    assert f"{command.split()[0]}: refused under --safe" in rendered
+    assert why in rendered
+    assert app.runtime.ctx.cwd == tmp_path
+    assert git_sync(tmp_path, "worktree", "list") == worktrees
+    assert not (tmp_path / "AGENTS.md").exists()
 
 
 # -- /memory /hooks /agents /queue /btw /copy ----------------------------------------------

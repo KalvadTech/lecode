@@ -98,6 +98,14 @@ def _busy(app: TuiApp) -> bool:
     return False
 
 
+def _refused_under_safe(app: TuiApp, command: str, why: str) -> bool:
+    """Refuse a command that writes to the repository in a ``--safe`` session."""
+    if not app.runtime.ctx.permission_checker.hard_read_only:
+        return False
+    app.feed.error(f"{command}: refused under --safe ({why})")
+    return True
+
+
 def _text_of(message: dict) -> str:
     content = message.get("content")
     if isinstance(content, list):
@@ -983,7 +991,7 @@ async def cmd_share(app: TuiApp, args: list[str]) -> None:
 
 async def cmd_worktree(app: TuiApp, args: list[str]) -> None:
     """``/worktree <name>``: create an isolated worktree+branch and switch in."""
-    if _busy(app):
+    if _busy(app) or _refused_under_safe(app, "/worktree", "git worktree add writes a branch"):
         return
     if app._worktree is not None:
         app.feed.error(f"already in worktree '{app._worktree.name}' (/wt-exit first)")
@@ -1003,7 +1011,7 @@ async def cmd_worktree(app: TuiApp, args: list[str]) -> None:
 async def cmd_wt_merge(app: TuiApp, args: list[str]) -> None:
     """``/wt-merge``: merge the worktree branch back; conflicts are reported,
     never auto-resolved (the merge stays in progress for manual resolution)."""
-    if _busy(app):
+    if _busy(app) or _refused_under_safe(app, "/wt-merge", "git merge writes to the checkout"):
         return
     if app._worktree is None or app._worktree_manager is None:
         app.feed.error("not in a worktree (see /worktree)")
@@ -1229,6 +1237,8 @@ Guidance for AI coding agents working in this repository.
 
 async def cmd_init(app: TuiApp, args: list[str]) -> None:
     """``/init``: write a starter AGENTS.md in the cwd (never overwrites)."""
+    if _refused_under_safe(app, "/init", "it writes AGENTS.md"):
+        return
     path = app.runtime.ctx.cwd / "AGENTS.md"
     if path.exists():
         app.feed.error(f"AGENTS.md already exists: {path}")

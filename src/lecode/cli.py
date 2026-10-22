@@ -1293,6 +1293,12 @@ def callback(
             ):
                 typer.echo("error: --max-cost and --timeout require --prompt", err=True)
                 raise typer.Exit(EXIT_STARTUP)
+            if read_only and worktree is not None:
+                typer.echo(
+                    "error: --worktree is refused under --safe (git worktree add writes a branch)",
+                    err=True,
+                )
+                raise typer.Exit(EXIT_STARTUP)
             if setup:
                 raise typer.Exit(run_setup())
             if hooks_test:

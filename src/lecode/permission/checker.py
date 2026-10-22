@@ -208,6 +208,11 @@ class PermissionChecker:
             or any(not self._is_read_class(tool) for tool, _ in self._session.grants)
         )
 
+    @property
+    def hard_read_only(self) -> bool:
+        """Whether ``--safe`` locked this policy: nothing can widen it."""
+        return self._read_only
+
     def set_mode(self, mode: PermissionMode) -> None:
         """Switch the fallback mode (``/permissions``); overlays still win."""
         self._mode = mode
