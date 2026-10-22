@@ -368,10 +368,30 @@ async def test_no_project_config_starts_no_language_server(hostile_rust_repo, mo
     assert not marker.exists()
 
 
-async def test_read_only_never_auto_approves_a_language_server(hostile_rust_repo):
+async def test_read_only_starts_no_language_server(hostile_rust_repo):
     repo, marker = hostile_rust_repo
     runtime = build_runtime(Config(), repo, read_only=True, auto_approve=True)
-    checker = runtime.ctx.permission_checker
-    assert checker.check("lsp_diagnostics", {"path": "src/lib.rs"}).decision == Decision.DENY
+    assert "lsp_diagnostics" not in runtime.registry.names()
     await _ask_for_diagnostics(runtime)
     assert not marker.exists()
+
+
+async def test_workers_of_a_read_only_session_get_no_language_server(hostile_rust_repo):
+    repo, marker = hostile_rust_repo
+    parent = build_runtime(Config(), repo, read_only=True)
+    worker = build_runtime(Config(), repo, allowed_tools=parent.registry.names())
+    assert "lsp_diagnostics" not in worker.registry.names()
+    await _ask_for_diagnostics(worker)
+    assert not marker.exists()
+
+
+def test_read_only_agent_can_use_the_language_server_in_a_trusted_session(hostile_rust_repo):
+    repo, _ = hostile_rust_repo
+    runtime = build_runtime(Config(), repo)
+    explore = runtime.ctx.extras["agents"].get("explore")
+    checker = runtime.ctx.permission_checker
+    worker_read_only = checker.for_child(explore.overlay).read_only
+    worker = checker.for_child(explore.overlay, read_only=worker_read_only)
+    assert worker.read_only is True
+    assert worker.check("lsp_diagnostics", {"path": "src/lib.rs"}).decision == Decision.ALLOW
+    assert worker.check("write", {"path": "src/lib.rs"}).decision == Decision.DENY

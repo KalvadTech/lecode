@@ -19,7 +19,7 @@ lecode is an agent that runs tools on your machine. Some behaviors are
 **by design**, not vulnerabilities:
 
 - `yolo` permission mode (the default) executes what the model emits.
-  Use `--safe` / `readonly` mode and per-tool rules for untrusted input.
+  Use `--safe` and per-tool rules for untrusted input.
 - A repository's `.lecode/config.toml`, agents, prompts and skills are
   trusted like your own config, and `--safe` alone does not ignore them.
   Run untrusted repositories with `--safe --no-project-config`.

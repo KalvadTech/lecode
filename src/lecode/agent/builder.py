@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from lecode.agent.prompts import build_system_prompt
 from lecode.agent.tools import ToolContext, ToolRegistry, core_tools
-from lecode.config.loader import project_config_enabled
+from lecode.config.loader import lsp_off_reason
 from lecode.config.models import Config
 from lecode.context.agents import AgentRegistry, load_agents
 from lecode.context.skills import SkillRegistry, load_skills
@@ -115,7 +115,8 @@ def build_runtime(
     """Build the permission checker, tool context, registry, and system prompt.
 
     ``read_only`` (``--safe``) makes the checker hard read-only: no allow
-    rule, session grant, agent overlay or mode switch can widen it.
+    rule, session grant, agent overlay or mode switch can widen it, and no
+    language server starts, since one can run repository code.
     ``allowed_tools`` (``--allowed-tools``) limits the registry for its whole
     life, so tools registered later (MCP) are filtered too.
     ``agent_name`` selects a custom agent: its overlay narrows the permission
@@ -183,7 +184,7 @@ def build_runtime(
         if store is not None:
             store.bind_facts(effective_root, ctx.extras["facts"])
         tools += memory_tools()
-    if config.lsp.enabled and project_config_enabled():
+    if lsp_off_reason(config, read_only=read_only) is None:
         from lecode.lsp.manager import LspManager
         from lecode.lsp.tool import LSP_EXTRA
         from lecode.lsp.tool import make_tool as lsp_tool

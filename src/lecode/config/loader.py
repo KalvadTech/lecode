@@ -100,6 +100,21 @@ def project_config_enabled() -> bool:
     return os.environ.get(NO_PROJECT_CONFIG_ENV_VAR, "").strip().lower() in _FALSE_VALUES
 
 
+def lsp_off_reason(config: Config, *, read_only: bool) -> str | None:
+    """Why no language server runs, or ``None`` when one may start.
+
+    A language server can run repository code (build scripts, workspace
+    interpreters), so ``--safe`` and ``--no-project-config`` keep it off.
+    """
+    if not config.lsp.enabled:
+        return "disabled"
+    if read_only:
+        return "off under --safe"
+    if not project_config_enabled():
+        return "off under --no-project-config"
+    return None
+
+
 def find_project_path(
     start: Path, relative: str, accept: Callable[[Path], bool] = Path.is_dir
 ) -> Path | None:

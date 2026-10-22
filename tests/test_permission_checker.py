@@ -603,3 +603,15 @@ def test_per_call_overlay_composes_with_full_policy(parent_decision, overlay_dec
     assert parent.check("read", {"path": "a"}, overlay).decision == expected
     assert parent.check("write", {"path": "a"}, overlay).decision == Decision.DENY
     assert parent.check("read", {"path": "b"}).decision == parent_decision
+
+
+def test_for_cwd_carries_overlay_ancestors_and_hard_read_only(tmp_path):
+    overlay = AgentOverlay(denied_tools=("read",))
+    parent = _checker({"mode": "yolo"})
+    child = parent.for_child(overlay, read_only=True)
+    moved = child.for_cwd(tmp_path)
+    assert moved._overlay is overlay
+    assert moved._parent is parent
+    assert moved.hard_read_only is True
+    assert moved.check("read", {"path": "a.py"}).decision == Decision.DENY
+    assert moved.check("write", {"path": "a.py"}).decision == Decision.DENY

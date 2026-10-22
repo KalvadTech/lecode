@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, cast, get_args
 
 from lecode.agent.tools.background import format_row
 from lecode.agent.tools.workers import HUMAN_CONTROL_EXTRA
+from lecode.config.loader import lsp_off_reason
 from lecode.config.models import PermissionMode, ThinkingLevel
 from lecode.context.resources import load_text
 from lecode.extras.background import BACKGROUND_EXTRA
@@ -721,7 +722,8 @@ async def cmd_doctor(app: TuiApp, args: list[str]) -> None:
     # hooks, lsp, telemetry
     rows = hooks_status(config)
     report("ok", f"hooks: {len(rows)} handler(s)") if rows else report("skip", "hooks: none")
-    report("ok", "lsp: enabled") if config.lsp.enabled else report("skip", "lsp: disabled")
+    lsp_off = lsp_off_reason(config, read_only=app.runtime.ctx.permission_checker.hard_read_only)
+    report("skip", f"lsp: {lsp_off}") if lsp_off else report("ok", "lsp: enabled")
     telemetry = config.telemetry
     if telemetry.enabled:
         bits = []

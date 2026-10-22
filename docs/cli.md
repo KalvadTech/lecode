@@ -93,7 +93,7 @@ LECODE_NO_PROJECT_CONFIG=1 lecode -p "review this change"   # same as the flag
   a language server can run repository code (rust-analyzer runs build
   scripts and proc macros, pyright can start a workspace interpreter).
 - `--safe` is hard read-only: no allow rule, session grant, agent or
-  `/permissions` switch can widen it. It also denies `lsp_diagnostics`, for
+  `/permissions` switch can widen it. It also starts no language server, for
   the same reason. It refuses the commands that write to the repository
   themselves: `--worktree`, `/worktree` (git worktree add), `/wt-merge`
   (git merge) and `/init` (writes `AGENTS.md`). It binds the agent, not
