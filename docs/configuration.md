@@ -241,6 +241,9 @@ See [mcp.md](mcp.md).
 |---|---|---|
 | `enabled` | `true` | spawn language servers, append diagnostics to write/edit |
 
+Language servers stay off under `--safe` and `--no-project-config`, because a
+server can run code from the repository it analyses.
+
 `[lsp.servers.<lang>]` overrides the built-in registry (`command`,
 `file_patterns`) or defines a new language. Diagnostics are fail-open: LSP
 trouble never blocks the agent.
