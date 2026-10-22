@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from lecode.context.agents_md import find_git_root
+from lecode.config.loader import find_project_path
 from lecode.context.frontmatter import split_frontmatter
 
 SKILL_FILENAME = "SKILL.md"
@@ -49,19 +49,7 @@ def global_skills_dir() -> Path:
 
 def project_skills_dir(cwd: Path | None = None) -> Path | None:
     """Nearest ``.agents/skills/`` from ``cwd`` up to the git root."""
-    start = (cwd or Path.cwd()).resolve()
-    stop = find_git_root(start) or start
-    current = start
-    while True:
-        candidate = current / ".agents" / "skills"
-        if candidate.is_dir():
-            return candidate
-        if current == stop:
-            return None
-        parent = current.parent
-        if parent == current:
-            return None
-        current = parent
+    return find_project_path(cwd or Path.cwd(), ".agents/skills")
 
 
 def _load_pack(skill_file: Path, warnings: list[str]) -> Skill | None:

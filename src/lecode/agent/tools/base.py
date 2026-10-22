@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -145,13 +146,19 @@ async def authorize_tool(
 
 
 class ToolRegistry:
-    def __init__(self, tools: list[Tool] | None = None) -> None:
+    """Named tools; ``allowed`` limits every registration, including later ones."""
+
+    def __init__(
+        self, tools: list[Tool] | None = None, *, allowed: Iterable[str] | None = None
+    ) -> None:
         self._tools: dict[str, Tool] = {}
+        self._allowed = frozenset(allowed) if allowed is not None else None
         for tool in tools or []:
             self.register(tool)
 
     def register(self, tool: Tool) -> None:
-        self._tools[tool.name] = tool
+        if self._allowed is None or tool.name in self._allowed:
+            self._tools[tool.name] = tool
 
     def unregister(self, name: str) -> None:
         """Drop one tool by exact name (no-op when unknown)."""

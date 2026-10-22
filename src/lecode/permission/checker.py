@@ -171,8 +171,10 @@ class PermissionChecker:
     @property
     def mode(self) -> PermissionMode:
         """The narrowest fallback mode in this policy's ancestry."""
-        if (self._overlay is not None and self._overlay.mode == "readonly") or (
-            self._parent is not None and self._parent.mode == "readonly"
+        if (
+            self._read_only
+            or (self._overlay is not None and self._overlay.mode == "readonly")
+            or (self._parent is not None and self._parent.mode == "readonly")
         ):
             return "readonly"
         return self._mode
@@ -202,6 +204,14 @@ class PermissionChecker:
             or any(not self._is_read_class(tool) for tool, _ in self._session.grants)
         )
 
+    @property
+    def hard_read_only(self) -> bool:
+        """Whether this policy was built read-only: no rule, grant or mode switch can widen it.
+
+        True for a ``--safe`` session and for a worker whose agent is read-only.
+        """
+        return self._read_only
+
     def set_mode(self, mode: PermissionMode) -> None:
         """Switch the fallback mode (``/permissions``); overlays still win."""
         self._mode = mode
@@ -214,6 +224,17 @@ class PermissionChecker:
             self._policy_decision(name, {}, ("",)).decision == Decision.ALLOW
             for name in ("memory_write", "memory_correct")
         )
+
+    def for_cwd(self, cwd: Path) -> PermissionChecker:
+        """This policy at another cwd (worktree enter/exit), with a fresh doom tracker.
+
+        Grants, mode, overlay, ancestors and hard read-only all carry over.
+        """
+        moved = PermissionChecker(
+            self._config, self._session, self._mode, cwd, self._overlay, read_only=self._read_only
+        )
+        moved._parent = self._parent
+        return moved
 
     def for_agent(self, overlay: AgentOverlay, *, read_only: bool = False) -> PermissionChecker:
         """Narrow this policy for an agent, sharing session grants and doom tracking."""

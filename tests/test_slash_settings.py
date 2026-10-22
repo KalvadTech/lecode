@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
 
+import pytest
 from tests.test_tui_app import make_app, make_blocking_app, wait_for
 
 from lecode.config.models import Config
@@ -171,6 +173,92 @@ async def test_toggle_cycles_readonly_yolo(tmp_path, monkeypatch):
     await app.handle_command("/toggle")
     assert app.runtime.ctx.permission_checker.mode == "yolo"
     assert out.getvalue().count("permission mode:") >= 2
+
+
+async def test_safe_session_stays_readonly_and_says_so(tmp_path, monkeypatch):
+    app, _, out = make_app(tmp_path, monkeypatch, [], read_only=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for command in ("/permissions yolo", "/toggle", "/mode yolo"):
+        await app.handle_command(command)
+        checker = app.runtime.ctx.permission_checker
+        assert checker.mode == "readonly"
+        assert checker.check("bash", {"command": "ls"}).decision == Decision.DENY
+        app.set_cwd(elsewhere)
+    rendered = out.getvalue()
+    assert "permission mode: yolo" not in rendered
+    assert rendered.count("permission mode: readonly (kept read-only by --safe") == 3
+
+
+async def test_safe_session_workers_stay_in_the_shared_checkout(tmp_path, monkeypatch):
+    from tests.fakes import FakeProvider
+    from tests.test_worker_controls import commit, git
+
+    app, _, _ = make_app(tmp_path, monkeypatch, [], read_only=True)
+    git(tmp_path, "init", "-b", "main")
+    commit(tmp_path, "base\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    app.set_cwd(elsewhere)
+    await app.handle_command("/permissions yolo")
+    ctx = app.runtime.ctx
+    ctx.auto_approve = True
+    write = {"path": "new.txt", "content": "written"}
+    ctx.extras["provider"] = FakeProvider(
+        [
+            {"tool_calls": [{"id": "w", "name": "write", "arguments": json.dumps(write)}]},
+            {"text": "done"},
+        ]
+    )
+    manager = ctx.extras["workers"]
+    try:
+        _, result = await ctx.extras["registry"].dispatch_result(
+            "create",
+            "task",
+            '{"agent":"general","prompt":"Implement","run_in_background":true}',
+            ctx,
+        )
+        assert not result.is_error, result.content
+        worker = manager.get(result.metadata["worker_id"])
+        await manager.wait(worker.id)
+        assert worker.worktree is None
+        assert worker.cwd == elsewhere
+        assert not list(tmp_path.rglob("new.txt"))
+    finally:
+        await manager.shutdown()
+
+
+async def test_read_only_agent_switch_reports_both_modes(tmp_path, monkeypatch):
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    assert app.cycle_agent() == "plan"
+    await app.handle_command("/permissions yolo")
+    assert app.runtime.ctx.permission_checker.mode == "readonly"
+    rendered = out.getvalue()
+    assert "permission mode: yolo (the plan agent stays read-only)" in rendered
+    assert "--safe" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("command", "why"),
+    [
+        ("/worktree feat", "git worktree add"),
+        ("/wt-merge", "git merge"),
+        ("/init", "writes AGENTS.md"),
+    ],
+)
+async def test_safe_session_refuses_commands_that_write(tmp_path, monkeypatch, command, why):
+    from tests.test_worktree import git_sync, make_repo
+
+    await make_repo(tmp_path)
+    worktrees = git_sync(tmp_path, "worktree", "list")
+    app, _, out = make_app(tmp_path, monkeypatch, [], read_only=True)
+    await app.handle_command(command)
+    rendered = out.getvalue()
+    assert f"{command.split()[0]}: refused under --safe" in rendered
+    assert why in rendered
+    assert app.runtime.ctx.cwd == tmp_path
+    assert git_sync(tmp_path, "worktree", "list") == worktrees
+    assert not (tmp_path / "AGENTS.md").exists()
 
 
 # -- /memory /hooks /agents /queue /btw /copy ----------------------------------------------

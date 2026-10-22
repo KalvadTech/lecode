@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, cast, get_args
 
 from lecode.agent.tools.background import format_row
 from lecode.agent.tools.workers import HUMAN_CONTROL_EXTRA
+from lecode.config.loader import lsp_off_reason
 from lecode.config.models import PermissionMode, ThinkingLevel
 from lecode.context.resources import load_text
 from lecode.extras.background import BACKGROUND_EXTRA
@@ -96,6 +97,14 @@ def _busy(app: TuiApp) -> bool:
         app.feed.error("finish or cancel the current turn first (Ctrl-C)")
         return True
     return False
+
+
+def _refused_under_safe(app: TuiApp, command: str, why: str) -> bool:
+    """Refuse a command that writes to the repository in a ``--safe`` session."""
+    if not app.runtime.ctx.permission_checker.hard_read_only:
+        return False
+    app.feed.error(f"{command}: refused under --safe ({why})")
+    return True
 
 
 def _text_of(message: dict) -> str:
@@ -496,16 +505,27 @@ async def cmd_permissions(app: TuiApp, args: list[str]) -> None:
     if mode not in PERMISSION_MODES:
         app.feed.error(f"unknown mode: {mode} (modes: {', '.join(PERMISSION_MODES)})")
         return
+    _switch_permission_mode(app, mode)
+
+
+def _switch_permission_mode(app: TuiApp, mode: PermissionMode) -> None:
     app.set_permission_mode(mode)
-    app.feed.info(f"permission mode: {mode}")
+    checker = app.runtime.ctx.permission_checker
+    if checker.hard_read_only:
+        app.feed.info("permission mode: readonly (kept read-only by --safe)")
+    elif checker.mode != mode:
+        app.feed.info(
+            f"permission mode: {mode} (the {app.runtime.agent_name} agent stays read-only)"
+        )
+    else:
+        app.feed.info(f"permission mode: {mode}")
 
 
 async def cmd_toggle(app: TuiApp, args: list[str]) -> None:
     """``/toggle``: cycle the readonly ↔ yolo pair."""
     current = app.runtime.ctx.permission_checker.mode
     mode = "readonly" if current == "yolo" else "yolo"
-    app.set_permission_mode(mode)
-    app.feed.info(f"permission mode: {mode}")
+    _switch_permission_mode(app, mode)
 
 
 # -- pierre ---------------------------------------------------------------------
@@ -702,7 +722,8 @@ async def cmd_doctor(app: TuiApp, args: list[str]) -> None:
     # hooks, lsp, telemetry
     rows = hooks_status(config)
     report("ok", f"hooks: {len(rows)} handler(s)") if rows else report("skip", "hooks: none")
-    report("ok", "lsp: enabled") if config.lsp.enabled else report("skip", "lsp: disabled")
+    lsp_off = lsp_off_reason(config, read_only=app.runtime.ctx.permission_checker.hard_read_only)
+    report("skip", f"lsp: {lsp_off}") if lsp_off else report("ok", "lsp: enabled")
     telemetry = config.telemetry
     if telemetry.enabled:
         bits = []
@@ -978,7 +999,7 @@ async def cmd_share(app: TuiApp, args: list[str]) -> None:
 
 async def cmd_worktree(app: TuiApp, args: list[str]) -> None:
     """``/worktree <name>``: create an isolated worktree+branch and switch in."""
-    if _busy(app):
+    if _busy(app) or _refused_under_safe(app, "/worktree", "git worktree add writes a branch"):
         return
     if app._worktree is not None:
         app.feed.error(f"already in worktree '{app._worktree.name}' (/wt-exit first)")
@@ -998,7 +1019,7 @@ async def cmd_worktree(app: TuiApp, args: list[str]) -> None:
 async def cmd_wt_merge(app: TuiApp, args: list[str]) -> None:
     """``/wt-merge``: merge the worktree branch back; conflicts are reported,
     never auto-resolved (the merge stays in progress for manual resolution)."""
-    if _busy(app):
+    if _busy(app) or _refused_under_safe(app, "/wt-merge", "git merge writes to the checkout"):
         return
     if app._worktree is None or app._worktree_manager is None:
         app.feed.error("not in a worktree (see /worktree)")
@@ -1224,6 +1245,8 @@ Guidance for AI coding agents working in this repository.
 
 async def cmd_init(app: TuiApp, args: list[str]) -> None:
     """``/init``: write a starter AGENTS.md in the cwd (never overwrites)."""
+    if _refused_under_safe(app, "/init", "it writes AGENTS.md"):
+        return
     path = app.runtime.ctx.cwd / "AGENTS.md"
     if path.exists():
         app.feed.error(f"AGENTS.md already exists: {path}")

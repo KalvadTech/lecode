@@ -2,8 +2,10 @@
 
 Both go through the :class:`~lecode.lsp.manager.LspManager` installed under
 ``ctx.extras["lsp"]`` by ``build_runtime`` (absent when ``[lsp] enabled =
-false``). Everything is fail-open: a total ~3s budget caps the query and any
-error yields no output, so LSP trouble never blocks the agent.
+false``, or under ``--safe`` / ``--no-project-config``, since a language
+server can run repository code). Everything is fail-open: a total ~3s budget
+caps the query and any error yields no output, so LSP trouble never blocks the
+agent.
 """
 
 from __future__ import annotations

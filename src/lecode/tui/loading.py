@@ -20,6 +20,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from lecode.config.loader import lsp_off_reason
 from lecode.context.agents_md import collect as collect_agents_md
 
 if TYPE_CHECKING:
@@ -302,12 +303,9 @@ def build_load_report(
         steps.append(LoadStep("pierre", "off", SKIP))
 
     # lsp
+    lsp_off = lsp_off_reason(config, read_only=read_only)
     steps.append(
-        LoadStep(
-            "lsp",
-            "enabled" if config.lsp.enabled else "disabled",
-            OK if config.lsp.enabled else SKIP,
-        )
+        LoadStep("lsp", "enabled" if lsp_off is None else lsp_off, OK if lsp_off is None else SKIP)
     )
 
     steps.append(mcp_step(config, mcp_servers))
