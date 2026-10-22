@@ -55,6 +55,42 @@ def test_subagent_discovery_respects_overrides(cwd):
     assert "- helper: Custom helper" in runtime.system_prompt
 
 
+def _plant_project_agent(root):
+    from tests.test_agents import write_agent
+
+    write_agent(root / ".lecode" / "agents", "build", "description: Planted", "PLANTED AGENT")
+
+
+def _plant_project_skill(root):
+    from tests.test_skills import write_skill
+
+    write_skill(root / ".agents" / "skills", "planted", "description: PLANTED SKILL")
+
+
+def _plant_project_prompt(root):
+    prompts = root / ".lecode" / "prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "minimal.md").write_text("PLANTED PROMPT\n")
+
+
+@pytest.mark.parametrize(
+    ("plant", "marker"),
+    [
+        (_plant_project_agent, "PLANTED AGENT"),
+        (_plant_project_skill, "PLANTED SKILL"),
+        (_plant_project_prompt, "PLANTED PROMPT"),
+    ],
+)
+def test_untrusted_project_layers_stay_out_of_the_runtime(cwd, monkeypatch, plant, marker):
+    (cwd / ".git").mkdir()
+    plant(cwd)
+    assert marker in build_runtime(Config(), cwd).system_prompt
+    monkeypatch.setenv("LECODE_NO_PROJECT_CONFIG", "1")
+    runtime = build_runtime(Config(), cwd)
+    assert marker not in runtime.system_prompt
+    assert runtime.system_prompt.startswith("You are lecode")
+
+
 def test_runtime_rebinding_releases_lazy_session_fact_connection(cwd):
     from pathlib import Path
 
@@ -75,11 +111,27 @@ def test_runtime_rebinding_releases_lazy_session_fact_connection(cwd):
 
 
 def test_read_only_mode_denies_writes(cwd):
-    runtime = build_runtime(Config(), cwd, mode="readonly")
+    runtime = build_runtime(Config(), cwd, read_only=True)
     checker = runtime.ctx.permission_checker
     assert checker.check("write", {"file_path": "x.txt"}).decision == Decision.DENY
     assert checker.check("bash", {"command": "ls"}).decision == Decision.DENY
     assert checker.check("read", {"file_path": "x.txt"}).decision == Decision.ALLOW
+
+
+def test_read_only_is_not_widened_by_allow_rules_or_mode_switch(cwd):
+    config = Config.model_validate(
+        {
+            "permissions": {
+                "rules": {"allow": {"bash": [{"pattern": "*"}], "write": [{"pattern": "*"}]}}
+            }
+        }
+    )
+    runtime = build_runtime(config, cwd, read_only=True)
+    checker = runtime.ctx.permission_checker
+    checker.set_mode("yolo")
+    assert checker.check("bash", {"command": "touch pwned"}).decision == Decision.DENY
+    assert checker.check("write", {"file_path": "x.txt"}).decision == Decision.DENY
+    assert checker.read_only is True
 
 
 def test_auto_approve(cwd):
@@ -270,6 +322,6 @@ def test_disabled_memory_never_creates_store_or_migrates(cwd):
 
 
 def test_registered_recall_is_read_class(cwd):
-    runtime = build_runtime(Config(), cwd, mode="readonly")
+    runtime = build_runtime(Config(), cwd, read_only=True)
     assert runtime.ctx.permission_checker.check("memory_recall", {}).decision == Decision.ALLOW
     assert runtime.registry.get("memory_recall") is not None

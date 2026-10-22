@@ -239,9 +239,24 @@ async def test_dispatch_round_trip(runtime_with_mcp):
     assert message["content"] == "echo: via dispatch"
 
 
+@pytest.mark.parametrize(
+    ("allowed", "expected"),
+    [(["read"], ["read"]), (["read", "mcp:test:echo"], ["mcp:test:echo", "read"])],
+)
+async def test_allowed_tools_filters_mcp_tools(tmp_path, monkeypatch, allowed, expected):
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    runtime = build_runtime(mcp_config(), tmp_path, allowed_tools=allowed)
+    manager = await attach_mcp(runtime.registry, runtime.ctx)
+    try:
+        assert manager.status()[0].tools > 0
+        assert runtime.registry.names() == expected
+    finally:
+        await manager.shutdown()
+
+
 async def test_dispatch_denied_in_readonly_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
-    runtime = build_runtime(mcp_config(), tmp_path, mode="readonly")
+    runtime = build_runtime(mcp_config(), tmp_path, read_only=True)
     manager = await attach_mcp(runtime.registry, runtime.ctx)
     try:
         message = await runtime.registry.dispatch(

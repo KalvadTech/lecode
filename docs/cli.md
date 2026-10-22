@@ -71,6 +71,30 @@ connection through model calls, tools, and review. Synchronous startup and
 resource cleanup are outside this deadline, so process exit can occur later.
 Neither flag applies to interactive, loop, or chain mode.
 
+## Untrusted repositories
+
+A repository can configure lecode: `.lecode/config.toml` (permissions,
+hooks, MCP servers, provider and endpoint settings), `.lecode/agents/`,
+`.lecode/prompts/`, and `.agents/skills/`. When lecode runs on a repository
+you do not control, such as a pull request under review or a CI checkout,
+ignore all of it:
+
+```sh
+lecode -p "review this change" --no-project-config --safe --allowed-tools read,grep
+LECODE_NO_PROJECT_CONFIG=1 lecode -p "review this change"   # same as the flag
+```
+
+- `--no-project-config` (or `LECODE_NO_PROJECT_CONFIG=1`) loads only the
+  global config, global agents, global skills and the embedded prompts. The
+  flag also sets the variable, so nested lecode processes inherit it.
+  `AGENTS.md` and `CLAUDE.md` still enter the prompt as project context;
+  they can steer the model but cannot change permissions, run hooks, start
+  servers or choose the endpoint.
+- `--safe` is hard read-only: no allow rule, session grant, agent or
+  `/permissions` switch can widen it.
+- `--allowed-tools` limits every tool, including MCP tools
+  (`mcp:<server>:<tool>`) registered after their servers connect.
+
 ## `--output-format json`
 
 `--output-format json` works with `--prompt`, `--loop`, and `--chain`.

@@ -496,16 +496,21 @@ async def cmd_permissions(app: TuiApp, args: list[str]) -> None:
     if mode not in PERMISSION_MODES:
         app.feed.error(f"unknown mode: {mode} (modes: {', '.join(PERMISSION_MODES)})")
         return
+    _switch_permission_mode(app, mode)
+
+
+def _switch_permission_mode(app: TuiApp, mode: PermissionMode) -> None:
     app.set_permission_mode(mode)
-    app.feed.info(f"permission mode: {mode}")
+    effective = app.runtime.ctx.permission_checker.mode
+    note = " (kept read-only by --safe or the active agent)" if effective != mode else ""
+    app.feed.info(f"permission mode: {effective}{note}")
 
 
 async def cmd_toggle(app: TuiApp, args: list[str]) -> None:
     """``/toggle``: cycle the readonly ↔ yolo pair."""
     current = app.runtime.ctx.permission_checker.mode
     mode = "readonly" if current == "yolo" else "yolo"
-    app.set_permission_mode(mode)
-    app.feed.info(f"permission mode: {mode}")
+    _switch_permission_mode(app, mode)
 
 
 # -- pierre ---------------------------------------------------------------------

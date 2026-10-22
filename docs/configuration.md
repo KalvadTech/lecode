@@ -7,7 +7,9 @@ lecode reads TOML config only (`config.toml`):
   on first run.
 - **Project**: `.lecode/config.toml`, found by walking from the cwd up to
   the git root. Deep-merged over the global config: dicts merge recursively,
-  scalars and lists replace.
+  scalars and lists replace. `--no-project-config` or
+  `LECODE_NO_PROJECT_CONFIG=1` skips it, together with project agents,
+  skills and prompts (see [Untrusted repositories](cli.md#untrusted-repositories)).
 - **CLI flags** apply on top of both (`--model`, `--thinking`, `--header`, `--provider`, `--base-url`,
   `--api-key`, …).
 

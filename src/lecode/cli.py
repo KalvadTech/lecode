@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import re
 import sys
 from collections.abc import Callable, Coroutine
@@ -30,7 +31,12 @@ from lecode.agent.builder import build_runtime, refresh_system_prompt
 from lecode.agent.runner import AgentRunner, RunResult
 from lecode.agent.tools.base import ToolContext
 from lecode.auth import AuthError, resolve_api_key
-from lecode.config.loader import config_dir, find_config_file, load_config
+from lecode.config.loader import (
+    NO_PROJECT_CONFIG_ENV_VAR,
+    config_dir,
+    find_config_file,
+    load_config,
+)
 from lecode.config.models import AuthPolicy, Config, ThinkingLevel
 from lecode.deps import find_missing_binaries, format_missing_error
 from lecode.extras import herdr
@@ -486,7 +492,7 @@ def run_headless(
         session=session,
         store=store,
         auto_approve=True,
-        mode="readonly" if read_only else None,
+        read_only=read_only,
         allowed_tools=_tool_filter(allowed_tools),
         catalog=models.catalog,
         project_root=project_root,
@@ -660,7 +666,7 @@ def run_loop_mode(
         session=session,
         store=store,
         auto_approve=True,
-        mode="readonly" if read_only else None,
+        read_only=read_only,
         allowed_tools=_tool_filter(allowed_tools),
         catalog=models.catalog,
     )
@@ -801,7 +807,7 @@ def run_chain_mode(
         session=session,
         store=store,
         auto_approve=True,
-        mode="readonly" if read_only else None,
+        read_only=read_only,
         allowed_tools=_tool_filter(allowed_tools),
         catalog=chain_catalog,
     )
@@ -1032,7 +1038,7 @@ def run_interactive(
         cwd,
         session=session,
         store=store,
-        mode="readonly" if read_only else None,
+        read_only=read_only,
         allowed_tools=_tool_filter(allowed_tools),
         agent_name=session.meta.agent,
         project_root=project_root,
@@ -1204,6 +1210,14 @@ def callback(
     allowed_tools: Annotated[
         str | None, typer.Option("--allowed-tools", help="Comma-separated tool allowlist.")
     ] = None,
+    no_project_config: Annotated[
+        bool,
+        typer.Option(
+            "--no-project-config",
+            help="Ignore everything the repository supplies: .lecode/config.toml, "
+            "project agents, skills and prompts (also LECODE_NO_PROJECT_CONFIG=1).",
+        ),
+    ] = False,
     max_turns: Annotated[
         int | None, typer.Option("--max-turns", help="Maximum agent turns.")
     ] = None,
@@ -1263,6 +1277,8 @@ def callback(
     ] = None,
 ) -> None:
     """lecode — minimalist terminal AI coding agent."""
+    if no_project_config:
+        os.environ[NO_PROJECT_CONFIG_ENV_VAR] = "1"
     headers = _parse_headers(header)
     output = _RunOutput(model=model) if output_format == "json" else None
     try:

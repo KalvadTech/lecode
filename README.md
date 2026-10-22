@@ -222,7 +222,8 @@ can react precisely. Full contract: [docs/cli.md](docs/cli.md).
 
 Global config: `~/.config/lecode/config.toml` (override the directory with
 `LECODE_CONFIG_DIR`); a project-local `.lecode/config.toml` deep-merges over
-it. TOML is the only accepted format. The setup wizard writes the
+it. `--no-project-config` ignores it and every other repository-supplied
+layer, for untrusted checkouts. TOML is the only accepted format. The setup wizard writes the
 file with `0600` permissions because it can hold an API key — prefer the
 `OPENROUTER_API_KEY` / `OPENAI_API_KEY` env vars to keep secrets out of it.
 

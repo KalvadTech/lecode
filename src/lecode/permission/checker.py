@@ -171,8 +171,10 @@ class PermissionChecker:
     @property
     def mode(self) -> PermissionMode:
         """The narrowest fallback mode in this policy's ancestry."""
-        if (self._overlay is not None and self._overlay.mode == "readonly") or (
-            self._parent is not None and self._parent.mode == "readonly"
+        if (
+            self._read_only
+            or (self._overlay is not None and self._overlay.mode == "readonly")
+            or (self._parent is not None and self._parent.mode == "readonly")
         ):
             return "readonly"
         return self._mode

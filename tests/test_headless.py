@@ -95,6 +95,31 @@ def test_headless_prints_final_text_and_cost(headless, monkeypatch):
     assert float(match.group(1)) == pytest.approx(0.0, abs=1e-9)
 
 
+@pytest.mark.parametrize(
+    ("args", "env", "trusted"),
+    [
+        ([], "", True),
+        (["--no-project-config"], "", False),
+        ([], "1", False),
+    ],
+)
+def test_untrusted_repository_hooks_never_run(headless, monkeypatch, args, env, trusted):
+    tmp_path, use_script = headless
+    use_script([{"text": "done"}])
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".lecode").mkdir()
+    marker = tmp_path / "hook-ran"
+    (tmp_path / ".lecode" / "config.toml").write_text(
+        "[hooks]\nSessionStart = [" + json.dumps(f"touch {marker}") + "]\n"
+    )
+    monkeypatch.setenv("LECODE_NO_PROJECT_CONFIG", env)
+
+    result = runner.invoke(app, ["-p", "hello", *args])
+
+    assert result.exit_code == EXIT_OK, result.output
+    assert marker.exists() is trusted
+
+
 @pytest.mark.parametrize("level", [None, "none", "low", "medium", "high"])
 @pytest.mark.parametrize("output_format", ["text", "json"])
 def test_headless_thinking_reaches_model_request(headless, monkeypatch, level, output_format):

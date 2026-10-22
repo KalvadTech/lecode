@@ -19,9 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, get_args
 
-from lecode.config.loader import config_dir
+from lecode.config.loader import config_dir, find_project_path
 from lecode.config.models import PermissionMode, PermissionRuleSet
-from lecode.context.agents_md import find_git_root
 from lecode.context.frontmatter import split_frontmatter
 from lecode.permission.builtin import BUILTIN_AGENT_OVERLAYS
 from lecode.permission.checker import AgentOverlay
@@ -103,19 +102,7 @@ def global_agents_dir() -> Path:
 
 def project_agents_dir(cwd: Path | None = None) -> Path | None:
     """Nearest ``.lecode/agents/`` from ``cwd`` up to the git root."""
-    start = (cwd or Path.cwd()).resolve()
-    stop = find_git_root(start) or start
-    current = start
-    while True:
-        candidate = current / ".lecode" / "agents"
-        if candidate.is_dir():
-            return candidate
-        if current == stop:
-            return None
-        parent = current.parent
-        if parent == current:
-            return None
-        current = parent
+    return find_project_path(cwd or Path.cwd(), ".lecode/agents")
 
 
 def _normalize_rules(raw: Any) -> dict[str, Any]:

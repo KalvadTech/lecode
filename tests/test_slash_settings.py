@@ -173,6 +173,18 @@ async def test_toggle_cycles_readonly_yolo(tmp_path, monkeypatch):
     assert out.getvalue().count("permission mode:") >= 2
 
 
+async def test_safe_session_stays_readonly_and_says_so(tmp_path, monkeypatch):
+    app, _, out = make_app(tmp_path, monkeypatch, [], read_only=True)
+    checker = app.runtime.ctx.permission_checker
+    for command in ("/permissions yolo", "/toggle", "/mode yolo"):
+        await app.handle_command(command)
+        assert checker.mode == "readonly"
+        assert checker.check("bash", {"command": "ls"}).decision == Decision.DENY
+    rendered = out.getvalue()
+    assert "permission mode: yolo" not in rendered
+    assert rendered.count("permission mode: readonly (kept read-only by --safe") == 3
+
+
 # -- /memory /hooks /agents /queue /btw /copy ----------------------------------------------
 
 
