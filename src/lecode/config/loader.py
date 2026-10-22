@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from lecode.config.migrations import migrate_config
 from lecode.config.models import LEGACY_PERMISSION_MODES, Config
+from lecode.context.agents_md import find_git_root
 
 #: Environment variable overriding the global config directory.
 CONFIG_ENV_VAR = "LECODE_CONFIG_DIR"
@@ -94,18 +95,6 @@ def _load_raw(path: Path) -> dict[str, Any]:
     return data
 
 
-def _find_git_root(start: Path) -> Path | None:
-    """Walk up from ``start`` to the nearest directory containing ``.git``."""
-    current = start.resolve()
-    while True:
-        if (current / ".git").exists():
-            return current
-        parent = current.parent
-        if parent == current:
-            return None
-        current = parent
-
-
 def project_config_enabled() -> bool:
     """Whether repository-supplied config layers may load (``LECODE_NO_PROJECT_CONFIG``)."""
     return os.environ.get(NO_PROJECT_CONFIG_ENV_VAR, "").strip().lower() in _FALSE_VALUES
@@ -121,7 +110,7 @@ def find_project_path(
     """
     if not project_config_enabled():
         return None
-    root = _find_git_root(start)
+    root = find_git_root(start)
     current = start.resolve()
     stop = root if root is not None else current
     while True:
