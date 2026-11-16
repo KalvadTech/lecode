@@ -9,10 +9,10 @@ dependencies = [
     "prompt_toolkit==3.0.53",
     "rich==15.0.0",
     "httpx==0.28.1",
-    "pydantic==2.14.0",
+    "pydantic==2.14.3",
     "PyYAML==6.0.3",
     "mcp==2.3.0",
-    "typer==0.27.3",
+    "typer==0.29.1",
 ]
 
 [project.scripts]
@@ -20,9 +20,9 @@ lecode = "lecode.cli:main"
 
 [project.optional-dependencies]
 telemetry = [
-    "opentelemetry-exporter-otlp-proto-http==1.45.1",
-    "opentelemetry-sdk==1.45.1",
-    "sentry-sdk==2.71.0",
+    "opentelemetry-exporter-otlp-proto-http==1.45.2",
+    "opentelemetry-sdk==1.45.2",
+    "sentry-sdk==2.75.0",
 ]
 
 [build-system]
@@ -35,10 +35,10 @@ packages = ["src/lecode"]
 [dependency-groups]
 dev = [
     "pyte==0.8.2",
-    "pytest==9.1.1",
-    "pytest-asyncio==1.4.0",
+    "pytest==9.2.0",
+    "pytest-asyncio==1.5.0",
     "respx==0.23.1",
-    "ruff==0.16.10",
+    "ruff==0.17.5",
 ]
 
 [tool.pytest.ini_options]
