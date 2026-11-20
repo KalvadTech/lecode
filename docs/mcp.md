@@ -20,6 +20,51 @@ transport = "http"
 url = "https://mcp.context7.com/mcp"
 ```
 
+## Web research with Parallel
+
+To look up current library documentation or read web pages while coding, add
+[Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp)
+to your existing `~/.config/lecode/config.toml` (or the project's
+`.lecode/config.toml`). For a new file, put `schema_version = 2` on the first
+line, before any tables.
+
+```toml
+[mcp.servers.parallel]
+transport = "http"
+url = "https://search.parallel.ai/mcp"
+headers = { "User-Agent" = "lecode (https://github.com/KalvadTech/lecode)" }
+```
+
+No Parallel account, API key, or OAuth setup is needed. The anonymous tier
+provides free web search using Fast mode and page fetching for light use,
+with rate limits.
+
+Restart lecode after saving the config. Run `/mcp` to check that `parallel`
+is connected, then `/mcp tools parallel` to see `web_search` and `web_fetch`.
+lecode exposes them to the model as `mcp:parallel:web_search` and
+`mcp:parallel:web_fetch`. Try a prompt like:
+
+```text
+Use Parallel to find the current Python asyncio TaskGroup documentation.
+Fetch the official documentation page, summarize its cancellation behavior,
+and include the source URLs. Do not edit files.
+```
+
+The `parallel` server follows the normal MCP permission fallback: allowed
+in `yolo`, denied in `readonly`. To opt in to just these two tools in the
+`readonly` permission mode, add these rules to the same config:
+
+```toml
+[[permissions.rules.allow."mcp:parallel:web_search"]]
+pattern = "*"
+
+[[permissions.rules.allow."mcp:parallel:web_fetch"]]
+pattern = "*"
+```
+
+Existing deny rules and stricter agent restrictions still apply. Other
+servers and your model configuration are unchanged.
+
 ## Configured servers
 
 ```toml
