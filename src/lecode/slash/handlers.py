@@ -1183,7 +1183,9 @@ async def cmd_mcp(app: TuiApp, args: list[str]) -> None:
     lines = []
     for status in manager.status():
         if status.state == "connected":
-            lines.append(f"{status.name}: connected ({status.tools} tools)")
+            deferred = manager.deferred_count(status.name)
+            note = f", {deferred} deferred — tool_search to activate" if deferred else ""
+            lines.append(f"{status.name}: connected ({status.tools} tools{note})")
         elif status.state == "disabled":
             lines.append(f"{status.name}: disabled")
         elif status.state == "auth_required":

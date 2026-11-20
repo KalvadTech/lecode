@@ -20,6 +20,16 @@ transport = "http"
 url = "https://mcp.context7.com/mcp"
 ```
 
+## Deferred tools (tool_search)
+
+A server exposing many tools ships that many definitions in every model
+request. Past `[mcp] tool_search_threshold` (default 20), a server's tools
+stay **deferred**: they are not registered directly. Instead the model gets a
+single `tool_search` tool; calling it with a keyword activates the matches,
+and activated tools behave exactly like directly-registered ones for the rest
+of the session. `/mcp` shows how many tools are deferred per server. Set the
+threshold to 0 to always register everything directly.
+
 ## Configured servers
 
 ```toml
