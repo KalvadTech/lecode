@@ -53,8 +53,8 @@ async def _run_shell(
     shell: str | None = None,
     on_chunk: Callable[[bytes], None] | None = None,
     proc_slot: dict[str, Any] | None = None,
-) -> tuple[bytes, int, bool, bool]:
-    """Run a shell command; returns (output, exit_code, timed_out, idle_killed).
+) -> tuple[bytes, int, bool, bool, bool]:
+    """Run a shell command; see the return tuple described below.
 
     ``shell`` overrides the executable; the default is the user's shell
     (:func:`lecode.extras.shell.user_shell`). ``on_chunk`` (background tasks)
@@ -62,6 +62,9 @@ async def _run_shell(
     ``max_bytes`` (the tail), since the caller streams the full output
     elsewhere. ``proc_slot`` receives the spawned process under ``"proc"`` so
     the caller can signal it.
+
+    Returns ``(output, exit_code, timed_out, idle_killed, interrupted)``;
+    on cancellation the partial output is returned instead of raising.
     """
     proc = await asyncio.create_subprocess_exec(
         shell or user_shell(),
@@ -78,7 +81,7 @@ async def _run_shell(
     buffer = bytearray()
     deadline = time.monotonic() + timeout
     idle_deadline = time.monotonic() + idle_timeout
-    timed_out = idle_killed = aborted = False
+    timed_out = idle_killed = aborted = interrupted = False
 
     try:
         while True:
@@ -101,11 +104,14 @@ async def _run_shell(
                 if len(buffer) > max_bytes:
                     del buffer[: len(buffer) - max_bytes]
             idle_deadline = time.monotonic() + idle_timeout
+    except asyncio.CancelledError:
+        # User interrupt: keep whatever was printed so far (partial result).
+        interrupted = True
     except BaseException:
         aborted = True
         raise
     finally:
-        if aborted or timed_out or idle_killed:
+        if aborted or interrupted or timed_out or idle_killed:
             _kill_tree(proc)
             with contextlib.suppress(TimeoutError, asyncio.CancelledError):
                 async with asyncio.timeout(5.0):
@@ -118,10 +124,10 @@ async def _run_shell(
                         pass
                     await proc.wait()
 
-    with contextlib.suppress(TimeoutError):
+    with contextlib.suppress(TimeoutError, asyncio.CancelledError):
         await asyncio.wait_for(proc.wait(), timeout=5.0)
     exit_code = proc.returncode if proc.returncode is not None else -1
-    return bytes(buffer), exit_code, timed_out, idle_killed
+    return bytes(buffer), exit_code, timed_out, idle_killed, interrupted
 
 
 def _save_overflow(output: BinaryIO) -> tuple[Path, str, str]:
@@ -209,7 +215,7 @@ class BashTool(Tool):
             return ToolResult(f"background task {record.id} started: {command}")
         try:
             with tempfile.SpooledTemporaryFile(max_size=MAX_OUTPUT_BYTES) as output:
-                _, exit_code, timed_out, idle_killed = await _run_shell(
+                _, exit_code, timed_out, idle_killed, interrupted = await _run_shell(
                     command,
                     ctx.cwd,
                     timeout,
@@ -233,16 +239,18 @@ class BashTool(Tool):
             return ToolResult(f"error: {e}", is_error=True)
 
         notes: list[str] = []
+        if interrupted:
+            notes.append("interrupted, partial output")
         if timed_out:
             notes.append(f"timed out after {timeout}s")
         if idle_killed:
             notes.append(f"killed: no output for {idle}s")
-        if exit_code != 0:
+        if exit_code != 0 and not interrupted:
             notes.append(f"exit code {exit_code}")
         suffix = f"\n[{'; '.join(notes)}]" if notes else ""
         return ToolResult(
             (text.rstrip("\n") or "(no output)") + suffix,
-            is_error=timed_out or idle_killed or exit_code != 0,
+            is_error=interrupted or timed_out or idle_killed or exit_code != 0,
             metadata={
                 "proc_result": ProcResult(
                     exit_code=exit_code,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import shlex
 import stat
@@ -196,11 +195,24 @@ async def test_cancel_kills_child(tool_ctx):
     task = asyncio.ensure_future(tool.run({"command": "sleep 30"}, tool_ctx))
     await asyncio.sleep(0.2)
     task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
+    result = await task
+    assert result.is_error
+    assert "interrupted, partial output" in result.content
     out = subprocess.run(["pgrep", "-f", "sleep 30"], capture_output=True).stdout
     assert out == b"", subprocess.run(
         ["ps", "-p", ",".join(out.decode().split()), "-o", "pid,ppid,pgid,state,command"],
         capture_output=True,
         text=True,
     ).stdout
+
+
+async def test_cancel_keeps_partial_output(tool_ctx):
+    """Interrupting a command keeps what it printed, marked as partial."""
+    tool = bash.make_tool()
+    task = asyncio.ensure_future(tool.run({"command": "echo part1; sleep 30"}, tool_ctx))
+    await asyncio.sleep(0.5)
+    task.cancel()
+    result = await task
+    assert result.is_error
+    assert "part1" in result.content
+    assert "interrupted, partial output" in result.content
