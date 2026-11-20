@@ -191,6 +191,9 @@ class McpConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     servers: dict[str, McpServerConfig] = Field(default_factory=dict)
+    #: Defer servers exposing more tools than this behind ``tool_search``
+    #: (their definitions leave every request until activated); 0 disables.
+    tool_search_threshold: int = 20
 
 
 class LspServerOverride(BaseModel):

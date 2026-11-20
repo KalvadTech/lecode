@@ -6,7 +6,9 @@ isolated per server (one bad server never blocks the others or startup).
 Discovered tools are registered as lecode tools named ``mcp:<server>:<tool>``
 — the permission system treats servers named exa/context7/grep-app as
 read-equivalent, every other MCP tool falls back to the mode default (Allow
-in yolo, Deny in readonly).
+in yolo, Deny in readonly). Servers past ``[mcp] tool_search_threshold``
+keep their tools deferred behind the ``tool_search`` tool instead, so large
+servers stop paying their definitions on every request.
 
 Servers come from ``[mcp.servers]`` in the config; there are no built-in
 servers. OAuth 2.1 for remote servers (``transport = "http"`` or ``"sse"``;
@@ -46,6 +48,9 @@ log = logging.getLogger(__name__)
 
 #: ``ctx.extras`` key under which the connected manager is installed.
 MCP_EXTRA = "mcp"
+
+#: The tool that searches and activates deferred MCP tools.
+TOOL_SEARCH_NAME = "tool_search"
 
 #: Per-server startup budget.
 CONNECT_TIMEOUT_S = 10.0
@@ -176,6 +181,9 @@ class McpManager:
         #: Async ``(text) -> None`` for user-facing OAuth progress lines.
         self._notify = notify
         self._servers: dict[str, _Server] = {}
+        #: Deferred tools (full ``mcp:<server>:<tool>`` name → definition),
+        #: activated on demand via the ``tool_search`` tool.
+        self._deferred: dict[str, McpToolDef] = {}
         self._registry: ToolRegistry | None = None
         self._closed = False
 
@@ -383,6 +391,8 @@ class McpManager:
 
         Called after every (re)connect and after logout. ``None`` covers the
         initial attach; a server name covers one-server reconnect/auth.
+        Servers past ``tool_search_threshold`` defer their tools behind the
+        ``tool_search`` tool instead of registering them directly.
         """
         if self._registry is None:
             return
@@ -390,11 +400,77 @@ class McpManager:
         prefixes = tuple(f"mcp:{sn}:" for sn in affected)
         wrappers = self.tool_wrappers(name)
         wanted = {tool.name for tool in wrappers}
+        threshold = self._config.mcp.tool_search_threshold
+        for server_name in affected:
+            server = self._servers[server_name]
+            prefix = f"mcp:{server_name}:"
+            deferred_here = {full for full in self._deferred if full.startswith(prefix)}
+            qualifies = (
+                threshold > 0 and server.session is not None and len(server.tools) > threshold
+            )
+            if not qualifies:
+                for full in deferred_here:
+                    del self._deferred[full]
+                continue
+            current = {f"{prefix}{tool.name}": tool for tool in server.tools}
+            for full in deferred_here - set(current):
+                del self._deferred[full]  # the server dropped the tool
+            for full, tooldef in current.items():
+                if full not in self._deferred and self._registry.get(full) is None:
+                    self._deferred[full] = tooldef
+            activated = set(current) - set(self._deferred)
+            wanted -= set(current) - activated
         for existing in self._registry.names():
             if existing.startswith(prefixes) and existing not in wanted:
                 self._registry.unregister(existing)
         for wrapper in wrappers:
+            if wrapper.name in wanted:
+                self._registry.register(wrapper)
+        self._sync_tool_search()
+
+    def _sync_tool_search(self) -> None:
+        """``tool_search`` exists exactly while deferred tools do."""
+        if self._registry is None:
+            return
+        if self._deferred:
+            self._registry.register(ToolSearchTool(self))
+        else:
+            self._registry.unregister(TOOL_SEARCH_NAME)
+
+    def deferred_count(self, server_name: str) -> int:
+        """How many of one server's tools sit behind ``tool_search``."""
+        prefix = f"mcp:{server_name}:"
+        return sum(1 for full in self._deferred if full.startswith(prefix))
+
+    def search_tools(self, query: str, *, limit: int = 8) -> list[tuple[str, McpToolDef]]:
+        """Deferred tools matching ``query`` (name hits first), as (full, def)."""
+        needle = query.lower().strip()
+        if not needle:
+            return []
+
+        def rank(item: tuple[str, McpToolDef]) -> int | None:
+            full, tooldef = item
+            if needle in tooldef.name.lower() or needle in full.lower():
+                return 0
+            if needle in (tooldef.description or "").lower():
+                return 1
+            return None
+
+        scored = [(r, item) for item in self._deferred.items() if (r := rank(item)) is not None]
+        scored.sort(key=lambda pair: (pair[0], pair[1][0]))
+        return [item for _, item in scored[:limit]]
+
+    def activate_tool(self, full_name: str) -> Tool | None:
+        """Move one deferred tool into the registry; ``None`` when unknown."""
+        tooldef = self._deferred.pop(full_name, None)
+        if tooldef is None:
+            return None
+        server_name = full_name.split(":", 2)[1]
+        wrapper = McpTool(self, server_name, tooldef)
+        if self._registry is not None:
             self._registry.register(wrapper)
+            self._sync_tool_search()
+        return wrapper
 
     async def call(self, server_name: str, tool_name: str, args: dict[str, Any]) -> ToolResult:
         """Call an MCP tool; one reconnect attempt on connection failure."""
@@ -613,6 +689,49 @@ class McpTool(Tool):
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return await self._manager.call(self._server_name, self._tool_name, args)
+
+
+class ToolSearchTool(Tool):
+    """Search deferred MCP tools and activate the matches for later turns."""
+
+    def __init__(self, manager: McpManager) -> None:
+        super().__init__(
+            name=TOOL_SEARCH_NAME,
+            description=(
+                "Search additional MCP tools that are not currently loaded, "
+                "by keyword over names and descriptions. Matches are "
+                "activated and become callable like any other tool. Use this "
+                "when a capability you expect seems to be missing."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keyword to match"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max matches to activate (default 8)",
+                    },
+                },
+                "required": ["query"],
+            },
+        )
+        self._manager = manager
+
+    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        import json
+
+        query = str(args.get("query", ""))
+        limit = min(20, int(args.get("limit") or 8))
+        lines: list[str] = []
+        for full, tooldef in self._manager.search_tools(query, limit=limit):
+            if self._manager.activate_tool(full) is None:
+                continue
+            schema = json.dumps(tooldef.input_schema or {"type": "object"})
+            description = (tooldef.description or "").strip() or "(no description)"
+            lines.append(f"activated {full} — {description}\n  parameters: {schema}")
+        if not lines:
+            return ToolResult("no deferred MCP tools match; refine the query")
+        return ToolResult("\n".join(lines) + "\n\nThese tools are now callable.")
 
 
 async def attach_mcp(

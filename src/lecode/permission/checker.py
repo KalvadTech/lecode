@@ -78,6 +78,7 @@ READ_TOOLS = frozenset(
         "find_files",
         "list_dir",
         "lsp_diagnostics",
+        "tool_search",  # only searches/activates deferred MCP tools
         "memory_read",
         "memory_recall",
         "memory_list",
