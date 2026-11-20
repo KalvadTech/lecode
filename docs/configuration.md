@@ -187,8 +187,8 @@ kind = "glob"   # "glob" (default) or "regex"
 ```
 
 Last match wins within a table; deny rules are unbypassable (even in `yolo`),
-and `ask` rules still prompt. Read-class tools (`read`, `grep`, `find_files`,
-`list_dir`, `lsp_diagnostics`, `memory_read`, `memory_search`,
+and `ask` rules still prompt. Read-class tools (`read`, `index`, `grep`,
+`find_files`, `list_dir`, `lsp_diagnostics`, `memory_read`, `memory_search`,
 `task`, and Exa/context7/grep.app MCP tools) are the only tools allowed in
 `readonly`. A 3rd identical consecutive call escalates Allow → Ask, the 4th
 is denied (doom-loop guard).

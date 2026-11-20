@@ -135,6 +135,7 @@ def test_yolo_allows_everything():
     ("tool", "args", "expected"),
     [
         ("read", {"path": "a.py"}, Decision.ALLOW),
+        ("index", {"path": "a.py"}, Decision.ALLOW),
         ("grep", {"pattern": "x"}, Decision.ALLOW),
         ("find_files", {"pattern": "*.py"}, Decision.ALLOW),
         ("list_dir", {"path": "."}, Decision.ALLOW),

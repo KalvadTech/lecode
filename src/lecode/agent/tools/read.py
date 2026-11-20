@@ -44,7 +44,9 @@ class ReadTool(Tool):
             name="read",
             description=(
                 "Read a file with line numbers. Paginate with offset/limit; "
-                "set with_anchors for CRC line anchors usable by the edit tool."
+                "for large source files, call index first to find the right "
+                "ranges. Set with_anchors for CRC line anchors usable by the "
+                "edit tool."
             ),
             parameters={
                 "type": "object",
