@@ -21,6 +21,7 @@ def test_openai_tool_specs_shape(registry):
     names = {s["function"]["name"] for s in specs}
     assert names == {
         "read",
+        "index",
         "write",
         "edit",
         "bash",

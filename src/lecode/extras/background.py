@@ -310,7 +310,7 @@ def start_shell_task(
     proc_slot: dict[str, Any] = {}
 
     async def body(emit: Emit) -> tuple[str, int | None]:
-        output, exit_code, timed_out, idle_killed = await _run_shell(
+        output, exit_code, timed_out, idle_killed, interrupted = await _run_shell(
             command,
             cwd,
             timeout,
@@ -321,11 +321,13 @@ def start_shell_task(
         )
         text = output.decode("utf-8", errors="replace").rstrip("\n") or "(no output)"
         notes: list[str] = []
+        if interrupted:
+            notes.append("interrupted, partial output")
         if timed_out:
             notes.append(f"timed out after {timeout}s")
         if idle_killed:
             notes.append(f"killed: no output for {idle_timeout}s")
-        if exit_code != 0 and not (timed_out or idle_killed):
+        if exit_code != 0 and not (timed_out or idle_killed or interrupted):
             notes.append(f"exit code {exit_code}")
         if notes:
             text += f"\n[{'; '.join(notes)}]"

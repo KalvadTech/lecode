@@ -6,7 +6,7 @@ from lecode.agent.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
 
 
 def core_tools() -> list[Tool]:
-    """The thirteen core tools."""
+    """The core tools: file ops, shell, search, planning, background tasks."""
     from lecode.agent.tools import (
         ask_user,
         background,
@@ -14,6 +14,7 @@ def core_tools() -> list[Tool]:
         edit,
         find_files,
         grep,
+        index,
         list_dir,
         read,
         todo_write,
@@ -21,6 +22,7 @@ def core_tools() -> list[Tool]:
     )
 
     return [
+        index.make_tool(),
         read.make_tool(),
         write.make_tool(),
         edit.make_tool(),
