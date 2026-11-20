@@ -23,7 +23,7 @@ just your terminal, an OpenAI-compatible model, and a sharp set of tools.
 │  – skills       none                                                   │
 │  ✓ agents       primaries: build, plan · custom: researcher            │
 │  ✓ memory       long-term 2.4 KB injected                              │
-│  ✓ tools        19 tools                                               │
+│  ✓ tools        20 tools                                               │
 │  ✓ permissions  mode yolo · custom rules                               │
 │  – hooks        none configured                                        │
 │  – pierre       off                                                    │

@@ -73,6 +73,7 @@ ApprovalDecision = AllowOnce | AllowAlways | Deny
 READ_TOOLS = frozenset(
     {
         "read",
+        "index",
         "grep",
         "find_files",
         "list_dir",
