@@ -435,6 +435,14 @@ def _patch_doctor_provider(monkeypatch, origin="live", count=2):
     )
 
 
+async def test_doctor_says_lsp_is_off_without_project_config(tmp_path, monkeypatch):
+    _patch_doctor_provider(monkeypatch)
+    monkeypatch.setenv("LECODE_NO_PROJECT_CONFIG", "1")
+    app, _, out = make_app(tmp_path, monkeypatch, [])
+    await app.handle_command("/doctor")
+    assert "lsp: off under --no-project-config" in out.getvalue()
+
+
 async def test_doctor_all_sections(tmp_path, monkeypatch):
     """Every section renders with a mark; a healthy setup ends in 'all good'."""
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

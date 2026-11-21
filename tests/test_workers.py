@@ -2343,3 +2343,27 @@ async def test_independent_maintenance_cannot_borrow_running_supervisor(workflow
         assert not manager._maintenance
     finally:
         release.set()
+
+
+@pytest.mark.asyncio
+async def test_workers_of_a_safe_session_start_no_language_server_manager(tmp_path, monkeypatch):
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "skills"))
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    config = Config()
+    config.memory.enabled = False
+    config.pierre.enabled = False
+    store = SessionStore(tmp_path / "config")
+    session = store.create("main", cwd)
+    runtime = build_runtime(config, cwd, session=session, store=store, read_only=True)
+    runtime.ctx.extras["provider"] = FakeProvider([{"text": "done"}])
+    manager = WorkerManager(config, cwd=cwd, root_ctx=runtime.ctx)
+    runtime.ctx.extras["workers"] = manager
+    worker = await manager.start(runtime.ctx, agent="explore", prompt="look around")
+    try:
+        await manager.wait(worker.id)
+        assert manager._runtime(worker).ctx.extras.get("lsp") is None
+    finally:
+        await manager.shutdown()

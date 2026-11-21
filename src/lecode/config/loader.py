@@ -5,6 +5,12 @@ Global config lives in ``~/.config/lecode/`` (overridable with the
 TOML (``config.toml``). A project-local ``.lecode/config.toml`` (nearest,
 found by walking from the cwd up to the git root) is deep-merged over the
 global config: dicts merge recursively, scalars and lists replace.
+
+Setting ``LECODE_NO_PROJECT_CONFIG`` (or passing ``--no-project-config``)
+disables every repository-supplied layer: the project config, project agents,
+project skills, and project prompt overrides. Use it when lecode runs on a
+repository it should not trust, such as a pull request under review or a CI
+checkout.
 """
 
 from __future__ import annotations
@@ -12,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,9 +27,15 @@ from pydantic import BaseModel
 
 from lecode.config.migrations import migrate_config
 from lecode.config.models import LEGACY_PERMISSION_MODES, Config
+from lecode.context.agents_md import find_git_root
 
 #: Environment variable overriding the global config directory.
 CONFIG_ENV_VAR = "LECODE_CONFIG_DIR"
+
+#: Environment variable that, when truthy, ignores every repository-supplied layer.
+NO_PROJECT_CONFIG_ENV_VAR = "LECODE_NO_PROJECT_CONFIG"
+
+_FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
 
 #: The only accepted config file name (TOML only).
 CONFIG_FILENAME = "config.toml"
@@ -82,12 +95,45 @@ def _load_raw(path: Path) -> dict[str, Any]:
     return data
 
 
-def _find_git_root(start: Path) -> Path | None:
-    """Walk up from ``start`` to the nearest directory containing ``.git``."""
+def project_config_enabled() -> bool:
+    """Whether repository-supplied config layers may load (``LECODE_NO_PROJECT_CONFIG``)."""
+    return os.environ.get(NO_PROJECT_CONFIG_ENV_VAR, "").strip().lower() in _FALSE_VALUES
+
+
+def lsp_off_reason(config: Config, *, read_only: bool) -> str | None:
+    """Why no language server runs, or ``None`` when one may start.
+
+    A language server can run repository code (build scripts, workspace
+    interpreters), so ``--safe`` and ``--no-project-config`` keep it off.
+    """
+    if not config.lsp.enabled:
+        return "disabled"
+    if read_only:
+        return "off under --safe"
+    if not project_config_enabled():
+        return "off under --no-project-config"
+    return None
+
+
+def find_project_path(
+    start: Path, relative: str, accept: Callable[[Path], bool] = Path.is_dir
+) -> Path | None:
+    """Nearest ``relative`` path that ``accept`` admits, from ``start`` up to the git root.
+
+    Always ``None`` while project config is disabled, so every repository
+    layer goes through this one gate.
+    """
+    if not project_config_enabled():
+        return None
+    root = find_git_root(start)
     current = start.resolve()
+    stop = root if root is not None else current
     while True:
-        if (current / ".git").exists():
-            return current
+        candidate = current / relative
+        if accept(candidate):
+            return candidate
+        if current == stop:
+            return None
         parent = current.parent
         if parent == current:
             return None
@@ -96,19 +142,7 @@ def _find_git_root(start: Path) -> Path | None:
 
 def find_project_config(start: Path) -> Path | None:
     """Return the nearest ``.lecode/config.toml`` from ``start`` up to the git root."""
-    root = _find_git_root(start)
-    current = start.resolve()
-    stop = root if root is not None else current
-    while True:
-        found = find_config_file(current / ".lecode")
-        if found is not None:
-            return found
-        if current == stop:
-            return None
-        parent = current.parent
-        if parent == current:
-            return None
-        current = parent
+    return find_project_path(start, f".lecode/{CONFIG_FILENAME}", Path.is_file)
 
 
 def deep_merge(base: Any, override: Any) -> Any:

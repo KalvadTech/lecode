@@ -104,7 +104,6 @@ from lecode.permission import (
     AllowOnce,
     ApprovalDecision,
     Deny,
-    PermissionChecker,
     target_of,
 )
 from lecode.providers.openai_compat import ProviderError
@@ -826,8 +825,8 @@ class TuiApp:
     def set_cwd(self, path: Path) -> None:
         """Repoint ctx, permission checker, completers and statusline at ``path``.
 
-        Used by worktree enter/exit; session perms and the permission mode
-        carry over (a fresh checker, doom tracking resets).
+        Used by worktree enter/exit; the whole permission policy carries over,
+        including --safe (a fresh checker, doom tracking resets).
         """
         path = Path(path)
         self._cwd = path
@@ -838,12 +837,7 @@ class TuiApp:
             if self._worktree is not None and path.resolve() == self._worktree.path.resolve()
             else str(path.resolve())
         )
-        base = PermissionChecker(
-            self._config,
-            session_perms=ctx.session_perms,
-            mode=self._base_checker.mode,
-            cwd=path,
-        )
+        base = self._base_checker.for_cwd(path)
         self._base_checker = base
         agent = self._runtime.agents.get(self._agent_name)
         ctx.permission_checker = (

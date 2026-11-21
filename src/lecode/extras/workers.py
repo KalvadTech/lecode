@@ -517,6 +517,7 @@ class WorkerManager:
                 allowed_tools=parent.extras["registry"].names(),
                 catalog=parent.catalog,
                 worker_manager=self,
+                read_only=parent.permission_checker.hard_read_only,
             )
             runtime.ctx.permission_checker = parent.permission_checker.for_child(
                 definition.overlay,

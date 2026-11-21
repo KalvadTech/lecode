@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING
 
 from lecode.agent.prompts import build_system_prompt
 from lecode.agent.tools import ToolContext, ToolRegistry, core_tools
-from lecode.config.models import Config, PermissionMode
+from lecode.config.loader import lsp_off_reason
+from lecode.config.models import Config
 from lecode.context.agents import AgentRegistry, load_agents
 from lecode.context.skills import SkillRegistry, load_skills
 from lecode.extras.background import BACKGROUND_EXTRA, BackgroundTaskManager
@@ -101,7 +102,7 @@ def build_runtime(
     session: Session | None = None,
     store: SessionStore | None = None,
     auto_approve: bool = False,
-    mode: PermissionMode | None = None,
+    read_only: bool = False,
     allowed_tools: list[str] | None = None,
     agent_name: str | None = "build",
     agent_registry: AgentRegistry | None = None,
@@ -113,8 +114,11 @@ def build_runtime(
 ) -> Runtime:
     """Build the permission checker, tool context, registry, and system prompt.
 
-    ``mode`` overrides the configured permission mode (e.g. ``--safe``);
-    ``allowed_tools`` filters the core tool registry (``--allowed-tools``).
+    ``read_only`` (``--safe``) makes the checker hard read-only: no allow
+    rule, session grant, agent overlay or mode switch can widen it, and no
+    language server starts, since one can run repository code.
+    ``allowed_tools`` (``--allowed-tools``) limits the registry for its whole
+    life, so tools registered later (MCP) are filtered too.
     ``agent_name`` selects a custom agent: its overlay narrows the permission
     checker and its prompt body is prepended to the system prompt (before the
     skills listing). Unknown agent names are ignored (fail-open).
@@ -125,7 +129,13 @@ def build_runtime(
     """
     grants = store.load_grants(session) if session is not None and store is not None else None
     session_perms = SessionPermissions(grants)
-    checker = PermissionChecker(config, session_perms=session_perms, mode=mode, cwd=cwd)
+    checker = PermissionChecker(
+        config,
+        session_perms=session_perms,
+        mode="readonly" if read_only else None,
+        cwd=cwd,
+        read_only=read_only,
+    )
     warnings: list[str] = []
 
     agents = agent_registry or load_agents(cwd)
@@ -174,17 +184,14 @@ def build_runtime(
         if store is not None:
             store.bind_facts(effective_root, ctx.extras["facts"])
         tools += memory_tools()
-    if config.lsp.enabled:
+    if lsp_off_reason(config, read_only=read_only) is None:
         from lecode.lsp.manager import LspManager
         from lecode.lsp.tool import LSP_EXTRA
         from lecode.lsp.tool import make_tool as lsp_tool
 
         ctx.extras[LSP_EXTRA] = LspManager(config, Path(cwd))
         tools.append(lsp_tool())
-    if allowed_tools is not None:
-        keep = set(allowed_tools)
-        tools = [tool for tool in tools if tool.name in keep]
-    registry = ToolRegistry(tools)
+    registry = ToolRegistry(tools, allowed=allowed_tools)
 
     # Lifecycle hooks decorate every tool at build time (they can only narrow).
     hooks, hook_warnings = dispatcher_from_config(config, cwd, session=session)

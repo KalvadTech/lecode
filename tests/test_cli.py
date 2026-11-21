@@ -174,3 +174,18 @@ def _fake_missing():
     from lecode.deps import MissingBinary
 
     return [MissingBinary(name="fd", install_hint="brew install fd")]
+
+
+@pytest.mark.parametrize("mode", [[], ["-p", "hello"]])
+def test_safe_refuses_to_create_a_worktree(tmp_path, monkeypatch, mode):
+    from tests.test_worktree import git_sync, make_repo_sync
+
+    make_repo_sync(tmp_path)
+    worktrees = git_sync(tmp_path, "worktree", "list")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr("lecode.cli.find_missing_binaries", lambda: [])
+    result = runner.invoke(app, [*mode, "--safe", "--worktree", "feat"])
+    assert result.exit_code == EXIT_STARTUP, result.output
+    assert "--worktree is refused under --safe" in result.output
+    assert git_sync(tmp_path, "worktree", "list") == worktrees

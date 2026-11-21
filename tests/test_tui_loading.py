@@ -79,6 +79,17 @@ def test_report_covers_all_subsystems(env):
     ]
 
 
+def _lsp_row(steps):
+    return next(step for step in steps if step.label == "lsp")
+
+
+def test_lsp_row_says_why_it_is_off(env, monkeypatch):
+    assert _lsp_row(_make(env)[0]).detail == "enabled"
+    assert _lsp_row(_make(env, read_only=True)[0]).detail == "off under --safe"
+    monkeypatch.setenv("LECODE_NO_PROJECT_CONFIG", "1")
+    assert _lsp_row(_make(env)[0]).detail == "off under --no-project-config"
+
+
 def test_memory_report_uses_runtime_project_root(env):
     _, session, store, runtime, loaded, spec = _make(env)
     runtime.ctx.extras["memory"].write_long_term("durable project notes")

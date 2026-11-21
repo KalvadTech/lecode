@@ -25,7 +25,7 @@ from lecode.tui.app import QUEUE_LIMIT, TuiApp
 from lecode.tui.statusline import StatusLineState
 
 
-def make_app(tmp_path, monkeypatch, script, config=None):
+def make_app(tmp_path, monkeypatch, script, config=None, read_only=False):
     """A TuiApp over a FakeProvider with a recorded console."""
     monkeypatch.setenv("LECODE_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("LECODE_SKILLS_DIR", str(tmp_path / "global-skills"))
@@ -34,7 +34,7 @@ def make_app(tmp_path, monkeypatch, script, config=None):
     config.notifications.enabled = False  # never play sounds in tests
     store = SessionStore()
     session = store.create("test-session", tmp_path, model=config.llm.model)
-    runtime = build_runtime(config, tmp_path, session=session, store=store)
+    runtime = build_runtime(config, tmp_path, session=session, store=store, read_only=read_only)
     provider = FakeProvider(script)
     out = StringIO()
     console = Console(record=True, file=out, width=200)

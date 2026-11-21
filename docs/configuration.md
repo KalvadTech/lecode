@@ -7,7 +7,9 @@ lecode reads TOML config only (`config.toml`):
   on first run.
 - **Project**: `.lecode/config.toml`, found by walking from the cwd up to
   the git root. Deep-merged over the global config: dicts merge recursively,
-  scalars and lists replace.
+  scalars and lists replace. `--no-project-config` or
+  `LECODE_NO_PROJECT_CONFIG=1` skips it, together with project agents,
+  skills and prompts (see [Untrusted repositories](cli.md#untrusted-repositories)).
 - **CLI flags** apply on top of both (`--model`, `--thinking`, `--header`, `--provider`, `--base-url`,
   `--api-key`, …).
 
@@ -238,6 +240,9 @@ See [mcp.md](mcp.md).
 | field | default | meaning |
 |---|---|---|
 | `enabled` | `true` | spawn language servers, append diagnostics to write/edit |
+
+Language servers stay off under `--safe` and `--no-project-config`, because a
+server can run code from the repository it analyses.
 
 `[lsp.servers.<lang>]` overrides the built-in registry (`command`,
 `file_patterns`) or defines a new language. Diagnostics are fail-open: LSP
